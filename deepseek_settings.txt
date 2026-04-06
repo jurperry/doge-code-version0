@@ -1,0 +1,20 @@
+api_key:sk-25bb3b9f1a7f4002bfed437be7ce8ada
+
+# 每次开启的时候, 请你自己设置好环境变量, 不然就会强制你进去登录验证
+# 注意好设置
+
+# 设置正确的环境变量
+# 清除环境变量
+Remove-Item Env:\ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue 
+Remove-Item Env:\ANTHROPIC_MODEL -ErrorAction SilentlyContinue
+Remove-Item Env:\DOGE_API_KEY -ErrorAction SilentlyContinue
+# 使用新的环境变量
+$env:ANTHROPIC_BASE_URL = "https://api.deepseek.com"
+$env:DOGE_API_KEY = "sk-25bb3b9f1a7f4002bfed437be7ce8ada"
+$env:ANTHROPIC_MODEL = "deepseek-chat"
+$env:CLAUDE_CODE_COMPATIBLE_API_PROVIDER = "openai"
+
+# 启动
+doge or bun run dev
+# 切换模型记得改.claude.json的配置
+# 把/add_model的删除掉

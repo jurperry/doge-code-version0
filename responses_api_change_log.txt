@@ -1,0 +1,100 @@
+Responses API compatibility changes
+=================================
+
+Date: 2026-04-03
+
+Summary
+-------
+Added a new compatibility mode for providers that expose an OpenAI-style /v1/responses API, while keeping the existing Anthropic-native path and the existing OpenAI Chat Completions compatibility path intact.
+
+Files changed
+-------------
+1. src/services/api/responsesCompat.ts
+   - New compatibility adapter for /v1/responses.
+   - Added request conversion from Anthropic-style message params into a Responses-style payload.
+   - Added raw streaming POST to /v1/responses.
+   - Added SSE/event translation from Responses events back into Anthropic BetaRawMessageStreamEvent format used by the rest of doge-code.
+
+2. src/services/api/claude.ts
+   - Added imports for the new responses compatibility adapter.
+   - Extended the compat-provider branch so it now supports:
+     - openai
+     - responses
+   - Added a responses-specific verification path in verifyApiKey() so the UI can verify keys against /v1/responses providers instead of always using the Anthropic SDK messages endpoint.
+
+3. src/services/api/openaiCompat.ts
+   - Exported shared helpers used by the new responses adapter:
+     - joinBaseUrl()
+     - contentToText()
+     - toBlocks()
+
+4. src/services/api/client.ts
+   - Extended getGlobalCompatProvider() so CLAUDE_CODE_COMPATIBLE_API_PROVIDER now recognizes:
+     - openai
+     - responses
+   - Unknown values still fall back to anthropic.
+
+5. src/utils/customApiStorage.ts
+   - Extended persisted custom API provider type to allow:
+     - anthropic
+     - openai
+     - responses
+
+6. src/utils/config.ts
+   - Extended GlobalConfig.customApiEndpoint.provider to allow:
+     - anthropic
+     - openai
+     - responses
+
+7. src/utils/auth.ts
+   - Updated custom provider resolution to treat responses as a valid compatibility provider.
+   - This preserves the existing bypass-login behavior for third-party/custom endpoints that use DOGE_API_KEY + ANTHROPIC_BASE_URL.
+
+How routing works now
+---------------------
+- anthropic:
+  Uses the existing Anthropic SDK / messages flow.
+
+- openai:
+  Uses the existing OpenAI Chat Completions compatibility flow:
+  POST /v1/chat/completions
+
+- responses:
+  Uses the new Responses compatibility flow:
+  POST /v1/responses
+
+Recommended environment variables
+---------------------------------
+For a Responses-compatible provider:
+
+  ANTHROPIC_BASE_URL=https://your-gateway.example
+  DOGE_API_KEY=your-api-key
+  ANTHROPIC_MODEL=your-model-name
+  CLAUDE_CODE_COMPATIBLE_API_PROVIDER=responses
+
+Examples:
+- If your provider exposes a custom model name like "claude-code", it can be passed through via ANTHROPIC_MODEL.
+- If availableModels is configured in settings, that allowlist must still permit the chosen model name.
+
+Behavior notes
+--------------
+- The new adapter keeps the current project architecture: Anthropic request params are converted into a provider-specific wire format, then provider streaming events are translated back into Anthropic-style stream events.
+- Tool call JSON is still streamed back as input_json_delta partial strings so downstream doge-code logic can keep using its existing parsing/normalization path.
+- The implementation aims to be conservative and close to the current OpenAI compat layer instead of adding a broad refactor.
+
+Current limitations / assumptions
+---------------------------------
+- The /v1/responses streaming event shapes vary a bit across gateways. The adapter currently handles the common event patterns it was designed for, especially:
+  - response.output_text.delta
+  - response.output_item.added
+  - response.function_call_arguments.delta
+  - response.output_item.done
+  - response.completed / response.incomplete / response.failed
+- If a gateway emits a significantly different Responses event schema, the adapter may need another small round of event-shape adjustments.
+- Build/typecheck in this repo is currently blocked by pre-existing environment/tooling issues unrelated to this change:
+  - TypeScript cannot find bun type definitions
+  - tsconfig reports deprecated baseUrl behavior under the installed TypeScript version
+
+What this enables
+-----------------
+You can now keep the existing OpenAI compat mode for /v1/chat/completions providers, and separately select a new responses compat mode for /v1/responses providers without pretending they are Anthropic-native or Chat-Completions-native.

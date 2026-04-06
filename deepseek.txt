@@ -1,0 +1,60 @@
+# DeepSeek API 集成指南
+
+## 已修复的问题
+
+### 1. 500 No matched path found 错误
+- **问题原因**：应用程序错误地使用了 OpenAI 的标准端点路径 `/v1/chat/completions`，
+但 DeepSeek API 使用的是 `/chat/completions`（没有 `/v1` 前缀）, 直接使用https://api.deepseek.com
+
+### 2. Invalid max_tokens value 错误
+- **问题原因**：应用程序默认设置的 `max_tokens` 值为 32,000，但 DeepSeek API 只支持最多 8,192 个 tokens
+- **解决方案**：在 `openaiCompat.ts` 中添加了逻辑来检测 DeepSeek API 并自动将 `max_tokens` 限制为 8,192
+- **修改文件**：`src/services/api/openaiCompat.ts`
+
+## 使用方法
+
+### 设置环境变量
+在运行应用程序之前，需要设置以下环境变量：
+
+```powershell
+# Windows PowerShell
+Remove-Item Env:\ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
+$env:ANTHROPIC_BASE_URL = "https://api.deepseek.com"
+$env:DOGE_API_KEY = "sk-25bb3b9f1a7f4002bfed437be7ce8ada"
+$env:ANTHROPIC_MODEL = "deepseek-chat"
+$env:CLAUDE_CODE_COMPATIBLE_API_PROVIDER = "openai"
+```
+
+### 运行应用程序
+```powershell
+bun run dev
+```
+
+### 测试 API 连接
+在应用程序启动后，输入以下命令测试 DeepSeek API 连接：
+```
+> hello, introduce yourself!
+```
+
+## 技术细节
+
+### 路径处理
+- OpenAI 兼容 API：使用 `/v1/chat/completions` 路径
+
+### Token 限制
+- DeepSeek API 最大支持 8,192 tokens(支持上下文128k, 输出的下文长度最大为8192tokens)
+- 应用程序会自动将超过此限制的 `max_tokens` 值调整为 8,192
+
+### 认证
+- 使用 `DOGE_API_KEY` 环境变量提供 DeepSeek API 密钥
+- 应用程序会自动使用此密钥进行认证
+
+## 故障排除
+
+### 常见错误
+- **500 No matched path found**：路径错误，确保使用了正确的 baseURL
+- **Invalid max_tokens value**：token 限制错误，应用程序会自动处理此问题
+- **API Error: Unauthorized**：API 密钥错误，确保 `DOGE_API_KEY` 环境变量设置正确
+
+### 调试
+如果遇到问题，可以检查应用程序的日志输出，查看详细的错误信息。

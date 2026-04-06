@@ -1,0 +1,12 @@
+# 对于claude-code而言也是可以直接使用滴
+# 清除环境变量
+Remove-Item Env:\ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue 
+Remove-Item Env:\ANTHROPIC_MODEL -ErrorAction SilentlyContinue
+Remove-Item Env:\DOGE_API_KEY -ErrorAction SilentlyContinue
+
+# 环境变量替换
+$env:ANTHROPIC_BASE_URL = "https://api.v3.cm"
+$env:DOGE_API_KEY = "sk-cmqdc6PcHNTnUBKd94605b78B06e439dAb81C52d9cCb02Ce"
+$env:ANTHROPIC_MODEL = "claude-sonnet-4-6"
+$env:CLAUDE_CODE_COMPATIBLE_API_PROVIDER = "anthropic"
+
