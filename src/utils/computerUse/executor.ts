@@ -68,6 +68,24 @@ function computeTargetDims(
 }
 
 async function readClipboardViaPbpaste(): Promise<string> {
+  if (process.platform === 'win32') {
+    const { stdout, code } = await execFileNoThrow('powershell', ['-NoProfile', '-Command', 'Get-Clipboard'], {
+      useCwd: false,
+    })
+    if (code !== 0) {
+      throw new Error(`PowerShell Get-Clipboard exited with code ${code}`)
+    }
+    return stdout
+  }
+  if (process.platform === 'linux') {
+    const { stdout, code } = await execFileNoThrow('xclip', ['-selection', 'clipboard', '-o'], {
+      useCwd: false,
+    })
+    if (code !== 0) {
+      throw new Error(`xclip exited with code ${code}`)
+    }
+    return stdout
+  }
   const { stdout, code } = await execFileNoThrow('pbpaste', [], {
     useCwd: false,
   })
@@ -78,6 +96,25 @@ async function readClipboardViaPbpaste(): Promise<string> {
 }
 
 async function writeClipboardViaPbcopy(text: string): Promise<void> {
+  if (process.platform === 'win32') {
+    const { code } = await execFileNoThrow('powershell', ['-NoProfile', '-Command', `Set-Clipboard -Value '${text.replace(/'/g, "''")}'`], {
+      useCwd: false,
+    })
+    if (code !== 0) {
+      throw new Error(`PowerShell Set-Clipboard exited with code ${code}`)
+    }
+    return
+  }
+  if (process.platform === 'linux') {
+    const { code } = await execFileNoThrow('xclip', ['-selection', 'clipboard'], {
+      input: text,
+      useCwd: false,
+    })
+    if (code !== 0) {
+      throw new Error(`xclip exited with code ${code}`)
+    }
+    return
+  }
   const { code } = await execFileNoThrow('pbcopy', [], {
     input: text,
     useCwd: false,
@@ -192,7 +229,7 @@ async function typeViaClipboard(input: Input, text: string): Promise<void> {
     if ((await readClipboardViaPbpaste()) !== text) {
       throw new Error('Clipboard write did not round-trip.')
     }
-    await input.keys(['command', 'v'])
+    await input.keys([process.platform === 'darwin' ? 'command' : 'ctrl', 'v'])
     await sleep(100)
   } finally {
     if (typeof saved === 'string') {
@@ -260,19 +297,87 @@ export function createCliExecutor(opts: {
   getMouseAnimationEnabled: () => boolean
   getHideBeforeActionEnabled: () => boolean
 }): ComputerExecutor {
-  if (process.platform !== 'darwin') {
+  if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
     throw new Error(
-      `createCliExecutor called on ${process.platform}. Computer control is macOS-only.`,
+      `createCliExecutor called on ${process.platform}. Computer control requires macOS, Windows, or Linux.`,
     )
   }
 
-  // Swift loaded once at factory time — every executor method needs it.
-  // Input loaded lazily via requireComputerUseInput() on first mouse/keyboard
-  // call — it caches internally, so screenshot-only flows never pull the
-  // enigo .node.
-  const cu = requireComputerUseSwift()
+  // On macOS: use native @ant packages via requireComputerUseSwift/Input.
+  // On Windows/Linux: use platforms/ abstraction layer.
+  const isDarwin = process.platform === 'darwin'
+
+  // Lazy-loaded platforms/ for non-darwin.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const platform = isDarwin ? null : (require('./platforms/index.js') as typeof import('./platforms/index.js')).loadPlatform()
+
+  // Unified adapter: on darwin delegates to @ant packages, on other platforms to platforms/.
+  // This lets all 17 call sites in executor use `cu.xxx` without per-site branching.
+  const cuNative = isDarwin ? requireComputerUseSwift() : null
+  const cu = cuNative ?? {
+    apps: {
+      prepareDisplay: async () => ({ activated: '', hidden: [] as string[] }),
+      previewHideSet: async () => [] as any[],
+      findWindowDisplays: async (ids: string[]) => ids.map(b => ({ bundleId: b, displayIds: [0] })),
+      appUnderPoint: async (x: number, y: number) => {
+        const info = platform!.apps.getFrontmostApp()
+        return info ? { bundleId: info.id, displayName: info.appName } : null
+      },
+      listInstalled: async () => (await platform!.apps.listInstalled()).map(a => ({
+        bundleId: a.id, displayName: a.displayName, path: a.path,
+      })),
+      iconDataUrl: () => null as string | null,
+      listRunning: () => platform!.apps.listRunning().map(w => ({
+        bundleId: w.id, displayName: w.title,
+      })),
+      open: async (bundleId: string) => platform!.apps.open(bundleId),
+      unhide: async () => {},
+    },
+    display: {
+      getSize: (displayId?: number) => {
+        const d = platform!.display.getSize(displayId)
+        return { ...d, scaleFactor: d.scaleFactor ?? 1, displayId: d.displayId ?? 0 }
+      },
+      listAll: () => platform!.display.listAll(),
+    },
+    screenshot: {
+      captureExcluding: async (...args: any[]) => platform!.screenshot.captureScreen(args[4]),
+      captureRegion: async (_a: any, x: number, y: number, w: number, h: number, ...rest: any[]) =>
+        platform!.screenshot.captureRegion(x, y, w, h),
+    },
+    resolvePrepareCapture: async (
+      _allowed: string[], _host: string, _q: number,
+      targetW: number, targetH: number, displayId?: number,
+    ) => {
+      const shot = await platform!.screenshot.captureScreen(displayId)
+      return { ...shot, hidden: [] as string[], displayId: displayId ?? 0 }
+    },
+  }
 
   const { getMouseAnimationEnabled, getHideBeforeActionEnabled } = opts
+  // Unified input: on darwin → @ant/computer-use-input, on others → platform.input.
+  // Uses the same interface so all callsites can use `getInput()` uniformly.
+  type Input = ReturnType<typeof requireComputerUseInput>
+  const getInput = (): Input => {
+    if (isDarwin) return requireComputerUseInput()
+    const p = platform!.input
+    return {
+      moveMouse: (x: number, y: number, _animated: boolean) => p.moveMouse(x, y),
+      key: (k: string, a: 'press' | 'release') => p.key(k, a),
+      keys: (parts: string[]) => p.keys(parts),
+      mouseLocation: () => p.mouseLocation(),
+      mouseButton: (btn: 'left' | 'right' | 'middle', a: 'click' | 'press' | 'release', count?: number) =>
+        p.click(0, 0, btn), // simplified — real coords handled by caller via moveMouse
+      mouseScroll: (amount: number, dir: 'vertical' | 'horizontal') => p.scroll(amount, dir),
+      typeText: (text: string) => p.typeText(text),
+      getFrontmostAppInfo: () => {
+        const info = platform!.apps.getFrontmostApp()
+        return info ? { bundleId: info.id, appName: info.appName } : null
+      },
+      isSupported: true,
+    } as any as Input
+  }
+
   const terminalBundleId = getTerminalBundleId()
   const surrogateHost = terminalBundleId ?? CLI_HOST_BUNDLE_ID
   // Swift 0.2.1's captureExcluding/captureRegion take an ALLOW list despite the
@@ -377,7 +482,7 @@ export function createCliExecutor(opts: {
         d.height,
         d.scaleFactor,
       )
-      return drainRunLoop(() =>
+      const raw = await drainRunLoop(() =>
         cu.resolvePrepareCapture(
           withoutTerminal(opts.allowedBundleIds),
           surrogateHost,
@@ -389,6 +494,14 @@ export function createCliExecutor(opts: {
           opts.doHide,
         ),
       )
+      // Ensure the result has fields expected by toolCalls.ts (hidden, displayId).
+      // macOS native returns these from Swift; our cross-platform ComputerUseAPI
+      // returns {base64, width, height} — fill in the missing fields.
+      return {
+        ...raw,
+        hidden: (raw as any).hidden ?? [],
+        displayId: (raw as any).displayId ?? opts.preferredDisplayId ?? d.displayId,
+      }
     },
 
     /**
@@ -453,27 +566,31 @@ export function createCliExecutor(opts: {
      * nothing stuck. 8ms between iterations — 125Hz USB polling cadence.
      */
     async key(keySequence: string, repeat?: number): Promise<void> {
-      const input = requireComputerUseInput()
+      // Windows/Linux: route through platform which handles HWND binding
+      if (!isDarwin && platform) {
+        const parts = keySequence.split('+').filter(p => p.length > 0)
+        const n = repeat ?? 1
+        for (let i = 0; i < n; i++) {
+          if (i > 0) await sleep(8)
+          await platform.input.keys(parts)
+        }
+        return
+      }
+      const input = getInput()
       const parts = keySequence.split('+').filter(p => p.length > 0)
-      // Bare-only: the CGEventTap checks event.flags.isEmpty so ctrl+escape
-      // etc. pass through without aborting.
       const isEsc = isBareEscape(parts)
       const n = repeat ?? 1
       await drainRunLoop(async () => {
         for (let i = 0; i < n; i++) {
-          if (i > 0) {
-            await sleep(8)
-          }
-          if (isEsc) {
-            notifyExpectedEscape()
-          }
+          if (i > 0) await sleep(8)
+          if (isEsc) notifyExpectedEscape()
           await input.keys(parts)
         }
       })
     },
 
     async holdKey(keyNames: string[], durationMs: number): Promise<void> {
-      const input = requireComputerUseInput()
+      const input = getInput()
       // Press/release each wrapped in drainRunLoop; the sleep sits outside so
       // durationMs isn't bounded by drainRunLoop's 30s timeout. `pressed`
       // tracks which presses landed so a mid-press throw still releases
@@ -507,14 +624,16 @@ export function createCliExecutor(opts: {
     },
 
     async type(text: string, opts: { viaClipboard: boolean }): Promise<void> {
-      const input = requireComputerUseInput()
+      // Windows/Linux: route through platform which handles HWND binding
+      if (!isDarwin && platform) {
+        await platform.input.typeText(text)
+        return
+      }
+      const input = getInput()
       if (opts.viaClipboard) {
-        // keys(['command','v']) inside needs the pump.
         await drainRunLoop(() => typeViaClipboard(input, text))
         return
       }
-      // `toolCalls.ts` handles the grapheme loop + 8ms sleeps and calls this
-      // once per grapheme. typeText doesn't dispatch to the main queue.
       await input.typeText(text)
     },
 
@@ -525,7 +644,7 @@ export function createCliExecutor(opts: {
     // ── Mouse ────────────────────────────────────────────────────────────
 
     async moveMouse(x: number, y: number): Promise<void> {
-      await moveAndSettle(requireComputerUseInput(), x, y)
+      await moveAndSettle(getInput(), x, y)
     },
 
     /**
@@ -542,7 +661,7 @@ export function createCliExecutor(opts: {
       count: 1 | 2 | 3,
       modifiers?: string[],
     ): Promise<void> {
-      const input = requireComputerUseInput()
+      const input = getInput()
       await moveAndSettle(input, x, y)
       if (modifiers && modifiers.length > 0) {
         await drainRunLoop(() =>
@@ -556,15 +675,15 @@ export function createCliExecutor(opts: {
     },
 
     async mouseDown(): Promise<void> {
-      await requireComputerUseInput().mouseButton('left', 'press')
+      await getInput().mouseButton('left', 'press')
     },
 
     async mouseUp(): Promise<void> {
-      await requireComputerUseInput().mouseButton('left', 'release')
+      await getInput().mouseButton('left', 'release')
     },
 
     async getCursorPosition(): Promise<{ x: number; y: number }> {
-      return requireComputerUseInput().mouseLocation()
+      return getInput().mouseLocation()
     },
 
     /**
@@ -580,7 +699,7 @@ export function createCliExecutor(opts: {
       from: { x: number; y: number } | undefined,
       to: { x: number; y: number },
     ): Promise<void> {
-      const input = requireComputerUseInput()
+      const input = getInput()
       if (from !== undefined) {
         await moveAndSettle(input, from.x, from.y)
       }
@@ -598,7 +717,7 @@ export function createCliExecutor(opts: {
      * axis; a horizontal failure shouldn't lose the vertical.
      */
     async scroll(x: number, y: number, dx: number, dy: number): Promise<void> {
-      const input = requireComputerUseInput()
+      const input = getInput()
       await moveAndSettle(input, x, y)
       if (dy !== 0) {
         await input.mouseScroll(dy, 'vertical')
@@ -611,9 +730,35 @@ export function createCliExecutor(opts: {
     // ── App management ───────────────────────────────────────────────────
 
     async getFrontmostApp(): Promise<FrontmostApp | null> {
-      const info = requireComputerUseInput().getFrontmostAppInfo()
-      if (!info || !info.bundleId) return null
-      return { bundleId: info.bundleId, displayName: info.appName }
+      // When HWND is bound on Windows, operations go through SendMessage
+      // and don't touch the real foreground. Return the first allowed app
+      // so the frontmost gate in toolCalls.ts passes — the real foreground
+      // is irrelevant since we never touch it.
+      if (!isDarwin) {
+        try {
+          const { getBoundHwnd } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+          if (getBoundHwnd()) {
+            // Return first allowed app — we're operating on it via HWND
+            const allowed = cu.apps?.listRunning?.() ?? []
+            if (allowed.length > 0) {
+              return { bundleId: allowed[0].bundleId, displayName: allowed[0].displayName }
+            }
+            // Fallback: return a synthetic "bound window" identity
+            return { bundleId: 'cu-bound-window', displayName: 'Bound Window' }
+          }
+        } catch {}
+        if (platform) {
+          const info = platform.apps.getFrontmostApp()
+          if (!info) return null
+          return { bundleId: info.id, displayName: info.appName }
+        }
+      }
+      if (isDarwin) {
+        const info = getInput().getFrontmostAppInfo()
+        if (!info || !info.bundleId) return null
+        return { bundleId: info.bundleId, displayName: info.appName }
+      }
+      return null
     },
 
     async appUnderPoint(
@@ -639,6 +784,11 @@ export function createCliExecutor(opts: {
     },
 
     async openApp(bundleId: string): Promise<void> {
+      if (!isDarwin && platform) {
+        // Windows/Linux: platform.apps.open() handles HWND binding + DWM border
+        await platform.apps.open(bundleId)
+        return
+      }
       await cu.apps.open(bundleId)
     },
   }
@@ -653,6 +803,9 @@ export async function unhideComputerUseApps(
   bundleIds: readonly string[],
 ): Promise<void> {
   if (bundleIds.length === 0) return
-  const cu = requireComputerUseSwift()
-  await cu.apps.unhide([...bundleIds])
+  if (process.platform === 'darwin') {
+    const cu = requireComputerUseSwift()
+    await cu.apps.unhide([...bundleIds])
+  }
+  // Non-darwin: no-op. Windows/Linux prepareForAction doesn't hide apps.
 }

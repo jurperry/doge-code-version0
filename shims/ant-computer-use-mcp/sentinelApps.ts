@@ -1,3 +1,1 @@
-export function getSentinelCategory() {
-  return null
-}
+export * from '../../../packages/@ant/computer-use-mcp/src/sentinelApps.ts'

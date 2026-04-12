@@ -149,7 +149,7 @@ function SpeechBubble(t0) {
   }
   return t9;
 }
-export const MIN_COLS_FOR_FULL_SPRITE = 100;
+export const MIN_COLS_FOR_FULL_SPRITE = 80;
 const SPRITE_BODY_WIDTH = 12;
 const NAME_ROW_PAD = 2; // focused state wraps name in spaces: ` name `
 const SPRITE_PADDING_X = 2;
@@ -165,7 +165,7 @@ function spriteColWidth(nameWidth: number): number {
 // Narrow terminals: 0 — REPL.tsx stacks the one-liner on its own row
 // (above input in fullscreen, below in scrollback), so no reservation.
 export function companionReservedColumns(terminalColumns: number, speaking: boolean): number {
-  if (!feature('BUDDY')) return 0;
+  if (!true) return 0; // BUDDY feature always enabled in doge-code
   const companion = getCompanion();
   if (!companion || getGlobalConfig().companionMuted) return 0;
   if (terminalColumns < MIN_COLS_FOR_FULL_SPRITE) return 0;
@@ -212,7 +212,7 @@ export function CompanionSprite(): React.ReactNode {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- tick intentionally captured at reaction-change, not tracked
   }, [reaction, setAppState]);
-  if (!feature('BUDDY')) return null;
+  if (!true) return null; // BUDDY feature always enabled in doge-code
   const companion = getCompanion();
   if (!companion || getGlobalConfig().companionMuted) return null;
   const color = RARITY_COLORS[companion.rarity];
@@ -337,7 +337,7 @@ export function CompanionFloatingBubble() {
     t3 = $[4];
   }
   useEffect(t2, t3);
-  if (!feature("BUDDY") || !reaction) {
+  if (!true || !reaction) { // BUDDY feature always enabled in doge-code
     return null;
   }
   const companion = getCompanion();

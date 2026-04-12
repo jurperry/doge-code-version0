@@ -317,9 +317,20 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           )
         }
 
+        // Update usage from every chunk — many OpenAI-compatible APIs
+        // (e.g. DeepSeek) only report usage in the final chunk, not the
+        // first one. Without this, promptTokens stays 0, causing
+        // tokenCountWithEstimation to drastically undercount and
+        // auto-compact never triggers.
+        if (chunk.usage?.prompt_tokens !== undefined && chunk.usage.prompt_tokens > 0) {
+          promptTokens = chunk.usage.prompt_tokens
+        }
+        if (chunk.usage?.completion_tokens !== undefined && chunk.usage.completion_tokens > 0) {
+          completionTokens = chunk.usage.completion_tokens
+        }
+
         if (!started) {
           started = true
-          promptTokens = chunk.usage?.prompt_tokens ?? 0
           yield {
             type: 'message_start',
             message: {
@@ -421,7 +432,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
               index: 0,
             } as BetaRawMessageStreamEvent
           }
-          completionTokens = chunk.usage?.completion_tokens ?? completionTokens
+          // completionTokens already updated from chunk.usage above
           if (textStarted && textContentIndex !== null) {
             yield {
               type: 'content_block_stop',
@@ -443,6 +454,10 @@ export async function* createAnthropicStreamFromOpenAI(input: {
               stop_sequence: null,
             },
             usage: {
+              // Include input_tokens here so updateUsage() in claude.ts can
+              // correct the initial 0 from message_start. This is critical for
+              // APIs like DeepSeek that only report usage in the final chunk.
+              input_tokens: promptTokens,
               output_tokens: completionTokens,
             },
           } as BetaRawMessageStreamEvent

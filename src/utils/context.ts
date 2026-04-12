@@ -52,6 +52,18 @@ export function getContextWindowForModel(
   model: string,
   betas?: string[],
 ): number {
+  // SOLUTION 2: Universal context window override via environment variable
+  // This allows any user (not just ant) to specify the exact context window for their model.
+  // Useful for third-party APIs (DeepSeek, GLM, Gemini, etc.) where modelCapabilities
+  // cannot auto-detect the context window.
+  const envContextWindow = process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOW
+  if (envContextWindow) {
+    const parsed = parseInt(envContextWindow, 10)
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed
+    }
+  }
+
   // Allow override via environment variable (ant-only)
   // This takes precedence over all other context window resolution, including 1M detection,
   // so users can cap the effective context window for local decisions (auto-compact, etc.)
@@ -64,6 +76,42 @@ export function getContextWindowForModel(
     if (!isNaN(override) && override > 0) {
       return override
     }
+  }
+
+  // SOLUTION 1: Hardcoded context windows for common third-party models
+  // These models are not accessible via Anthropic's model capabilities API,
+  // so we need to hardcode their context windows based on their documentation.
+  const modelLower = model.toLowerCase()
+
+  // DeepSeek series - 102400 tokens context window (API actual limit)
+  // Note: Documentation mentions 128k, but API returns 102400 as the actual limit
+  if (modelLower.includes('deepseek')) {
+    return 102_400
+  }
+
+  // GLM series (智谱AI) - 128k context window
+  if (modelLower.includes('glm-4') || modelLower.includes('glm4')) {
+    return 128_000
+  }
+
+  // Gemini 1.5 Pro/Flash - 1M context window
+  if (modelLower.includes('gemini-1.5') || modelLower.includes('gemini-2.0')) {
+    return 1_000_000
+  }
+
+  // GPT-4 Turbo and GPT-4o - 128k context window
+  if (modelLower.includes('gpt-4-turbo') || modelLower.includes('gpt-4o')) {
+    return 128_000
+  }
+
+  // GPT-3.5 Turbo - 16k context window
+  if (modelLower.includes('gpt-3.5-turbo-16k')) {
+    return 16_385
+  }
+
+  // GPT-3.5 Turbo (default) - 4k context window
+  if (modelLower.includes('gpt-3.5-turbo')) {
+    return 4_096
   }
 
   // [1m] suffix — explicit client-side opt-in, respected over all detection
