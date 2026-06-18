@@ -1,0 +1,8 @@
+# Bun configuration for doge-code
+# Enable BUDDY feature in development mode
+
+[bundle.define]
+BUDDY = "true"
+
+[define]
+BUDDY = "true"

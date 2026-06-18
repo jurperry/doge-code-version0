@@ -1,0 +1,47 @@
+# ---- 依赖 ----
+node_modules/
+**/node_modules/
+
+# ---- 构建产物 ----
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# ---- Bun ----
+.bun/
+*.lockb
+
+# ---- 运行时 / 本地配置（不入库）----
+.env
+.env.*
+!.env.example
+config.env
+*.local
+
+# Claude Code / 本会话本地状态
+.claude/
+
+# ---- 调试日志 ----
+debug/
+*.debug.log
+debug-*.txt
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 打包 / 临时 ----
+*.tgz
+*.tar.gz
+*.log
+.cache/
+coverage/

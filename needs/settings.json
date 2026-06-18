@@ -1,0 +1,25 @@
+{
+  "model": "deepseek-chat",
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python C:/Users/jsr/.doge/hooks/worktree_create.py"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python C:/Users/jsr/.doge/hooks/worktree_remove.py"
+          }
+        ]
+      }
+    ]
+  }
+}
