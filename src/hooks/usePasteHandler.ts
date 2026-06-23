@@ -176,9 +176,12 @@ export function usePasteHandler({
               return { chunks: [], timeoutId: null }
             }
 
-            // If paste is empty (common when trying to paste images with Cmd+V),
-            // check if clipboard has an image (macOS only)
-            if (isMacOS && onImagePaste && pastedText.length === 0) {
+            // If paste is empty (common when trying to paste an image registered
+            // only in the clipboard, e.g. Win+Shift+S / Snipping Tool / copy),
+            // check if clipboard has an image. Cross-platform: darwin fast path
+            // (native NSPasteboard / osascript) and win32/linux checkImage are
+            // both no-ops when the clipboard has no image.
+            if (onImagePaste && pastedText.length === 0) {
               checkClipboardForImage()
               return { chunks: [], timeoutId: null }
             }
