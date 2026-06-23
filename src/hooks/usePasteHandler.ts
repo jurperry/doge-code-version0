@@ -241,11 +241,12 @@ export function usePasteHandler({
       .flatMap(part => part.split('\n'))
       .some(line => isImageFilePath(line.trim()))
 
-    // Handle empty paste (clipboard image on macOS)
-    // When the user pastes an image with Cmd+V, the terminal sends an empty
-    // bracketed paste sequence. The keypress parser emits this as isPasted=true
-    // with empty input.
-    if (isFromPaste && input.length === 0 && isMacOS && onImagePaste) {
+    // Handle empty paste (clipboard image only, no text).
+    // When the user pastes an image, the terminal sends an empty bracketed
+    // paste sequence. The keypress parser emits this as isPasted=true with
+    // empty input. Cross-platform: win32 (Get-Clipboard -Format Image) and
+    // linux (xclip/wl-paste) checkImage are no-ops when there's no image.
+    if (isFromPaste && input.length === 0 && onImagePaste) {
       checkClipboardForImage()
       // Reset isPasting since there's no text content to process
       setIsPasting(false)
