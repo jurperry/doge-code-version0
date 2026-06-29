@@ -13,6 +13,8 @@ import { clearFastModeCooldown, isFastModeAvailable, isFastModeEnabled, isFastMo
 import { MODEL_ALIASES } from '../../utils/model/aliases.js';
 import { checkOpus1mAccess, checkSonnet1mAccess } from '../../utils/model/check1mAccess.js';
 import { applyModelProfile, getModelProfile, readCustomApiStorage, writeCustomApiStorage } from '../../utils/customApiStorage.js';
+import { decideAndSwitch } from './handlers.js';
+import { switchModelProfileAtomicBound, switchTierBound } from '../../utils/model/switchModelProfile.bindings.js';
 import { saveGlobalConfig } from '../../utils/config.js';
 import { updateSettingsForSource } from '../../utils/settings/settings.js';
 import { formatCustomModelLabel, getDefaultMainLoopModelSetting, isOpus1mMergeEnabled, parseUserSpecifiedModel, renderDefaultModelSetting } from '../../utils/model/model.js';
@@ -90,69 +92,25 @@ function ModelPickerWrapper(t0) {
           from_model: mainLoopModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         to_model: model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
       });
-      // Apply full model profile if available (env vars + storage)
-      if (model) {
-        const profile = getModelProfile(model);
-        if (profile) {
-          applyModelProfile(profile);
-          syncModelConfigToDisk(model);
-        } else {
-          if (isKnownAlias(model)) {
-            if (getAPIProvider() !== 'firstParty' || process.env.ANTHROPIC_BASE_URL) {
-              // Third-party or custom API: resolve alias to actual model, keep credentials
-              const resolvedModel = parseUserSpecifiedModel(model);
-              process.env.ANTHROPIC_MODEL = resolvedModel;
-              if (!isTierModelMatch(resolvedModel)) {
-                delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-                delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-                delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-                delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
-              }
-              const current = readCustomApiStorage();
-              writeCustomApiStorage({ ...current, model: resolvedModel });
-              syncModelConfigToDisk(resolvedModel);
-            } else {
-              // Native Anthropic model — clear ALL third-party credentials
-              // and sub-agent configs so they don't leak into this model.
-              process.env.ANTHROPIC_MODEL = model;
-              clearThirdPartyEnvVars();
-              const current = readCustomApiStorage();
-              writeCustomApiStorage({
-                ...current,
-                model: model,
-                provider: undefined,
-                baseURL: undefined,
-                apiKey: undefined,
-                authTokenType: undefined,
-              });
-              syncModelConfigToDisk(model, true);
-            }
-          } else {
-            // Custom model without a stored profile — keep current credentials.
-            // When the selected model matches a tier env var, preserve tiers.
-            // Otherwise clear tiers so they inherit from the new main model.
-            // (Profiles will restore tiers correctly when switching back.)
-            process.env.ANTHROPIC_MODEL = model;
-            if (!isTierModelMatch(model)) {
-              delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-              delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-              delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-              delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
-            }
-            const current = readCustomApiStorage();
-            writeCustomApiStorage({ ...current, model: model });
-            syncModelConfigToDisk(model);
-          }
-        }
+      // Model switch: unified decideAndSwitch handles P1 (profile), P2 (alias),
+      // and P3 (bare string) with atomic env cleanup. See handlers.ts.
+      const profiles = readCustomApiStorage().modelProfiles ?? [];
+      const findProfile = (m) => profiles.find((p) => p.model === m) ?? null;
+      decideAndSwitch(model ?? null, {
+        findProfile,
+        switchModelProfileAtomicBound,
+        switchTierBound,
+        syncModelConfigToDisk,
+        setAppState,
+      }).catch((e) => {
+        // eslint-disable-next-line no-console
+        console.error('Model switch failed:', e);
+      });
+      // Only update effortValue when effort is explicitly set (user toggled in picker)
+      // Otherwise preserve the current effortValue to avoid losing previous /effort settings
+      if (effort !== undefined) {
+        setAppState(prev => ({ ...prev, effortValue: effort }));
       }
-      setAppState(prev => ({
-        ...prev,
-        mainLoopModel: model,
-        mainLoopModelForSession: null,
-        // Only update effortValue when effort is explicitly set (user toggled in picker)
-        // Otherwise preserve the current effortValue to avoid losing previous /effort settings
-        effortValue: effort !== undefined ? effort : prev.effortValue,
-      }));
       // NOTE: CLAUDE_CODE_EFFORT_LEVEL is handled by ModelPicker.handleSelect
       // (only deleted when user explicitly toggles effort via ← → keys).
       // When the user did NOT toggle, the env var is preserved and wins via
@@ -299,66 +257,20 @@ function SetModelAndClose({
       }
     }
     function setModel(modelValue: string | null): void {
-      // Apply full model profile if available (env vars + storage)
-      if (modelValue) {
-        const profile = getModelProfile(modelValue);
-        if (profile) {
-          applyModelProfile(profile);
-          syncModelConfigToDisk(modelValue);
-        } else {
-          if (isKnownAlias(modelValue)) {
-            if (getAPIProvider() !== 'firstParty' || process.env.ANTHROPIC_BASE_URL) {
-              // Third-party or custom API: resolve alias to actual model, keep credentials
-              const resolvedModel = parseUserSpecifiedModel(modelValue);
-              process.env.ANTHROPIC_MODEL = resolvedModel;
-              if (!isTierModelMatch(resolvedModel)) {
-                delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-                delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-                delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-                delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
-              }
-              const current = readCustomApiStorage();
-              writeCustomApiStorage({ ...current, model: resolvedModel });
-              syncModelConfigToDisk(resolvedModel);
-            } else {
-              // Native Anthropic model — clear ALL third-party credentials
-              // and sub-agent configs so they don't leak into this model.
-              process.env.ANTHROPIC_MODEL = modelValue;
-              clearThirdPartyEnvVars();
-              const current = readCustomApiStorage();
-              writeCustomApiStorage({
-                ...current,
-                model: modelValue,
-                provider: undefined,
-                baseURL: undefined,
-                apiKey: undefined,
-                authTokenType: undefined,
-              });
-              syncModelConfigToDisk(modelValue, true);
-            }
-          } else {
-            // Custom model without a stored profile — keep current credentials.
-            // When the selected model matches a tier env var, preserve tiers.
-            // Otherwise clear tiers so they inherit from the new main model.
-            // (Profiles will restore tiers correctly when switching back.)
-            process.env.ANTHROPIC_MODEL = modelValue;
-            if (!isTierModelMatch(modelValue)) {
-              delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-              delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-              delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-              delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
-            }
-            const current = readCustomApiStorage();
-            writeCustomApiStorage({ ...current, model: modelValue });
-            syncModelConfigToDisk(modelValue);
-          }
-        }
-      }
-      setAppState(prev => ({
-        ...prev,
-        mainLoopModel: modelValue,
-        mainLoopModelForSession: null
-      }));
+      // Model switch: unified decideAndSwitch handles P1 (profile), P2 (alias),
+      // and P3 (bare string) with atomic env cleanup. See handlers.ts.
+      const profiles = readCustomApiStorage().modelProfiles ?? [];
+      const findProfile = (m) => profiles.find((p) => p.model === m) ?? null;
+      decideAndSwitch(modelValue ?? null, {
+        findProfile,
+        switchModelProfileAtomicBound,
+        switchTierBound,
+        syncModelConfigToDisk,
+        setAppState,
+      }).catch((e) => {
+        // eslint-disable-next-line no-console
+        console.error('Model switch failed:', e);
+      });
       // Do NOT delete CLAUDE_CODE_EFFORT_LEVEL here. The env var wins via
       // resolveAppliedEffort() priority. The picker already handles clearing
       // it when the user explicitly toggles effort. /effort also clears it.
