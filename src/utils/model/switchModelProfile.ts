@@ -218,18 +218,41 @@ export async function switchModelProfileAtomic(
 
 /**
  * Switch to a tier alias (opus/sonnet/haiku) or back to default (null).
- * Does NOT touch any env vars — relies on the invariant that env vars
- * reflect ONLY the currently active ModelProfile (guaranteed by atomic).
  *
- * - tier = 'opus' | 'sonnet' | 'haiku': commits the alias string as mainLoopModel
- * - tier = null: clears mainLoopModel so it falls back to ANTHROPIC_MODEL default
+ * Tier path (opus/sonnet/haiku) — persists the REAL tier model ID (resolved
+ * from the active profile's ANTHROPIC_DEFAULT_<TIER>_MODEL via resolveTierModel),
+ * NOT the bare alias string, plus writes back the active profile's credentials
+ * (getActiveProfile) so a bare `doge` restart can restore baseURL/apiKey. The
+ * alias string alone would break the restart recovery chain: getModelProfile
+ * keys profiles by real model ID, so a persisted "haiku" finds no profile and
+ * ANTHROPIC_MODEL ends up as the literal "haiku" → API request fails.
+ *
+ * Does NOT touch any env vars (only reads env via injected deps for resolution).
+ * Relies on the invariant that env reflects the active ModelProfile.
+ *
+ * - tier = 'opus' | 'sonnet' | 'haiku': commits the resolved real model ID
+ *   as mainLoopModel; persists real ID + active profile credentials.
+ * - tier = null (revert to default): clears mainLoopModel, clears stored
+ *   credentials and model (existing semantics preserved).
  */
 export function switchTier(tier: TierAlias, deps: SwitchTierDeps): void {
-  const modelString = tier
-  deps.syncToDisk(modelString ?? '', true)
+  if (tier === null) {
+    // default 路径：清凭证 + 清 model，保持现有语义
+    deps.syncToDisk('', true, undefined)
+    deps.commitAppState((prev) => ({
+      ...prev,
+      mainLoopModel: null,
+      mainLoopModelForSession: null,
+    }))
+    return
+  }
+  // tier 路径：解析真实 tier 模型 ID + 从当前活跃 profile 回写凭证
+  const realTierModel = deps.resolveTierModel(tier)
+  const activeProfile = deps.getActiveProfile()
+  deps.syncToDisk(realTierModel, false, activeProfile)
   deps.commitAppState((prev) => ({
     ...prev,
-    mainLoopModel: modelString,
+    mainLoopModel: realTierModel,
     mainLoopModelForSession: null,
   }))
 }
