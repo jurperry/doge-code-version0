@@ -116,8 +116,19 @@ export interface SwitchProfileDeps {
 }
 
 export interface SwitchTierDeps {
-  syncToDisk: (model: string, clearCredentials: boolean) => void
+  syncToDisk: (
+    model: string,
+    clearCredentials: boolean,
+    credentialSourceProfile?: ModelProfile,
+  ) => void
   commitAppState: (updater: (prev: AppStateSlice) => AppStateSlice) => void
+  /** Resolve a tier alias ('opus'|'sonnet'|'haiku') to the real model ID
+   *  the active profile maps it to (e.g. 'haiku' → 'deepseek-v4-flash').
+   *  Real binding: parseUserSpecifiedModel(tier). */
+  resolveTierModel: (tier: 'opus' | 'sonnet' | 'haiku') => string
+  /** Return the currently active ModelProfile (for credential write-back).
+   *  Real binding: () => process.env.ANTHROPIC_MODEL ? getModelProfile(...) : undefined. */
+  getActiveProfile: () => ModelProfile | undefined
 }
 
 export interface AppStateSlice {
