@@ -152,6 +152,12 @@ function StatusLineInner({
   // AppState-sourced model — same source as API requests. getMainLoopModel()
   // re-reads settings.json on every call, so another session's /model write
   // would leak into this session's statusline (anthropics/claude-code#37596).
+  // Note: useMainLoopModel is called with no opts here intentionally — we
+  // only want the AppState-sourced base model id (parsed alias). The actual
+  // runtime resolution (plan-mode tier upgrade, >200k handling) happens in
+  // buildStatusLineCommandInput via getRuntimeMainLoopModel with the live
+  // permissionModeRef + per-update exceeds200kTokens, which is the same
+  // resolution path the API client uses. See design §1.1.
   const mainLoopModel = useMainLoopModel();
 
   // Keep latest values in refs for stable callback access
