@@ -221,6 +221,29 @@ function applyEnvVar(name: string, value: string | undefined): void {
 /**
  * Apply a model profile to the current process environment and customApiStorage.
  * Updates ALL relevant env vars and persists to storage for next launch.
+ *
+ * CONTRACT (since 2026-06-29, model-switch-fix):
+ *  - This function MUST NOT be relied upon to clear env vars the new profile
+ *    does not provide. The caller is responsible for calling
+ *    `clearProfileEnvVars()` (see `utils/model/switchModelProfile.ts`) BEFORE
+ *    invoking this function, so that any whitelisted env var the new profile
+ *    omits is left `undefined` rather than retaining a stale value from a
+ *    previous profile. Without the pre-clear, switching from a profile that
+ *    defines `defaultHaikuModel` to one that does not would leave the old
+ *    profile's `ANTHROPIC_DEFAULT_HAIKU_MODEL` in `process.env`, causing
+ *    `getDefaultHaikuModel()` alias resolution to land on the wrong tier.
+ *  - The canonical caller is `switchModelProfileAtomic` in
+ *    `utils/model/switchModelProfile.ts`, which performs snapshot → clear →
+ *    apply → persist → commit as an atomic transaction with rollback on
+ *    failure. Direct callers outside of that transaction MUST replicate the
+ *    clear-then-apply sequence themselves.
+ *  - Env vars written here but NOT in `PROFILE_MANAGED_ENV_KEYS` (and hence
+ *    not cleared/restored by `clearProfileEnvVars`/`restoreEnvSnapshot`):
+ *    `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL`, `DOGE_API_KEY` /
+ *    `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_COMPATIBLE_API_PROVIDER`.
+ *    `switchModelProfileAtomic` captures these in a second apply-snapshot and
+ *    restores them on rollback; standalone callers should be aware they are
+ *    mutated.
  */
 export function applyModelProfile(profile: ModelProfile): void {
   // --- Core config ---
