@@ -1,0 +1,56 @@
+/**
+ * Pre-wired bindings for switchModelProfile transactions. UI/command code
+ * imports from here; tests import the dep-injected functions directly.
+ *
+ * Both `syncToDisk` and `setAppState` are injected by the caller (the
+ * /model command). `syncToDisk` lives inside the compiled artifact
+ * `src/commands/model/model.tsx`; `setAppState` is the value returned by
+ * the `useSetAppState()` hook from `src/state/AppState.tsx`, which can
+ * only be resolved inside a React component context (and `.tsx` re-exports
+ * drag React into a model util). Passing both at call time keeps the
+ * dependency direction clean (model utils → lower layers, not → commands
+ * or React) and leaves the test path fully dep-injected.
+ */
+import { applyModelProfile, type ModelProfile } from '../customApiStorage.js'
+import {
+  switchModelProfileAtomic as switchModelProfileAtomicCore,
+  switchTier as switchTierCore,
+  type AppStateSlice,
+  type TierAlias,
+} from './switchModelProfile.js'
+
+type SyncToDisk = (model: string, clearCredentials: boolean) => void
+
+/**
+ * Bridge the core's slice-typed updater to the real `setAppState` hook
+ * (`(prev: AppState) => AppState`). `any` is used because the core's updater
+ * returns `{...prev, mainLoopModel, mainLoopModelForSession}` — a full
+ * AppState by spread — but TypeScript can't see that without importing the
+ * full AppState type into this model-util layer, which would couple the
+ * utils to the state store and pull React-adjacent code into a pure util.
+ */
+function bindCommit(setAppState: (f: (prev: any) => any) => void) {
+  return (updater: (prev: AppStateSlice) => AppStateSlice) =>
+    setAppState((prev: any) => updater(prev))
+}
+
+export async function switchModelProfileAtomicBound(
+  profile: ModelProfile,
+  deps: { syncToDisk: SyncToDisk; setAppState: (f: (prev: any) => any) => void },
+): Promise<void> {
+  return switchModelProfileAtomicCore(profile, {
+    applyProfile: applyModelProfile,
+    syncToDisk: deps.syncToDisk,
+    commitAppState: bindCommit(deps.setAppState),
+  })
+}
+
+export function switchTierBound(
+  tier: TierAlias,
+  deps: { syncToDisk: SyncToDisk; setAppState: (f: (prev: any) => any) => void },
+): void {
+  switchTierCore(tier, {
+    syncToDisk: deps.syncToDisk,
+    commitAppState: bindCommit(deps.setAppState),
+  })
+}
