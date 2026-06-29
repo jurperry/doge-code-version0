@@ -11,15 +11,20 @@
  * dependency direction clean (model utils → lower layers, not → commands
  * or React) and leaves the test path fully dep-injected.
  */
-import { applyModelProfile, type ModelProfile } from '../customApiStorage.js'
+import { applyModelProfile, getModelProfile, type ModelProfile } from '../customApiStorage.js'
 import {
   switchModelProfileAtomic as switchModelProfileAtomicCore,
   switchTier as switchTierCore,
   type AppStateSlice,
   type TierAlias,
 } from './switchModelProfile.js'
+import { getUserSpecifiedModelSetting, parseUserSpecifiedModel } from './model.js'
 
-type SyncToDisk = (model: string, clearCredentials: boolean) => void
+type SyncToDisk = (
+  model: string,
+  clearCredentials: boolean,
+  credentialSourceProfile?: ModelProfile,
+) => void
 
 /**
  * Bridge the core's slice-typed updater to the real `setAppState` hook
@@ -52,5 +57,23 @@ export function switchTierBound(
   switchTierCore(tier, {
     syncToDisk: deps.syncToDisk,
     commitAppState: bindCommit(deps.setAppState),
+    resolveTierModel: (t) => {
+      // Direct env lookup: bypass parseUserSpecifiedModel's fallback chain
+      // which consults getUserSpecifiedModelSetting() and can be polluted by
+      // a previous tier switch's mainLoopModelOverride (e.g. after switching
+      // to Haiku, getDefaultOpusModel would fallback to Haiku's real model).
+      const envKey =
+        t === 'opus' ? 'ANTHROPIC_DEFAULT_OPUS_MODEL'
+        : t === 'sonnet' ? 'ANTHROPIC_DEFAULT_SONNET_MODEL'
+        : 'ANTHROPIC_DEFAULT_HAIKU_MODEL'
+      return process.env[envKey] || process.env.ANTHROPIC_MODEL || t
+    },
+    getActiveProfile: () => {
+      // Use getUserSpecifiedModelSetting() to track the current AppState model
+      // (including P3 bare-model switches that don't update env), falling back
+      // to env when AppState hasn't been set yet.
+      const activeModel = getUserSpecifiedModelSetting() || process.env.ANTHROPIC_MODEL
+      return activeModel ? getModelProfile(activeModel) : undefined
+    },
   })
 }
