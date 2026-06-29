@@ -1,4 +1,5 @@
 import { setMainLoopModelOverride } from '../bootstrap/state.js'
+import { emitModelChanged } from './modelChangedSignal.js'
 import {
   clearApiKeyHelperCache,
   clearAwsCredentialsCache,
@@ -99,6 +100,7 @@ export function onChangeAppState({
     // Remove from settings
     updateSettingsForSource('userSettings', { model: undefined })
     setMainLoopModelOverride(null)
+    emitModelChanged()
   }
 
   // mainLoopModel: add it to settings?
@@ -109,6 +111,7 @@ export function onChangeAppState({
     // Save to settings
     updateSettingsForSource('userSettings', { model: newState.mainLoopModel })
     setMainLoopModelOverride(newState.mainLoopModel)
+    emitModelChanged()
   }
 
   // expandedView → persist as showExpandedTodos + showSpinnerTree for backwards compat
