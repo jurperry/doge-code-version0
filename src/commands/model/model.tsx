@@ -12,7 +12,7 @@ import { isBilledAsExtraUsage } from '../../utils/extraUsage.js';
 import { clearFastModeCooldown, isFastModeAvailable, isFastModeEnabled, isFastModeSupportedByModel } from '../../utils/fastMode.js';
 import { MODEL_ALIASES } from '../../utils/model/aliases.js';
 import { checkOpus1mAccess, checkSonnet1mAccess } from '../../utils/model/check1mAccess.js';
-import { applyModelProfile, getModelProfile, readCustomApiStorage, writeCustomApiStorage } from '../../utils/customApiStorage.js';
+import { applyModelProfile, getModelProfile, readCustomApiStorage, writeCustomApiStorage, type ModelProfile } from '../../utils/customApiStorage.js';
 import { decideAndSwitch } from './handlers.js';
 import { switchModelProfileAtomicBound, switchTierBound } from '../../utils/model/switchModelProfile.bindings.js';
 import { saveGlobalConfig } from '../../utils/config.js';
@@ -24,10 +24,14 @@ import { matchesTierModel as isTierModelMatch } from '../../utils/model/modelSup
 import { getAPIProvider } from '../../utils/model/providers.js';
 /** Persist model change to .claude.json, .credentials.json and settings.json so all three config
  *  files stay in sync. */
-function syncModelConfigToDisk(model: string, clearCredentials?: boolean): void {
-  const profile = getModelProfile(model)
+function syncModelConfigToDisk(
+  model: string,
+  clearCredentials?: boolean,
+  credentialSourceProfile?: ModelProfile,
+): void {
+  const profile = credentialSourceProfile ?? getModelProfile(model)
   let credsUpdate: Record<string, unknown> = {}
-  
+
   if (clearCredentials) {
     credsUpdate = { provider: undefined as unknown as string, baseURL: undefined as unknown as string, apiKey: undefined as unknown as string, authTokenType: undefined as unknown as string }
   } else if (profile) {
