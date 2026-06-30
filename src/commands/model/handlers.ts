@@ -4,18 +4,24 @@ import type { TierAlias } from '../../utils/model/switchModelProfile.js'
 
 export type ModelInput = string | null
 
+type SyncModelConfigToDisk = (
+  model: string,
+  clearCredentials: boolean,
+  credentialSourceProfile?: ModelProfile,
+) => void
+
 export interface DecideContext {
   /** Look up a ModelProfile by its `model` field. Returns null if no match. */
   findProfile: (model: ModelInput) => ModelProfile | null
   switchModelProfileAtomicBound: (
     profile: ModelProfile,
-    deps: { syncToDisk: (model: string, clearCredentials: boolean) => void; setAppState: (f: (prev: any) => any) => void },
+    deps: { syncToDisk: SyncModelConfigToDisk; setAppState: (f: (prev: any) => any) => void },
   ) => Promise<void>
   switchTierBound: (
     tier: TierAlias,
-    deps: { syncToDisk: (model: string, clearCredentials: boolean) => void; setAppState: (f: (prev: any) => any) => void },
+    deps: { syncToDisk: SyncModelConfigToDisk; setAppState: (f: (prev: any) => any) => void },
   ) => void
-  syncModelConfigToDisk: (model: string, clearCredentials: boolean) => void
+  syncModelConfigToDisk: SyncModelConfigToDisk
   setAppState: (f: (prev: any) => any) => void
 }
 
