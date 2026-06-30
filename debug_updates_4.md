@@ -143,3 +143,61 @@ DeepSeek PS脚本 → CLAUDE_CODE_EFFORT_LEVEL=max (正确)
   - profile 不再携带 effortLevel（不再捕获、不再恢复）
   - effort 来源唯一：CLAUDE_CODE_EFFORT_LEVEL(PS脚本) → AppState.effortValue → 模型默认
 ```
+
+---
+
+## 2026-06-30 Tier 切换持久化断裂修复
+
+### 问题现象
+
+通过 `/add-model` 保存过自定义模型 profile 后，用户在 `/model` 中切换到 `opus` / `sonnet` / `haiku` 这类基础模型层级，退出后再用裸 `doge` 启动时，状态和请求会停留在字面层级名上，而不是这些层级背后实际应请求的真实模型 ID（例如 `deepseek-v4-flash`）。只有切回 default 后再退出，下一次裸启动才不会触发该问题。
+
+### 根因
+
+旧的 `switchTier()` 直接把 tier alias（`'opus'` / `'sonnet'` / `'haiku'`）写入磁盘配置，并且以 `clearCredentials=true` 同步到 `customApiEndpoint`。裸 `doge` 启动没有 `start_*.ps1` 提供的环境变量兜底时，恢复链会用磁盘上的 `customApiEndpoint.model` 作为 `ANTHROPIC_MODEL`，随后执行 `getModelProfile(activeModel)`。
+
+当 `activeModel` 是字面 alias（例如 `'haiku'`）时，`getModelProfile('haiku')` 无法命中以真实模型 ID 保存的 profile，provider/baseURL/apiKey/tier env 无法恢复，最终请求模型也可能变成字面 `'haiku'`，导致自定义 API 不可用。
+
+### 修复
+
+- `switchTier()` 对非 null tier 先解析真实 tier 模型 ID，再持久化真实模型 ID，而不是持久化 alias。
+- tier 路径调用 `syncToDisk(realTierModel, false, activeProfile)`：不再清凭证，并从当前 active profile 回写顶层 `provider` / `baseURL` / `apiKey` / `authTokenType`，保证裸启动时有 credential fallback。
+- AppState 的 `mainLoopModel` 同步写真实 tier 模型 ID，使状态栏显示值、磁盘持久化值、实际请求模型三者一致。
+- `switchTierBound()` 的 tier 解析直接读取 `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`，避免 `parseUserSpecifiedModel()` 的 fallback chain 被前一次 tier 切换留下的 `mainLoopModelOverride` 污染。
+- `getActiveProfile()` 优先使用 `getUserSpecifiedModelSetting()`，再回退到 `process.env.ANTHROPIC_MODEL`，覆盖 bare model 切换后 env 尚未更新的场景。
+- default/null 路径保持原语义：清空 model、清凭证，并把 `mainLoopModel` / `mainLoopModelForSession` 置为 null。
+- 清理 `switchModelProfile.bindings.ts` 中已不再使用的 `parseUserSpecifiedModel` import。
+
+### 验证
+
+自动验证已完成：
+
+```text
+bun test src/utils/model/switchModelProfile.test.ts
+→ 16 pass, 0 fail
+
+bun test src/utils/model/ src/commands/model/
+→ 26 pass, 0 fail
+
+bun test src/utils/model/ src/commands/model/ src/state/
+→ 26 pass, 0 fail
+
+bun run dev:restore-check
+→ CLI 正常启动到等待输入阶段
+
+bun build src/utils/model/switchModelProfile.ts --no-bundle
+→ exit 0
+
+bun build src/utils/model/switchModelProfile.bindings.ts --no-bundle
+→ exit 0
+
+bun build src/commands/model/model.tsx --no-bundle
+→ exit 0
+```
+
+交互式手动验证仍需在真实终端中执行（当前自动化子任务环境无法安全驱动 `/model` TUI 并进行真实 API 对话）：
+
+1. `start_deepseek.ps1` 启动后，`/model` 选择 Haiku，状态栏应显示 `deepseek-v4-flash`，对话请求的 model ID 应一致。
+2. 退出后不运行任何 `start_*.ps1`，裸 `doge` 启动，状态栏仍应显示真实 tier 模型 ID 且可对话。
+3. Opus / Sonnet tier 做同样验证。
+4. default 路径回归：切回 default 后应清空 override/凭证覆盖，不破坏 PS 脚本启动场景。

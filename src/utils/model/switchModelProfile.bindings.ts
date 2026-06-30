@@ -18,7 +18,7 @@ import {
   type AppStateSlice,
   type TierAlias,
 } from './switchModelProfile.js'
-import { getUserSpecifiedModelSetting, parseUserSpecifiedModel } from './model.js'
+import { getUserSpecifiedModelSetting } from './model.js'
 
 type SyncToDisk = (
   model: string,
