@@ -200,6 +200,35 @@ export function stripImagesFromMessages(messages: Message[]): Message[] {
 }
 
 /**
+ * Does this message array contain any image/document blocks (including those
+ * nested inside tool_result content)? Used by claude.ts's image recovery to
+ * gate the isClientError fallback: stripping images only helps if images are
+ * actually present in the request, so a 4xx with no image is left alone.
+ */
+export function messagesContainImage(messages: Message[]): boolean {
+  return messages.some(message => {
+    if (message.type !== 'user') {
+      return false
+    }
+    const content = message.message.content
+    if (!Array.isArray(content)) {
+      return false
+    }
+    return content.some(block => {
+      if (block.type === 'image' || block.type === 'document') {
+        return true
+      }
+      if (block.type === 'tool_result' && Array.isArray(block.content)) {
+        return block.content.some(
+          item => item.type === 'image' || item.type === 'document',
+        )
+      }
+      return false
+    })
+  })
+}
+
+/**
  * Strip attachment types that are re-injected post-compaction anyway.
  * skill_discovery/skill_listing are re-surfaced by resetSentSkillNames()
  * + the next turn's discovery signal, so feeding them to the summarizer

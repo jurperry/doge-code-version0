@@ -237,7 +237,7 @@ import {
   markToolsSentToAPIState,
   pinCacheEdits,
 } from '../compact/microCompact.js'
-import { stripImagesFromMessages } from '../compact/compact.js'
+import { stripImagesFromMessages, messagesContainImage } from '../compact/compact.js'
 import { getInitializationStatus } from '../lsp/manager.js'
 import { isToolFromMcpServer } from '../mcp/utils.js'
 import { withStreamingVCR, withVCR } from '../vcr.js'
@@ -247,6 +247,7 @@ import {
   CUSTOM_OFF_SWITCH_MESSAGE,
   getAssistantMessageFromError,
   getErrorMessageIfRefusal,
+  isClientError,
   isImageUnsupportedError,
 } from './errors.js'
 import {
@@ -1993,7 +1994,9 @@ async function* queryModel(
         // every subsequent turn re-fails.
         if (
           !hasAttemptedImageStripRetry &&
-          isImageUnsupportedError(errorFromRetry)
+          (isImageUnsupportedError(errorFromRetry) ||
+            (isClientError(errorFromRetry) &&
+              messagesContainImage(messagesForAPI)))
         ) {
           hasAttemptedImageStripRetry = true
           messagesForAPI = stripImagesFromMessages(messagesForAPI)
@@ -2973,11 +2976,16 @@ async function* queryModel(
 
       // Image/vision capability rejection that survived the
       // generator-consumption strip-retry (either retried without images
-      // and still failed, or thrown mid-stream). Strip images from this
-      // request so the next turn doesn't re-fail on the same image-bearing
-      // message; getAssistantMessageFromError surfaces a friendly message
-      // via its isImageUnsupportedError branch.
-      if (isImageUnsupportedError(error)) {
+      // and still failed, or thrown mid-stream). Strip images from the
+      // request snapshot handed to getAssistantMessageFromError; the real
+      // recovery (strip + retry) is in the generator-consumption loop above,
+      // and isImageUnsupportedError yields a friendly message on the way out.
+      // The 4xx + messagesContainImage fallback catches wording we don't
+      // keyword-match (e.g. GLM's "Model only support text input").
+      if (
+        isImageUnsupportedError(error) ||
+        (isClientError(error) && messagesContainImage(messagesForAPI))
+      ) {
         messagesForAPI = stripImagesFromMessages(messagesForAPI)
       }
 

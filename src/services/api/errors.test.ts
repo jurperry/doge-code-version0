@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test'
 import { APIError } from '@anthropic-ai/sdk'
-import { isImageUnsupportedError } from './errors.js'
+import { isClientError, isImageUnsupportedError } from './errors.js'
 
 test('isImageUnsupportedError: matches common "image not supported" wording', () => {
   expect(isImageUnsupportedError(new Error('image input is not supported'))).toBe(
@@ -84,4 +84,59 @@ test('isImageUnsupportedError: returns false for non-Error inputs', () => {
   expect(isImageUnsupportedError('image not supported')).toBe(false)
   expect(isImageUnsupportedError({ message: 'image not supported' })).toBe(false)
   expect(isImageUnsupportedError(42)).toBe(false)
+})
+
+test('isImageUnsupportedError: matches GLM "Model only support text input" wording', () => {
+  // GLM's anthropic-compatible endpoint returns this 400 when the model lacks
+  // vision. Critically, it contains NO image/vision/multimodal keyword - the
+  // reason the pure-keyword approach failed and why claude.ts also has the
+  // isClientError + messagesContainImage fallback. Verified against the real
+  // error: 400 {"error":{"code":"InvalidParameter","message":"Model only
+  // support text input Request id: ...","type":"BadRequest"}}.
+  expect(
+    isImageUnsupportedError(
+      new Error(
+        '400 {"error":{"code":"InvalidParameter","message":"Model only support text input Request id: 02178395565593693b918b1415a5310eff3f6e1414d2c03d423e1","param":"","type":"BadRequest"}}',
+      ),
+    ),
+  ).toBe(true)
+  expect(
+    isImageUnsupportedError(new Error('Model only support text input')),
+  ).toBe(true)
+  expect(
+    isImageUnsupportedError(new Error('this model only supports text')),
+  ).toBe(true)
+  expect(isImageUnsupportedError(new Error('text input only'))).toBe(true)
+})
+
+test('isClientError: matches 4xx APIError and unwraps CannotRetryError', () => {
+  const err400 = new APIError(
+    400,
+    { message: 'bad request', type: 'invalid_request_error' },
+    'bad request',
+    new Headers(),
+  )
+  const err500 = new APIError(
+    500,
+    { message: 'server error', type: 'internal_error' },
+    'server error',
+    new Headers(),
+  )
+  expect(isClientError(err400)).toBe(true)
+  expect(isClientError(err500)).toBe(false)
+  // Wrapped in CannotRetryError (duck-typed via originalError)
+  const wrapper = Object.assign(new Error('Cannot retry: attempt failed'), {
+    originalError: err400,
+  })
+  expect(isClientError(wrapper)).toBe(true)
+  const wrapper500 = Object.assign(new Error('Cannot retry'), {
+    originalError: err500,
+  })
+  expect(isClientError(wrapper500)).toBe(false)
+})
+
+test('isClientError: returns false for non-APIError inputs', () => {
+  expect(isClientError(new Error('some error'))).toBe(false)
+  expect(isClientError(null)).toBe(false)
+  expect(isClientError('400')).toBe(false)
 })

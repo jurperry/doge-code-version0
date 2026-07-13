@@ -235,8 +235,41 @@ export function isImageUnsupportedError(error: unknown): boolean {
     msg.includes('image input not supported') ||
     msg.includes('image is not supported') ||
     msg.includes('no vision') ||
-    (msg.includes('image') && msg.includes('invalid'))
+    (msg.includes('image') && msg.includes('invalid')) ||
+    // GLM: "Model only support text input" - a text-only capability rejection
+    // phrased WITHOUT image/vision/multimodal keywords. Also caught by the
+    // isClientError + messagesContainImage fallback in claude.ts, but matching
+    // it explicitly yields a friendlier "model doesn't support images" message
+    // instead of a generic API Error on the second failure.
+    (msg.includes('only support') && msg.includes('text')) ||
+    msg.includes('text input only') ||
+    msg.includes('only supports text')
   )
+}
+
+/**
+ * Is this a 4xx client error? Used as a fallback image-recovery trigger in
+ * claude.ts: when a third-party endpoint rejects an image-bearing request
+ * with a 4xx whose wording isImageUnsupportedError doesn't recognize (e.g.
+ * GLM's "Model only support text input"), stripping images and retrying once
+ * is cheap insurance against the conversation-death loop. The retry is gated
+ * on messagesContainImage so non-image 4xxs with no image in the request are
+ * left untouched.
+ *
+ * Unwraps CannotRetryError.originalError via duck typing (same circular-import
+ * avoidance as isImageUnsupportedError - withRetry.js already imports here).
+ */
+export function isClientError(error: unknown): boolean {
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'originalError' in error &&
+    (error as { originalError: unknown }).originalError instanceof APIError
+  ) {
+    const orig = (error as { originalError: APIError }).originalError
+    return orig.status >= 400 && orig.status < 500
+  }
+  return error instanceof APIError && error.status >= 400 && error.status < 500
 }
 export const CREDIT_BALANCE_TOO_LOW_ERROR_MESSAGE = 'Credit balance is too low'
 export const INVALID_API_KEY_ERROR_MESSAGE = 'Not logged in · Please run /login'
