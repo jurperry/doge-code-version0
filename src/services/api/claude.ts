@@ -237,6 +237,7 @@ import {
   markToolsSentToAPIState,
   pinCacheEdits,
 } from '../compact/microCompact.js'
+import { stripImagesFromMessages } from '../compact/compact.js'
 import { getInitializationStatus } from '../lsp/manager.js'
 import { isToolFromMcpServer } from '../mcp/utils.js'
 import { withStreamingVCR, withVCR } from '../vcr.js'
@@ -246,6 +247,7 @@ import {
   CUSTOM_OFF_SWITCH_MESSAGE,
   getAssistantMessageFromError,
   getErrorMessageIfRefusal,
+  isImageUnsupportedError,
 } from './errors.js'
 import {
   EMPTY_USAGE,
@@ -1816,7 +1818,7 @@ async function* queryModel(
 
   try {
     queryCheckpoint('query_client_creation_start')
-    const generator = withRetry(
+    const createGenerator = () => withRetry(
       () =>
         getAnthropicClient({
           maxRetries: 0, // Disabled auto-retry in favor of manual implementation
@@ -1974,9 +1976,32 @@ async function* queryModel(
       },
     )
 
+    let generator = createGenerator()
+    let hasAttemptedImageStripRetry = false
     let e
-    do {
-      e = await generator.next()
+    while (true) {
+      try {
+        e = await generator.next()
+      } catch (errorFromRetry) {
+        // Image/vision capability rejection: the endpoint doesn't support
+        // image blocks (common for third-party Anthropic-compatible endpoints
+        // like GLM/DeepSeek/Qwen). Strip images from this request only - not
+        // persisted history, so switching to a vision-capable model later
+        // still has them - and retry once. Independent of the (currently
+        // stubbed) reactiveCompact path, which never fires for media errors;
+        // without this, the image-bearing message sits in history forever and
+        // every subsequent turn re-fails.
+        if (
+          !hasAttemptedImageStripRetry &&
+          isImageUnsupportedError(errorFromRetry)
+        ) {
+          hasAttemptedImageStripRetry = true
+          messagesForAPI = stripImagesFromMessages(messagesForAPI)
+          generator = createGenerator()
+          continue
+        }
+        throw errorFromRetry
+      }
 
       if (e && !e.done && e.value === undefined) {
         throw new Error(
@@ -1988,7 +2013,10 @@ async function* queryModel(
       if (!('controller' in e.value)) {
         yield e.value
       }
-    } while (!e.done)
+      if (e.done) {
+        break
+      }
+    }
     if (!e || !e.value) {
       throw new Error(
         `[claude.ts] retry generator completed without stream value; source=${options.querySource}`,
@@ -2941,6 +2969,16 @@ async function* queryModel(
       if (error instanceof APIUserAbortError) {
         releaseStreamResources()
         return
+      }
+
+      // Image/vision capability rejection that survived the
+      // generator-consumption strip-retry (either retried without images
+      // and still failed, or thrown mid-stream). Strip images from this
+      // request so the next turn doesn't re-fail on the same image-bearing
+      // message; getAssistantMessageFromError surfaces a friendly message
+      // via its isImageUnsupportedError branch.
+      if (isImageUnsupportedError(error)) {
+        messagesForAPI = stripImagesFromMessages(messagesForAPI)
       }
 
       yield getAssistantMessageFromError(error, errorModel, {

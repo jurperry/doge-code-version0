@@ -179,6 +179,65 @@ export function isMediaSizeErrorMessage(msg: AssistantMessage): boolean {
     isMediaSizeError(msg.errorDetails)
   )
 }
+
+/**
+ * Is this API error a "model/endpoint doesn't support images/vision" rejection?
+ *
+ * Third-party Anthropic-compatible endpoints (GLM, DeepSeek, Qwen, etc.) often
+ * don't support vision and return 4xx rejections such as:
+ *   - "image input is not supported" / "image is not supported"
+ *   - "model does not support image"
+ *   - "vision not supported" / "multimodal not supported"
+ *   - "invalid image" (capability rejection, not a size limit)
+ *
+ * Distinct from isMediaSizeError: that covers size/dimension limits and feeds
+ * the reactiveCompact recovery path (currently a stub, so size recovery is a
+ * no-op anyway). Capability rejections are handled by claude.ts's own
+ * strip-and-retry on the generator-consumption layer, which does NOT depend
+ * on the reactiveCompact module - so this predicate is the entry point for a
+ * fully independent recovery path. Without it, an unsupported-image 4xx would
+ * fall through to the generic catch (no errorDetails) and the image-bearing
+ * user message would sit in conversation history forever, failing every
+ * subsequent turn.
+ *
+ * Accepts either the raw API error or a CannotRetryError wrapping it; the
+ * wrapper is unwrapped via duck typing to avoid a circular import on
+ * withRetry.js (which already imports from this module).
+ */
+export function isImageUnsupportedError(error: unknown): boolean {
+  // Unwrap CannotRetryError.originalError without importing the class
+  // (withRetry.js already imports from errors.js -> circular import would break).
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'originalError' in error &&
+    (error as { originalError: unknown }).originalError instanceof Error
+  ) {
+    error = (error as { originalError: Error }).originalError
+  }
+  if (!(error instanceof Error)) {
+    return false
+  }
+  const msg = error.message.toLowerCase()
+  // Exclude size-limit errors - those are isMediaSizeError's domain.
+  if (isMediaSizeError(msg)) {
+    return false
+  }
+  return (
+    (msg.includes('image') && msg.includes('not support')) ||
+    (msg.includes('image') && msg.includes('unsupported')) ||
+    (msg.includes('vision') &&
+      (msg.includes('not support') || msg.includes('unsupported'))) ||
+    (msg.includes('multimodal') &&
+      (msg.includes('not support') || msg.includes('unsupported'))) ||
+    msg.includes('does not support image') ||
+    msg.includes('image input is not supported') ||
+    msg.includes('image input not supported') ||
+    msg.includes('image is not supported') ||
+    msg.includes('no vision') ||
+    (msg.includes('image') && msg.includes('invalid'))
+  )
+}
 export const CREDIT_BALANCE_TOO_LOW_ERROR_MESSAGE = 'Credit balance is too low'
 export const INVALID_API_KEY_ERROR_MESSAGE = 'Not logged in · Please run /login'
 export const INVALID_API_KEY_ERROR_MESSAGE_EXTERNAL =
@@ -960,6 +1019,19 @@ export function getAssistantMessageFromError(
     return createAssistantAPIErrorMessage({
       content: `${API_ERROR_MESSAGE_PREFIX}: ${formatAPIError(error)}`,
       error: 'unknown',
+    })
+  }
+
+  // Image/vision capability rejection - the endpoint doesn't support image
+  // blocks. claude.ts's generator-consumption layer already attempts a
+  // strip-and-retry; reaching here means the retry also failed or the error
+  // surfaced mid-stream. Surface a friendly, actionable message. claude.ts
+  // strips images from this request before calling us, so the next turn
+  // won't re-fail on the image-bearing message.
+  if (isImageUnsupportedError(error)) {
+    return createAssistantAPIErrorMessage({
+      content: `${API_ERROR_MESSAGE_PREFIX}: 当前模型不支持图片输入，已忽略图片，请重新发送消息继续。`,
+      error: 'invalid_request',
     })
   }
 
