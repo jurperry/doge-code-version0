@@ -302,7 +302,16 @@ export const loadMarkdownFilesForSubdir = memoize(
     const searchStartTime = Date.now()
     const userDir = join(getClaudeConfigHomeDir(), subdir)
     const managedDir = join(getManagedFilePath(), '.claude', subdir)
-    const projectDirs = getProjectDirsUpToHome(subdir, cwd)
+    // Yield before the sync statSync walk: getProjectDirsUpToHome calls statSync
+    // in a loop walking up from cwd, and resolveStopBoundary can trigger
+    // findGitRoot which does a sync statSync walk to the filesystem root when
+    // outside a git repo. On Windows each statSync can take 10-100ms with
+    // antivirus, freezing the TUI after /clear (which clears this memoize cache).
+    // Aligns with the setImmediate mitigation already used in getSkillDirCommands
+    // (loadSkillsDir.ts:643-652).
+    const projectDirs = await new Promise<string[]>(resolve =>
+      setImmediate(() => resolve(getProjectDirsUpToHome(subdir, cwd))),
+    )
 
     // For git worktrees where the worktree does NOT have .claude/<subdir> checked
     // out (e.g. sparse-checkout), fall back to the main repository's copy.
@@ -515,6 +524,10 @@ async function findMarkdownFilesNative(
               )
             }
           } else if (entry.isDirectory()) {
+            // Skip dependency directories (e.g. claude-to-im skills ship
+            // node_modules with 5K+ files). Mirrors ripgrep's !node_modules/ glob
+            // so the native fallback stays fast when rg is unavailable.
+            if (entry.name === 'node_modules') continue
             await walk(fullPath)
           } else if (entry.isFile() && entry.name.endsWith('.md')) {
             files.push(fullPath)
@@ -560,7 +573,20 @@ async function loadMarkdownFiles(dir: string): Promise<
     files = useNative
       ? await findMarkdownFilesNative(dir, signal)
       : await ripGrep(
-          ['--files', '--hidden', '--follow', '--no-ignore', '--glob', '*.md'],
+          [
+            '--files',
+            '--hidden',
+            '--follow',
+            '--no-ignore',
+            '--glob',
+            '*.md',
+            // Skip dependency trees: claude-to-im skills ship node_modules with
+            // 5K+ files each (~10K total under ~/.doge/skills), and --no-ignore
+            // would otherwise traverse every file. The trailing slash matches a
+            // directory, so ripgrep prunes the whole subtree without entering it.
+            '--glob',
+            '!node_modules/',
+          ],
           dir,
           signal,
         )
