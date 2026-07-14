@@ -78,20 +78,33 @@ let loadedTrackedSignature: string | null = null
 let loadedMergedSignature: string | null = null
 
 /**
- * Clear all file suggestion caches.
- * Call this when resuming a session to ensure fresh file discovery.
+ * Clear file suggestion caches.
+ * @param soft When true (e.g. /clear), keep the file index, throttle state and
+ *   signatures so startBackgroundCacheRefresh's throttle can skip the rebuild.
+ *   cwd is unchanged on /clear, so the existing index is still valid - dropping
+ *   it would force a full ripgrep rescan on the next typeahead mount, which in
+ *   large non-git dirs (100k+ files) saturates antivirus IO and freezes the TUI.
+ *   Pass false (default, e.g. resume/--continue where cwd may change) for a
+ *   full reset.
  */
-export function clearFileSuggestionCaches(): void {
-  fileIndex = null
+export function clearFileSuggestionCaches(soft = false): void {
+  // Always abort any in-flight refresh and bump generation so stale results
+  // don't overwrite a future rebuild. ignorePatternsCache is cheap to recompute.
   fileListRefreshPromise = null
   cacheGeneration++
   untrackedFetchPromise = null
-  cachedTrackedFiles = []
-  cachedConfigFiles = []
-  cachedTrackedDirs = []
   indexBuildComplete.clear()
   ignorePatternsCache = null
   ignorePatternsCacheKey = null
+
+  if (soft) {
+    return
+  }
+
+  fileIndex = null
+  cachedTrackedFiles = []
+  cachedConfigFiles = []
+  cachedTrackedDirs = []
   lastRefreshMs = 0
   lastGitIndexMtime = null
   loadedTrackedSignature = null
@@ -497,6 +510,19 @@ async function getProjectFiles(
   ]
   if (!respectGitignore) {
     rgArgs.push('--no-ignore-vcs')
+  }
+
+  // Cap recursion depth for non-git dirs. This fallback only runs when there's
+  // no git index, so it otherwise walks the entire cwd - catastrophic for
+  // large non-git dirs (e.g. 190k-file dataset dirs) where it also kicks off
+  // antivirus realtime scans that saturate disk IO and freeze the TUI for
+  // seconds. 3 covers typical source trees; set
+  // CLAUDE_CODE_FILE_INDEX_MAX_DEPTH=0 to disable the cap.
+  const envDepth = process.env.CLAUDE_CODE_FILE_INDEX_MAX_DEPTH
+  const maxDepth =
+    envDepth !== undefined && envDepth !== '' ? Number(envDepth) : 3
+  if (Number.isFinite(maxDepth) && maxDepth > 0) {
+    rgArgs.push('--max-depth', String(Math.floor(maxDepth)))
   }
 
   const files = await ripGrep(rgArgs, '.', abortSignal)
