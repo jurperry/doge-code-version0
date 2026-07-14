@@ -1211,7 +1211,7 @@ function runHeadlessStreaming(
         supportsEffort: true,
         supportedEffortLevels: modelSupportsMaxEffort(resolvedModel)
           ? [...EFFORT_LEVELS]
-          : EFFORT_LEVELS.filter(l => l !== 'max'),
+          : EFFORT_LEVELS.filter(l => l !== 'max' && l !== 'xhigh'),
       }),
       ...(hasAdaptiveThinking && { supportsAdaptiveThinking: true }),
       ...(hasFastMode && { supportsFastMode: true }),

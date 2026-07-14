@@ -1,4 +1,4 @@
-export type EffortLevel = 'low' | 'medium' | 'high' | string
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | string
 export type SDKSession = Record<string, unknown>
 export type SDKSessionOptions = Record<string, unknown>
 export type SDKSessionInfo = Record<string, unknown>
