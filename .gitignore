@@ -50,3 +50,9 @@ desktop.ini
 *.log
 .cache/
 coverage/
+
+# ---- Playwright MCP 缓存 / npm 锁文件 ----
+# .playwright-mcp/ 为 Playwright MCP 运行时日志/页面快照缓存
+# package-lock.json 为 npm 副产物(项目使用 bun.lock 作为锁文件)
+.playwright-mcp/
+package-lock.json

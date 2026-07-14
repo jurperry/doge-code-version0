@@ -46,6 +46,7 @@ import { clearSessionEnvVars } from '../../utils/sessionEnvVars.js'
  */
 export function clearSessionCaches(
   preservedAgentIds: ReadonlySet<string> = new Set(),
+  options: { softFileIndex?: boolean } = {},
 ): void {
   const hasPreserved = preservedAgentIds.size > 0
   // Clear context caches
@@ -53,8 +54,9 @@ export function clearSessionCaches(
   getSystemContext.cache.clear?.()
   getGitStatus.cache.clear?.()
   getSessionStartDate.cache.clear?.()
-  // Clear file suggestion caches (for @ mentions)
-  clearFileSuggestionCaches()
+  // Clear file suggestion caches (for @ mentions). soft=true keeps the file
+  // index so /clear doesn't force a rescan on the next typeahead mount.
+  clearFileSuggestionCaches(options.softFileIndex === true)
 
   // Clear commands/skills cache
   clearCommandsCache()

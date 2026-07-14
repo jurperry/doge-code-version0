@@ -125,7 +125,7 @@ export async function clearConversation({
   // Clear all session-related caches. Per-agent state for preserved background
   // tasks (invoked skills, pending permission callbacks, dump state, cache-break
   // tracking) is retained so those agents keep functioning.
-  clearSessionCaches(preservedAgentIds)
+  clearSessionCaches(preservedAgentIds, { softFileIndex: true })
 
   // Skip setCwd if already at original cwd — avoids unnecessary realpathSync
   if (getCwd() !== getOriginalCwd()) {
