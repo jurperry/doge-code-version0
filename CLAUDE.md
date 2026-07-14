@@ -146,6 +146,7 @@ bun link              # 注册全局 doge 命令
 - `debug_updates_2.md` — Chapter 11-25（Windows 输入/压缩/模型管理/持久化）
 - `debug_updates_3.md` — Chapter 26+（凭据覆盖/effort 一致性/模型切换）
 - `debug_updates_4.md` — 最新修改（effort 全链路修复/thinking 守卫）
+- `debug_updates_5.md` - TUI 卡顿修复（skills 跳过 node_modules / /clear 软清 fileIndex / 非 git 大目录限深扫描）
 
 ## 常见问题速查
 
