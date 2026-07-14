@@ -17,7 +17,7 @@ const batch = await client.messages.batches.create({
     {
       custom_id: 'item-1',
       params: {
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-5',
         max_tokens: 512,
         messages: [{ role: 'user', content: 'Classify this ticket.' }],
       },

@@ -20,7 +20,7 @@ const client = new Anthropic({
 })
 
 const message = await client.messages.create({
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-5',
   max_tokens: 1024,
   messages: [
     { role: 'user', content: 'Summarize this change in 3 bullets.' },
@@ -43,8 +43,8 @@ Pass prior turns back in `messages` when you need continuity. Keep the conversat
 
 ## Model choice
 
-- `claude-opus-4-6`: highest reasoning quality
-- `claude-sonnet-4-6`: general default for most product workloads
+- `claude-opus-4-8`: highest reasoning quality
+- `claude-sonnet-5`: general default for most product workloads
 - `claude-haiku-4-5`: lower-latency and lower-cost tasks
 
 Check the current model catalog before hard-coding IDs in production.

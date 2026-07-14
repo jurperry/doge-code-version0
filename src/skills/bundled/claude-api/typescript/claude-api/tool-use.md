@@ -24,7 +24,7 @@ const tools = [
 
 ```ts
 const message = await client.messages.create({
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-5',
   max_tokens: 1024,
   tools,
   messages: [{ role: 'user', content: 'What is the weather in Tokyo?' }],
