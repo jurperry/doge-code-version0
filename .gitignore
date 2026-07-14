@@ -11,6 +11,8 @@ out/
 # ---- Bun ----
 .bun/
 *.lockb
+# npm 锁文件（本项目用 bun 管理依赖，不提交）
+package-lock.json
 
 # ---- 运行时 / 本地配置（不入库）----
 .env
@@ -21,6 +23,9 @@ config.env
 
 # Claude Code / 本会话本地状态
 .claude/
+
+# Playwright MCP 运行时缓存（console 日志 / page 快照）
+.playwright-mcp/
 
 # ---- 调试日志 ----
 debug/
