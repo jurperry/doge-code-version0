@@ -179,7 +179,7 @@ import { migrateLegacyOpusToCurrent } from './migrations/migrateLegacyOpusToCurr
 import { migrateOpusToOpus1m } from './migrations/migrateOpusToOpus1m.js';
 import { migrateReplBridgeEnabledToRemoteControlAtStartup } from './migrations/migrateReplBridgeEnabledToRemoteControlAtStartup.js';
 import { migrateSonnet1mToSonnet45 } from './migrations/migrateSonnet1mToSonnet45.js';
-import { migrateSonnet45ToSonnet46 } from './migrations/migrateSonnet45ToSonnet46.js';
+import { migrateSonnet45ToSonnet5 } from './migrations/migrateSonnet45ToSonnet5.js';
 import { resetAutoModeOptInForDefaultOffer } from './migrations/resetAutoModeOptInForDefaultOffer.js';
 import { resetProToOpusDefault } from './migrations/resetProToOpusDefault.js';
 import { createRemoteSessionConfig } from './remote/RemoteSessionManager.js';
@@ -331,7 +331,7 @@ function runMigrations(): void {
     resetProToOpusDefault();
     migrateSonnet1mToSonnet45();
     migrateLegacyOpusToCurrent();
-    migrateSonnet45ToSonnet46();
+    migrateSonnet45ToSonnet5();
     migrateOpusToOpus1m();
     migrateReplBridgeEnabledToRemoteControlAtStartup();
     if (feature('TRANSCRIPT_CLASSIFIER')) {
@@ -996,7 +996,7 @@ async function run(): Promise<CommanderCommand> {
     return Number.isFinite(n) ? n : undefined;
   }).hideHelp()).option('--from-pr [value]', 'Resume a session linked to a PR by PR number/URL, or open interactive picker with optional search term', value => value || true).option('--no-session-persistence', 'Disable session persistence - sessions will not be saved to disk and cannot be resumed (only works with --print)').addOption(new Option('--resume-session-at <message id>', 'When resuming, only messages up to and including the assistant message with <message.id> (use with --resume in print mode)').argParser(String).hideHelp()).addOption(new Option('--rewind-files <user-message-id>', 'Restore files to state at the specified user message and exit (requires --resume)').hideHelp())
   // @[MODEL LAUNCH]: Update the example model ID in the --model help text.
-  .option('--model <model>', `Model for the current session. Provide an alias for the latest model (e.g. 'sonnet' or 'opus') or a model's full name (e.g. 'claude-sonnet-4-6').`).addOption(new Option('--effort <level>', `Effort level for the current session (low, medium, high, max)`).argParser((rawValue: string) => {
+  .option('--model <model>', `Model for the current session. Provide an alias for the latest model (e.g. 'sonnet' or 'opus') or a model's full name (e.g. 'claude-sonnet-5').`).addOption(new Option('--effort <level>', `Effort level for the current session (low, medium, high, max)`).argParser((rawValue: string) => {
     const value = rawValue.toLowerCase();
     const allowed = ['low', 'medium', 'high', 'max'];
     if (!allowed.includes(value)) {

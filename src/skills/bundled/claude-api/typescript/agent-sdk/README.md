@@ -16,7 +16,7 @@ Set `DOGE_API_KEY` unless your runtime provides Claude Code style auth separatel
 import { Agent } from '@anthropic-ai/claude-agent-sdk'
 
 const agent = new Agent({
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-5',
   systemPrompt: 'You are a precise engineering assistant.',
 })
 

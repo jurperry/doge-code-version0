@@ -404,7 +404,7 @@ export async function runSimpleStreamJson(): Promise<void> {
           type: 'system',
           subtype: 'init',
           session_id: msg.session_id || '',
-          model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
+          model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
         }));
         continue;
       }

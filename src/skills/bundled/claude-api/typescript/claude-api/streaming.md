@@ -6,7 +6,7 @@ Use streaming when the user should see output incrementally or when you want ear
 
 ```ts
 const stream = await client.messages.stream({
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-5',
   max_tokens: 1024,
   messages: [{ role: 'user', content: 'Draft a release note.' }],
 })

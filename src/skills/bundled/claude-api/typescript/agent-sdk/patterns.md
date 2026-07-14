@@ -6,7 +6,7 @@ Start with the smallest tool surface that can finish the task.
 
 ```ts
 const agent = new Agent({
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-5',
   systemPrompt: 'Review code and report findings only.',
   allowedTools: ['Read', 'Glob', 'Grep'],
 })
