@@ -326,3 +326,113 @@ bunx tsc --noEmit -p tsconfig.json
 - `a35b827` perf(tui): /clear 软清 fileIndex + 非 git 大目录限深扫描
 
 两提交已合并入 `main`（合并提交 `b1fe50d`）。`start_coding_plan.ps1` 合并冲突取 main 的 `glm-latest`；`start_glm.ps1` 取本分支的 `glm-5.2` 升级。
+
+---
+
+## 2026-07-14 新增 xhigh 思考档位（high 与 max 之间）
+
+### 背景
+
+Anthropic 与 OpenAI 兼容 API 现均已原生支持 `low/medium/high/xhigh/max` 五档 effort。经调研三种接口格式的 effort 传递路径，确认 doge-code 的发送层对 effort 字符串是**纯透传**（无白名单校验），故新增 `xhigh` 为纯客户端枚举扩展，无需任何协议转换。
+
+### 三种接口格式下 effort 的传递路径
+
+| 格式 | effort 位置 | beta header | 调用代码 |
+|------|------------|-------------|---------|
+| Anthropic `/v1/messages` | `output_config.effort` | ✅ `anthropic-beta: effort-2025-11-24` | `claude.ts:1517` SDK create |
+| OpenAI `/v1/chat/completions` | 顶层 `effort` | ❌ 无 | `claude.ts:1901` `createOpenAICompatStream` |
+| Responses `/v1/responses` | 顶层 `effort` | ❌ 无 | `claude.ts:1935` `createResponsesCompatStream` |
+
+三处透传点均无枚举过滤，`low/medium/high/xhigh/max` 在三种格式下都能完整发出。OpenAI/Responses 兼容路径只发 `content-type` + `authorization` 头，`betas` 数组在此路径被丢弃--第三方服务从 body 顶层 `effort` 读取，不依赖 beta 开关。
+
+### 决策
+
+1. **Gate 策略 = 与 max 绑定**：xhigh 复用 `modelSupportsMaxEffort`，只有支持 max 的模型（Opus / ant / 配置了 tier capabilities 的第三方模型）才能切到 xhigh 和 max。`ModelPicker` 的 `includeMax` 参数同时控制两者，无需新增参数。
+2. **持久化 = 仅当前会话**：xhigh 不写 `settings.json`，`toPersistableEffort('xhigh')` 返回 `undefined`（走默认 case，无需改 Zod schema），自动走 `(this session only)` 分支。
+
+### 改动（7 文件）
+
+| 文件 | 改动 |
+|------|------|
+| `src/utils/effort.ts` | `EFFORT_LEVELS` 加 `xhigh`；`resolveAppliedEffort` 降级条件含 xhigh（与 max 绑定）；`convertEffortValueToLevel` 加 `<=150` 区间；`getEffortLevelDescription` 加 case |
+| `src/entrypoints/sdk/runtimeTypes.ts` | `EffortLevel` 加 `'xhigh'` 字面量 |
+| `src/constants/figures.ts` | 新增 `EFFORT_XHIGH = '◎'`（梯度 `○◐●◎◉`） |
+| `src/components/EffortIndicator.ts` | import + switch case |
+| `src/components/ModelPicker.tsx` | `cycleEffortLevel` 数组加 xhigh；`displayEffort` 降级含 xhigh |
+| `src/cli/print.ts` | `supportedEffortLevels` 对不支持 max 的模型同时排除 xhigh |
+| `src/commands/effort/effort.tsx` | `/effort` 错误提示与 help 文案加 xhigh |
+
+### 严格未动（符合计划）
+
+Zod schema（`settings/types.ts`）、`toPersistableEffort`、`configureEffortParams`（`claude.ts`）、`openaiCompat.ts`、`responsesCompat.ts`、`EffortCallout.tsx`、`modelSupportsMaxEffort`。xhigh 原样透传给 API，复用 `modelSupportsMaxEffort` 作为 gate。
+
+### 验证
+
+- 7 文件全部 `bun build --noEmit` transpile 通过
+- 运行时行为脚本 10/10 通过：`isEffortLevel('xhigh')`=true、`toPersistableEffort('xhigh')`=undefined（session-only）、`resolveAppliedEffort('claude-3-haiku','xhigh')`='high'（gate 降级）、ant-only 数值 `120->xhigh`/`100->high`/`151->max`
+
+### 提交
+
+- `9615a59` feat(effort): 新增 xhigh 思考档位（high 与 max 之间）
+- 已合并入 `main`（合并提交 `e71d45c`）
+
+---
+
+## 2026-07-14 原生模型 ID 升级 Opus 4.6->4.8、Sonnet 4.6->5
+
+### 背景
+
+将 doge-code 硬编码的原生（first-party）模型 ID 升级到最新：Opus 4.6 -> **Opus 4.8**，Sonnet 4.6 -> **Sonnet 5**，Haiku 保持 **4.5**。旧 ID 散布在 src/ 数十处（configs/canonical/betas/effort/thinking/context/prompts/migrations 等），需系统替换避免遗漏。
+
+### 覆盖的字段类型
+
+| 类型 | 示例 |
+|------|------|
+| 模型 ID 字符串 | `claude-opus-4-6` -> `claude-opus-4-8`，短形式 `opus-4-6` -> `opus-4-8`，下划线 `opus_4_6` -> `opus_4_8` |
+| bedrock/vertex/foundry ID | `us.anthropic.claude-opus-4-6-v1` -> `us.anthropic.claude-opus-4-8-v1` |
+| 常量名 | `CLAUDE_OPUS_4_6_CONFIG` -> `CLAUDE_OPUS_4_8_CONFIG`，`CLAUDE_4_5_OR_4_6_MODEL_IDS` -> `CLAUDE_LATEST_MODEL_IDS` |
+| configs key | `opus46` -> `opus48`、`sonnet46` -> `sonnet5`（`getModelStrings().opus48` 全链路同步） |
+| 函数/变量名 | `getOpus46PricingSuffix` -> `getOpus48PricingSuffix`、`isOpus46` -> `isOpus48`、`isSonnet46` -> `isSonnet5` |
+| env var | `VERTEX_REGION_CLAUDE_4_6_SONNET` -> `VERTEX_REGION_CLAUDE_SONNET_5` |
+| UI 文案 | `Opus 4.6` -> `Opus 4.8`、`Sonnet 4.6` -> `Sonnet 5`（大小写均覆盖） |
+| migration | `migrateSonnet45ToSonnet46` 重命名为 `migrateSonnet45ToSonnet5`（文件 + 函数 + main.tsx import） |
+
+### 语义修正（非机械替换）
+
+- **canonical 顺序**（`model.ts:276-296`）：替换后 `claude-opus-4-8` 仍在 `claude-opus-4` 前、`claude-sonnet-5` 在 `claude-sonnet-4-5` 前，匹配顺序天然正确
+- **modelSupports1M**（`context.ts:62`）：sonnet-5 不被 `claude-sonnet-4` 子串匹配，手动补 `|| includes('claude-sonnet-5')` 分支
+- **prompts.ts 文案**：原"The most recent Claude model family is Claude 4.5/4.6"重写为"The most recent Claude models are Opus 4.8, Sonnet 5, and Haiku 4.5"
+
+### 保留未改（有意为之）
+
+- analytics 事件名 `tengu_sonnet45_to_46_migration`、config key `sonnet45To46MigrationTimestamp`：数据 schema 标识，改名会断历史数据连续性
+- `docs/superpowers/` 设计文档、`debug_updates_*.md`：历史记录
+- 部分编译后 .tsx 末尾的 base64 sourcemap：source-map 恢复项目无 build 流程，无法可靠重生成（仅影响调试行号映射，不影响运行时）
+
+### 涉及范围
+
+- src/ 55 文件（PowerShell 脚本批量替换 + 手动补语义点）
+- needs/skills/claude-api/ 19 个文档（API 示例同步升级）
+- 1 个文件重命名：`migrateSonnet45ToSonnet46.ts` -> `migrateSonnet45ToSonnet5.ts`
+
+### 验证
+
+- 55 个 .ts/.tsx 全部 `bun build --no-bundle` transpile 通过
+- 运行时验证 14/14 通过：configs key 存在（opus48/sonnet5）旧 key 消失（opus46/sonnet46）、canonical 正确识别新 ID 及 bedrock 变体（`us.anthropic.claude-opus-4-8-v1`）、`modelSupports1M` 对 sonnet-5/opus-4-8 返回 true、haiku-4-5 返回 false
+
+### 提交
+
+- `3a0838d` feat(model): 原生模型 ID 升级 Opus 4.6->4.8、Sonnet 4.6->5
+- 已合并入 `main`（合并提交 `fd43129`）
+
+### 合并冲突处理
+
+模型升级分支与 xhigh 分支都改动了 effort 相关文件，merge 时 3 处冲突：
+
+| 文件 | 冲突 | 解决 |
+|------|------|------|
+| `figures.ts` | EFFORT_XHIGH 行（xhigh）vs EFFORT_MAX 注释 4.6->4.8（model） | 保留 XHIGH 行 + MAX 注释用 4.8 |
+| `effort.tsx` | help 文案 xhigh 行（xhigh）vs "Opus 4.6 only"->"4.8 only"（model） | 合并：xhigh 行 + "Opus 4.8 only" |
+| `effort.ts` | 两分支改相邻行 | auto-merge 正确，xhigh 逻辑与 4.8 文案共存 |
+
+冲突解决后三个文件 transpile 通过，src/ 无冲突标记残留。
