@@ -14,6 +14,7 @@ export const EFFORT_LEVELS = [
   'low',
   'medium',
   'high',
+  'xhigh',
   'max',
 ] as const satisfies readonly EffortLevel[]
 
@@ -173,7 +174,10 @@ export function resolveAppliedEffort(
   const resolved =
     envOverride ?? appStateEffortValue ?? getDefaultEffortForModel(model)
   // API rejects 'max' on non-Opus-4.6 models — downgrade to 'high'.
-  if (resolved === 'max' && !modelSupportsMaxEffort(model)) {
+  if (
+    (resolved === 'max' || resolved === 'xhigh') &&
+    !modelSupportsMaxEffort(model)
+  ) {
     return 'high'
   }
   return resolved
@@ -233,6 +237,7 @@ export function convertEffortValueToLevel(value: EffortValue): EffortLevel {
     if (value <= 50) return 'low'
     if (value <= 85) return 'medium'
     if (value <= 100) return 'high'
+    if (value <= 150) return 'xhigh'
     return 'max'
   }
   return 'high'
@@ -252,6 +257,8 @@ export function getEffortLevelDescription(level: EffortLevel): string {
       return 'Balanced approach with standard implementation and testing'
     case 'high':
       return 'Comprehensive implementation with extensive testing and documentation'
+    case 'xhigh':
+      return 'Higher-intensity reasoning between high and max'
     case 'max':
       return 'Maximum capability with deepest reasoning (Opus 4.6 only)'
   }

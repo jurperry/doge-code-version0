@@ -176,7 +176,7 @@ export function ModelPicker(t0) {
     t9 = $[24];
   }
   const focusedDefaultEffort = t9;
-  const displayEffort = effort === "max" && !focusedSupportsMax ? "high" : effort;
+  const displayEffort = (effort === "max" || effort === "xhigh") && !focusedSupportsMax ? "high" : effort;
   let t10;
   if ($[25] !== effortValue || $[26] !== hasToggledEffort) {
     t10 = value => {
@@ -456,7 +456,7 @@ function EffortLevelIndicator(t0) {
   return t4;
 }
 function cycleEffortLevel(current: EffortLevel, direction: 'left' | 'right', includeMax: boolean): EffortLevel {
-  const levels: EffortLevel[] = includeMax ? ['low', 'medium', 'high', 'max'] : ['low', 'medium', 'high'];
+  const levels: EffortLevel[] = includeMax ? ['low', 'medium', 'high', 'xhigh', 'max'] : ['low', 'medium', 'high'];
   // If the current level isn't in the cycle (e.g. 'max' after switching to a
   // non-Opus model), clamp to 'high'.
   const idx = levels.indexOf(current);
