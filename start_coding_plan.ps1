@@ -23,16 +23,16 @@ Remove-Item Env:\CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK -ErrorAction Silently
 $env:ANTHROPIC_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding"
 # ANTHROPIC_AUTH_TOKEN与DOGE_API_KEY二者只能取其一
 $env:ANTHROPIC_AUTH_TOKEN = "REDACTED_VOLCENGINE_KEY"
-$env:ANTHROPIC_MODEL = "glm-5.1"
+$env:ANTHROPIC_MODEL = "glm-latest"
 # 默认模型三种类型：opus、sonnet、haiku，分别对应不同的模型
-$env:ANTHROPIC_DEFAULT_OPUS_MODEL="glm-5.1"
-$env:ANTHROPIC_DEFAULT_SONNET_MODEL="kimi-k2.6[1m]"
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL="glm-latest"
+$env:ANTHROPIC_DEFAULT_SONNET_MODEL="kimi-k2.6"
 $env:ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-flash"
 # 声明模型支持的能力（包括 max_effort）
 $env:ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES="effort,max_effort,thinking,adaptive_thinking"
 $env:ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES="effort,max_effort,thinking,adaptive_thinking"
 # SUBAGENT_MODEL 为子智能体模型
-$env:CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4-flash"
+$env:CLAUDE_CODE_SUBAGENT_MODEL="glm-latest"
 # 禁用非必要流量
 $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 # 禁用非流式回退

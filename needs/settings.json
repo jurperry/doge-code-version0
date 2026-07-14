@@ -1,5 +1,5 @@
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-v4-pro[1m]",
   "hooks": {
     "WorktreeCreate": [
       {
