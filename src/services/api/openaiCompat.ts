@@ -1,3 +1,4 @@
+import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
 import type {
   BetaMessage,
   BetaMessageParam,
@@ -239,24 +240,56 @@ export function convertAnthropicRequestToOpenAI(input: {
   }
 }
 
+// Some OpenAI-compatible gateways (e.g. opencode zen) wrap upstream provider
+// outages in a 400/422 with a generic body like
+// "Error from provider (Console Go): Upstream request failed" instead of
+// passing through a 5xx. These are transient capacity/availability failures,
+// not malformed requests — they must be retried like 5xx instead of
+// surfacing as permanent request errors.
+const TRANSIENT_UPSTREAM_PATTERN =
+  /upstream request failed|upstream[^"]*(failed|failure|error|timeout|unavailable)|temporarily unavailable|overloaded|try again later/i
+
+function isTransientUpstreamError(status: number, responseText: string): boolean {
+  if (status === 408 || status === 409 || status === 429 || status >= 500) {
+    return true
+  }
+  return (
+    (status === 400 || status === 422) &&
+    TRANSIENT_UPSTREAM_PATTERN.test(responseText)
+  )
+}
+
 export async function createOpenAICompatStream(
   config: OpenAICompatConfig,
   request: OpenAIChatRequest,
   signal?: AbortSignal,
 ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
-  const response = await (config.fetch ?? globalThis.fetch)(
-    joinBaseUrl(config.baseURL, '/v1/chat/completions'),
-    {
-      method: 'POST',
-      signal,
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${config.apiKey}`,
-        ...config.headers,
+  let response: Response
+  try {
+    response = await (config.fetch ?? globalThis.fetch)(
+      joinBaseUrl(config.baseURL, '/v1/chat/completions'),
+      {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${config.apiKey}`,
+          ...config.headers,
+        },
+        body: JSON.stringify({ ...request, stream: true }),
       },
-      body: JSON.stringify({ ...request, stream: true }),
-    },
-  )
+    )
+  } catch (error) {
+    // Never convert an intentional abort into a retryable connection error.
+    if (signal?.aborted) throw error
+    // Network-level failure (DNS, reset, TLS). The Anthropic-native path gets
+    // APIConnectionError from the SDK and withRetry retries it — give the
+    // OpenAI-compatible path the same treatment.
+    throw new APIConnectionError({
+      message: `OpenAI compatible request connection error: ${error instanceof Error ? error.message : String(error)}`,
+      cause: error,
+    })
+  }
 
   if (!response.ok || !response.body) {
     let responseText = ''
@@ -287,6 +320,22 @@ export async function createOpenAICompatStream(
         // Throw with "Prompt is too long" prefix so errors.ts PTL detection works
         throw new Error(`Prompt is too long: ${responseText}`)
       }
+    }
+    if (response.ok || isTransientUpstreamError(response.status, responseText)) {
+      // Throw a real APIError so withRetry's shouldRetry() classification
+      // applies (408/409/429/5xx are retryable there). A plain Error is NOT
+      // an APIError instance and would abort the turn without any retry —
+      // a single transient gateway blip used to kill the whole turn.
+      // 408/409/429/5xx keep their native status; gateway 400/422
+      // "upstream failed" wrappers (and ok-with-empty-body) map to 503.
+      const normalizedStatus =
+        response.ok || response.status === 400 || response.status === 422
+          ? 503
+          : response.status
+      const detail = `OpenAI compatible request failed with status ${response.status}${responseText ? `: ${responseText}` : ''}`
+      // Pass the body as the message (not as APIError.error) so the final
+      // error text keeps the original gateway status and payload verbatim.
+      throw new APIError(normalizedStatus, undefined, detail, response.headers)
     }
     throw new Error(
       `OpenAI compatible request failed with status ${response.status}${responseText ? `: ${responseText}` : ''}`,
