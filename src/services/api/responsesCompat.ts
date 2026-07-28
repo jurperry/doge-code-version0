@@ -45,13 +45,19 @@ type ResponsesInputItem =
   | ResponsesFunctionCallItem
   | ResponsesFunctionCallOutputItem
 
-type ResponsesTool = {
-  type: 'function'
-  name: string
-  description?: string
-  parameters?: unknown
-  strict?: boolean
-}
+type ResponsesTool =
+  | {
+      type: 'function'
+      name: string
+      description?: string
+      parameters?: unknown
+      strict?: boolean
+    }
+  | {
+      type: 'web_search_preview'
+      search_context_size?: 'low' | 'medium' | 'high'
+      filters?: { allowed_domains?: string[] }
+    }
 
 type ResponsesRequest = {
   model: string
@@ -65,6 +71,9 @@ type ResponsesRequest = {
     | {
         type: 'function'
         name: string
+      }
+    | {
+        type: 'web_search_preview'
       }
   max_output_tokens?: number
   effort?: string
@@ -83,6 +92,10 @@ type ResponsesItem = {
   call_id?: string
   arguments?: string
   status?: string
+  action?: {
+    type?: string
+    query?: string
+  }
 }
 
 type ResponsesStreamEvent = {
@@ -105,6 +118,11 @@ type ResponsesStreamEvent = {
     reason?: string
   }
   response_id?: string
+  annotation?: {
+    type?: string
+    url?: string
+    title?: string
+  }
 }
 
 type ToolCallState = {
@@ -115,10 +133,35 @@ type ToolCallState = {
   stopped: boolean
 }
 
+type WebSearchCallState = {
+  anthropicIndex: number
+  id: string
+  stopped: boolean
+}
+
 function getToolDefinitions(tools?: BetaToolUnion[]): ResponsesTool[] | undefined {
   if (!tools || tools.length === 0) return undefined
-  const mapped = tools.flatMap(tool => {
+  const mapped = tools.flatMap((tool): ResponsesTool[] => {
     const record = tool as unknown as Record<string, unknown>
+    // Anthropic's server-side web search maps to the Responses API's built-in
+    // web_search_preview tool. blocked_domains and max_uses have no Responses
+    // API equivalent and are dropped.
+    if (record.type === 'web_search_20250305') {
+      const allowedDomains = Array.isArray(record.allowed_domains)
+        ? record.allowed_domains.filter(
+            (domain): domain is string => typeof domain === 'string',
+          )
+        : []
+      return [
+        {
+          type: 'web_search_preview' as const,
+          search_context_size: 'medium' as const,
+          ...(allowedDomains.length > 0
+            ? { filters: { allowed_domains: allowedDomains } }
+            : {}),
+        },
+      ]
+    }
     const name = typeof record.name === 'string' ? record.name : undefined
     if (!name) return []
     return [
@@ -243,10 +286,15 @@ export function convertAnthropicRequestToResponses(input: {
       : {}),
     ...(input.tool_choice?.type === 'tool'
       ? {
-          tool_choice: {
-            type: 'function' as const,
-            name: input.tool_choice.name,
-          },
+          tool_choice:
+            // web_search is a server-side tool; select the Responses built-in
+            // web_search_preview tool instead of a (nonexistent) function.
+            input.tool_choice.name === 'web_search'
+              ? ({ type: 'web_search_preview' } as const)
+              : {
+                  type: 'function' as const,
+                  name: input.tool_choice.name,
+                },
         }
       : input.tool_choice?.type === 'auto'
         ? { tool_choice: 'auto' as const }
@@ -414,6 +462,13 @@ export async function* createAnthropicStreamFromResponses(input: {
   let finalStopReason: BetaMessage['stop_reason'] = 'end_turn'
   const toolStates = new Map<string, ToolCallState>()
   const toolOrder: string[] = []
+  // Server-side web search synthesis state: tracks web_search_call output items
+  // (mapped to server_tool_use blocks) and url_citation annotations (collected
+  // into a single synthesized web_search_tool_result block at stream end).
+  const webSearchStates = new Map<string, WebSearchCallState>()
+  let lastWebSearchCallId: string | undefined
+  const citations: Array<{ url: string; title: string }> = []
+  const seenCitationUrls = new Set<string>()
 
   while (true) {
     const { done, value } = await input.reader.read()
@@ -462,10 +517,27 @@ export async function* createAnthropicStreamFromResponses(input: {
         if (usage?.input_tokens !== undefined) promptTokens = usage.input_tokens
         if (usage?.output_tokens !== undefined) completionTokens = usage.output_tokens
 
-        if (
-          eventType === 'response.output_text.delta' ||
-          eventType === 'response.output_text.annotation.added'
-        ) {
+        if (eventType === 'response.output_text.annotation.added') {
+          // url_citation annotations are the only signal that a server-side
+          // search produced results — collect them (deduped by url) for the
+          // synthesized web_search_tool_result block emitted at stream end.
+          const annotation = event.annotation
+          if (
+            annotation?.type === 'url_citation' &&
+            typeof annotation.url === 'string' &&
+            annotation.url.length > 0 &&
+            !seenCitationUrls.has(annotation.url)
+          ) {
+            seenCitationUrls.add(annotation.url)
+            citations.push({
+              url: annotation.url,
+              title: typeof annotation.title === 'string' ? annotation.title : '',
+            })
+          }
+          continue
+        }
+
+        if (eventType === 'response.output_text.delta') {
           const textDelta = event.delta ?? event.text ?? ''
           if (textDelta) {
             const startEvent = ensureTextBlockStarted(textStarted, textContentIndex)
@@ -482,6 +554,82 @@ export async function* createAnthropicStreamFromResponses(input: {
               },
             } as BetaRawMessageStreamEvent
             emittedAnyContent = true
+          }
+          continue
+        }
+
+        if (
+          eventType === 'response.output_item.added' &&
+          event.item?.type === 'web_search_call'
+        ) {
+          const key =
+            event.item.id ?? event.item_id ?? `web_search_${webSearchStates.size}`
+          if (!webSearchStates.has(key)) {
+            const anthropicIndex = nextContentIndex++
+            const id = event.item.id ?? key
+            webSearchStates.set(key, { anthropicIndex, id, stopped: false })
+            lastWebSearchCallId = id
+            yield {
+              type: 'content_block_start',
+              index: anthropicIndex,
+              content_block: {
+                type: 'server_tool_use',
+                id,
+                name: 'web_search',
+                input: {},
+              },
+            } as BetaRawMessageStreamEvent
+            emittedAnyContent = true
+          }
+          continue
+        }
+
+        if (
+          eventType === 'response.output_item.done' &&
+          event.item?.type === 'web_search_call'
+        ) {
+          // The query is only guaranteed to be complete once the item is done,
+          // so the input_json_delta is emitted here rather than on added.
+          // (The response.web_search_call.* lifecycle events are redundant with
+          // the output_item events and are ignored.)
+          const key =
+            event.item.id ?? event.item_id ?? `web_search_${webSearchStates.size}`
+          let state = webSearchStates.get(key)
+          if (!state) {
+            // Some providers skip output_item.added — synthesize the start.
+            const anthropicIndex = nextContentIndex++
+            const id = event.item.id ?? key
+            state = { anthropicIndex, id, stopped: false }
+            webSearchStates.set(key, state)
+            yield {
+              type: 'content_block_start',
+              index: anthropicIndex,
+              content_block: {
+                type: 'server_tool_use',
+                id,
+                name: 'web_search',
+                input: {},
+              },
+            } as BetaRawMessageStreamEvent
+            emittedAnyContent = true
+          }
+          lastWebSearchCallId = state.id
+          yield {
+            type: 'content_block_delta',
+            index: state.anthropicIndex,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: JSON.stringify({
+                query: event.item.action?.query ?? '',
+              }),
+            },
+          } as BetaRawMessageStreamEvent
+          if (!state.stopped) {
+            yield {
+              type: 'content_block_stop',
+              index: state.anthropicIndex,
+            } as BetaRawMessageStreamEvent
+            state.stopped = true
           }
           continue
         }
@@ -611,16 +759,54 @@ export async function* createAnthropicStreamFromResponses(input: {
             }
           }
 
+          if (citations.length > 0) {
+            // Synthesize the web_search_tool_result block the Anthropic API
+            // would have produced, from the collected url_citation annotations.
+            const anthropicIndex = nextContentIndex++
+            yield {
+              type: 'content_block_start',
+              index: anthropicIndex,
+              content_block: {
+                type: 'web_search_tool_result',
+                tool_use_id:
+                  lastWebSearchCallId ?? `web_search_${anthropicIndex}`,
+                content: citations.map(citation => ({
+                  type: 'web_search_result',
+                  title: citation.title,
+                  url: citation.url,
+                  encrypted_content: '',
+                  page_age: null,
+                })),
+              },
+            } as BetaRawMessageStreamEvent
+            yield {
+              type: 'content_block_stop',
+              index: anthropicIndex,
+            } as BetaRawMessageStreamEvent
+          }
+
           yield {
             type: 'message_delta',
             delta: {
               stop_reason: finalStopReason,
               stop_sequence: null,
             },
-            usage: mapUsageToAnthropic({
-              input_tokens: promptTokens,
-              output_tokens: completionTokens,
-            }),
+            usage: {
+              ...mapUsageToAnthropic({
+                input_tokens: promptTokens,
+                output_tokens: completionTokens,
+              }),
+              // Best effort: Responses usage has no server-tool breakdown, but
+              // consumers expect it once a search was synthesized.
+              ...(webSearchStates.size > 0 || citations.length > 0
+                ? {
+                    server_tool_use: {
+                      web_search_requests: 1,
+                      web_fetch_requests: 0,
+                    },
+                  }
+                : {}),
+            },
           } as BetaRawMessageStreamEvent
 
           yield {

@@ -50,6 +50,10 @@ export type OpenAIChatRequest = {
   }>
   tool_choice?: 'auto' | { type: 'function'; function: { name: string } }
   max_tokens?: number
+  // Chat Completions-native web search knob (e.g. gpt-4o-search-preview).
+  web_search_options?: {
+    search_context_size?: 'low' | 'medium' | 'high'
+  }
 }
 
 type OpenAIStreamChunk = {
@@ -68,6 +72,15 @@ type OpenAIStreamChunk = {
         function?: {
           name?: string
           arguments?: string
+        }
+      }>
+      // gpt-4o-search-preview style citations; some providers only emit
+      // these on the final chunk.
+      annotations?: Array<{
+        type?: string
+        url_citation?: {
+          url?: string
+          title?: string
         }
       }>
     }
@@ -110,6 +123,10 @@ function getToolDefinitions(tools?: BetaToolUnion[]): OpenAIChatRequest['tools']
   if (!tools || tools.length === 0) return undefined
   const mapped = tools.flatMap(tool => {
     const record = tool as unknown as Record<string, unknown>
+    // Anthropic server-side web search is not a callable function tool.
+    // Converting it would produce a parameterless function and lose all
+    // search semantics — it is mapped to web_search_options instead.
+    if (record.type === 'web_search_20250305') return []
     const name = typeof record.name === 'string' ? record.name : undefined
     if (!name) return []
     return [{
@@ -218,6 +235,16 @@ export function convertAnthropicRequestToOpenAI(input: {
     maxTokens = 32000
   }
 
+  // Anthropic's server-side web_search tool has no function equivalent in
+  // Chat Completions; map it to the native web_search_options knob instead.
+  // allowed_domains / blocked_domains have no Chat Completions counterpart
+  // and are silently ignored.
+  const webSearchTool = input.tools?.find(
+    tool =>
+      (tool as unknown as Record<string, unknown>).type ===
+      'web_search_20250305',
+  ) as unknown as { name?: string; max_uses?: number | null } | undefined
+
   return {
     model: targetModel,
     messages,
@@ -226,7 +253,21 @@ export function convertAnthropicRequestToOpenAI(input: {
     ...(getToolDefinitions(input.tools)
       ? { tools: getToolDefinitions(input.tools) }
       : {}),
-    ...(input.tool_choice?.type === 'tool'
+    ...(webSearchTool
+      ? {
+          web_search_options: {
+            search_context_size:
+              (webSearchTool.max_uses ?? 0) >= 5
+                ? ('high' as const)
+                : ('medium' as const),
+          },
+        }
+      : {}),
+    // Drop tool_choice when it names the filtered-out server-side web_search
+    // tool — emitting {type:'function', function:{name:'web_search'}} would
+    // reference a tool that no longer exists in the request.
+    ...(input.tool_choice?.type === 'tool' &&
+    input.tool_choice.name !== webSearchTool?.name
       ? {
           tool_choice: {
             type: 'function' as const,
@@ -377,6 +418,9 @@ export async function* createAnthropicStreamFromOpenAI(input: {
   let reasoningContentIndex: number | null = null
   let reasoningClosed = false
   const toolCallState = new Map<number, { id: string; name: string; arguments: string }>()
+  // url_citation annotations accumulated across chunks (deduped by url) —
+  // some providers only emit them on the final chunk.
+  const urlCitations = new Map<string, string>()
 
   while (true) {
     const { done, value } = await input.reader.read()
@@ -418,6 +462,15 @@ export async function* createAnthropicStreamFromOpenAI(input: {
         }
         if (chunk.usage?.completion_tokens !== undefined && chunk.usage.completion_tokens > 0) {
           completionTokens = chunk.usage.completion_tokens
+        }
+
+        // Collect web search citations (gpt-4o-search-preview style) so a
+        // web_search_tool_result block can be synthesized at stream end.
+        for (const annotation of delta?.annotations ?? []) {
+          if (annotation?.type !== 'url_citation') continue
+          const url = annotation.url_citation?.url
+          if (!url || urlCitations.has(url)) continue
+          urlCitations.set(url, annotation.url_citation?.title ?? '')
         }
 
         if (!started) {
@@ -580,6 +633,61 @@ export async function* createAnthropicStreamFromOpenAI(input: {
             } as BetaRawMessageStreamEvent
           }
 
+          // Synthesize Anthropic server_tool_use + web_search_tool_result
+          // blocks from collected url_citation annotations so downstream
+          // consumers (e.g. WebSearchTool) can reuse the native Anthropic
+          // parsing path. The search query is unknown on this API, so the
+          // input_json_delta carries an empty query.
+          let webSearchRequests = 0
+          if (urlCitations.size > 0) {
+            webSearchRequests = 1
+            const searchBlockIndex = nextContentIndex + 1
+            const resultBlockIndex = nextContentIndex + 2
+            nextContentIndex = resultBlockIndex
+            const searchToolUseId = `srvtoolu_${chunk.id ?? 'openai_compat'}`
+            yield {
+              type: 'content_block_start',
+              index: searchBlockIndex,
+              content_block: {
+                type: 'server_tool_use',
+                id: searchToolUseId,
+                name: 'web_search',
+                input: {},
+              },
+            } as BetaRawMessageStreamEvent
+            yield {
+              type: 'content_block_delta',
+              index: searchBlockIndex,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: JSON.stringify({ query: '' }),
+              },
+            } as BetaRawMessageStreamEvent
+            yield {
+              type: 'content_block_stop',
+              index: searchBlockIndex,
+            } as BetaRawMessageStreamEvent
+            yield {
+              type: 'content_block_start',
+              index: resultBlockIndex,
+              content_block: {
+                type: 'web_search_tool_result',
+                tool_use_id: searchToolUseId,
+                content: [...urlCitations].map(([url, title]) => ({
+                  type: 'web_search_result',
+                  title,
+                  url,
+                  encrypted_content: '',
+                  page_age: null,
+                })),
+              },
+            } as BetaRawMessageStreamEvent
+            yield {
+              type: 'content_block_stop',
+              index: resultBlockIndex,
+            } as BetaRawMessageStreamEvent
+          }
+
           yield {
             type: 'message_delta',
             delta: {
@@ -592,6 +700,9 @@ export async function* createAnthropicStreamFromOpenAI(input: {
               // APIs like DeepSeek that only report usage in the final chunk.
               input_tokens: promptTokens,
               output_tokens: completionTokens,
+              ...(webSearchRequests > 0
+                ? { server_tool_use: { web_search_requests: webSearchRequests } }
+                : {}),
             },
           } as BetaRawMessageStreamEvent
 

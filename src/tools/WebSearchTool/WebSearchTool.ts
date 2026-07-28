@@ -8,6 +8,7 @@ import { z } from 'zod/v4'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { queryModelWithStreaming } from '../../services/api/claude.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
+import { AbortError } from '../../utils/errors.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { logError } from '../../utils/log.js'
 import { createUserMessage } from '../../utils/messages.js'
@@ -295,9 +296,23 @@ export const WebSearchTool = buildTool({
     let currentToolUseJson = ''
     let progressCounter = 0
     const toolUseQueries = new Map() // Map of tool_use_id to query
+    // Set when the nested query ends in an API error (rate limit, connection
+    // failure, ...). queryModel reports those as a terminal assistant message
+    // with isApiErrorMessage: true instead of throwing, so capture the reason
+    // here rather than letting it pass through as fake search commentary.
+    let apiErrorReason: string | null = null
 
     for await (const event of queryStream) {
       if (event.type === 'assistant') {
+        if (event.isApiErrorMessage) {
+          const errorText = event.message.content
+            .filter(block => block.type === 'text')
+            .map(block => block.text)
+            .join('\n')
+          if (errorText) {
+            apiErrorReason = errorText
+          }
+        }
         allContentBlocks.push(...event.message.content)
         continue
       }
@@ -396,6 +411,35 @@ export const WebSearchTool = buildTool({
       query,
       durationSeconds,
     )
+
+    // Fail loudly instead of returning an empty success. Endpoints that don't
+    // support web search (or where the search call failed) produce no
+    // web_search_tool_result blocks at all, which used to surface as a silent
+    // "did 0 searches" success.
+    // Errors thrown by the stream itself propagate from the for-await above
+    // with their original reason; the executor turns thrown errors into an
+    // is_error tool result.
+    if (apiErrorReason) {
+      throw new Error(`Web search failed: ${apiErrorReason}`)
+    }
+
+    const hasSearchHits = data.results.some(
+      result => typeof result !== 'string' && result.content.length > 0,
+    )
+    const hasText = data.results.some(
+      result => typeof result === 'string' && result.trim().length > 0,
+    )
+    if (!hasSearchHits && !hasText) {
+      // An aborted nested query ends the stream with no events and no error —
+      // report the interrupt, not a bogus search failure.
+      if (context.abortController.signal.aborted) {
+        throw new AbortError()
+      }
+      throw new Error(
+        'Web search failed: the current API endpoint returned no search results (the provider may not support web search)',
+      )
+    }
+
     return { data }
   },
   mapToolResultToToolResultBlockParam(output, toolUseID) {
