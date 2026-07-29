@@ -243,11 +243,19 @@ export function ModelPicker(t0) {
       });
       if (!skipSettingsWrite) {
         const effortLevel = resolvePickerEffortPersistence(effort, getDefaultEffortLevelForOption(value_0), getSettingsForSource("userSettings")?.effortLevel, hasToggledEffort);
-        const persistable = toPersistableEffort(effortLevel);
-        if (persistable !== undefined) {
-          updateSettingsForSource("userSettings", {
-            effortLevel: persistable
-          });
+        // Only persist effort to settings.json when the user EXPLICITLY toggled
+        // effort (← →) in this picker session. Effort coming from
+        // CLAUDE_CODE_EFFORT_LEVEL or session-scoped state is runtime
+        // configuration — persisting it would silently cement a transient
+        // value (e.g. 'low' from a start script) as the permanent default,
+        // overriding the model default on every future startup.
+        if (hasToggledEffort) {
+          const persistable = toPersistableEffort(effortLevel);
+          if (persistable !== undefined) {
+            updateSettingsForSource("userSettings", {
+              effortLevel: persistable
+            });
+          }
         }
         setAppState(prev_0 => ({
           ...prev_0,
