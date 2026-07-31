@@ -26,7 +26,7 @@ $env:ANTHROPIC_MODEL = "glm-5.2[1m]"
 # 默认模型三种类型：opus、sonnet、haiku，分别对应不同的模型
 $env:ANTHROPIC_DEFAULT_OPUS_MODEL="glm-5.2[1m]"
 $env:ANTHROPIC_DEFAULT_SONNET_MODEL="glm-5.2[1m]"
-$env:ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-pro"
+$env:ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-flash"
 # 声明模型支持的能力（包括 max_effort）
 $env:ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES="effort,max_effort,thinking,adaptive_thinking"
 $env:ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES="effort,max_effort,thinking,adaptive_thinking"
