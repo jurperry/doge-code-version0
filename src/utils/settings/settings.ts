@@ -298,11 +298,16 @@ export function getSettingsFilePathForSource(
 export function getRelativeSettingsFilePathForSource(
   source: 'projectSettings' | 'localSettings',
 ): string {
+  // DOGE: project-scoped settings live in `.doge/` (not `.claude/`) so doge
+  // stays fully isolated from an official Claude Code install — e.g. when
+  // running from the home directory, a stale ~/.claude/settings.json (env
+  // block with ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL) must not be picked
+  // up as project settings and hijack credentials/routing.
   switch (source) {
     case 'projectSettings':
-      return join('.claude', 'settings.json')
+      return join('.doge', 'settings.json')
     case 'localSettings':
-      return join('.claude', 'settings.local.json')
+      return join('.doge', 'settings.local.json')
   }
 }
 

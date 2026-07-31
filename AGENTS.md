@@ -12,6 +12,7 @@
 - 通过中间转接层支持 OpenAI Chat Completions 与 OpenAI Responses 两种 API 格式（协议级转换，**实验性功能，不完全稳定**）
 - 自定义模型与模型档案（ModelProfile）管理
 - 与原版 Claude Code 数据隔离：默认配置目录为 `~/.doge`（全局配置文件 `~/.doge/.claude.json`），可用 `CLAUDE_CONFIG_DIR` 覆盖；不要与 `~/.claude` 混用
+- 项目级 settings 同样隔离：doge 读写 `<项目>/.doge/settings.json` 与 `<项目>/.doge/settings.local.json`，**不读取** `.claude/settings*.json`（避免被官方 Claude Code 的残留配置注入 env/权限）；但 `.claude/skills`、`.claude/commands`、`.claude/agents`、`CLAUDE.md` 等项目资源目录仍沿用 `.claude` 约定
 - 全局命令名为 `doge`（非 `claude`）
 
 ## 技术栈与运行时

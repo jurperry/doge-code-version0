@@ -242,6 +242,9 @@ export function convertToSandboxRuntimeConfig(
   if (cwd !== originalCwd) {
     denyWrite.push(resolve(cwd, '.claude', 'settings.json'))
     denyWrite.push(resolve(cwd, '.claude', 'settings.local.json'))
+    // DOGE: doge's own project-scoped settings live in .doge/
+    denyWrite.push(resolve(cwd, '.doge', 'settings.json'))
+    denyWrite.push(resolve(cwd, '.doge', 'settings.local.json'))
   }
 
   // Block writes to .claude/skills in both original and current working directories.

@@ -210,9 +210,12 @@ export function isClaudeSettingsPath(filePath: string): boolean {
   // Use platform separator so endsWith checks work on both Unix (/) and Windows (\)
   if (
     normalizedPath.endsWith(`${sep}.claude${sep}settings.json`) ||
-    normalizedPath.endsWith(`${sep}.claude${sep}settings.local.json`)
+    normalizedPath.endsWith(`${sep}.claude${sep}settings.local.json`) ||
+    // DOGE: doge's own project-scoped settings live in .doge/
+    normalizedPath.endsWith(`${sep}.doge${sep}settings.json`) ||
+    normalizedPath.endsWith(`${sep}.doge${sep}settings.local.json`)
   ) {
-    // Include .claude/settings.json even for other projects
+    // Include settings.json even for other projects
     return true
   }
   // Check for current project's settings files (including managed settings and CLI args)
