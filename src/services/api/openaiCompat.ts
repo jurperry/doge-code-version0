@@ -290,7 +290,8 @@ export function convertAnthropicRequestToOpenAI(input: {
 const TRANSIENT_UPSTREAM_PATTERN =
   /upstream request failed|upstream[^"]*(failed|failure|error|timeout|unavailable)|temporarily unavailable|overloaded|try again later/i
 
-function isTransientUpstreamError(status: number, responseText: string): boolean {
+// Exported so responsesCompat can apply the same transient classification.
+export function isTransientUpstreamError(status: number, responseText: string): boolean {
   if (status === 408 || status === 409 || status === 429 || status >= 500) {
     return true
   }

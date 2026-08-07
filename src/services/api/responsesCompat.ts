@@ -1,3 +1,4 @@
+import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
 import type {
   BetaMessage,
   BetaMessageParam,
@@ -7,7 +8,12 @@ import type {
   BetaToolUnion,
   BetaUsage,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
-import { contentToText, joinBaseUrl, toBlocks } from './openaiCompat.js'
+import {
+  contentToText,
+  isTransientUpstreamError,
+  joinBaseUrl,
+  toBlocks,
+} from './openaiCompat.js'
 
 type ResponsesCompatConfig = {
   apiKey: string
@@ -54,7 +60,10 @@ type ResponsesTool =
       strict?: boolean
     }
   | {
-      type: 'web_search_preview'
+      // Current built-in tool name (OpenAI stable + DeepSeek's /responses
+      // endpoint). The legacy 'web_search_preview' name is NOT accepted by
+      // DeepSeek — requests with it fail tool validation.
+      type: 'web_search'
       search_context_size?: 'low' | 'medium' | 'high'
       filters?: { allowed_domains?: string[] }
     }
@@ -73,16 +82,31 @@ type ResponsesRequest = {
         name: string
       }
     | {
-        type: 'web_search_preview'
+        type: 'web_search'
       }
   max_output_tokens?: number
-  effort?: string
+  // Standard Responses API reasoning field (OpenAI + DeepSeek both expect
+  // effort here). A top-level `effort` field is NOT part of the spec and
+  // DeepSeek silently ignores it.
+  reasoning?: { effort?: string }
 }
 
 type ResponsesUsage = {
   input_tokens?: number
   output_tokens?: number
   total_tokens?: number
+}
+
+type ResponsesAnnotation = {
+  type?: string
+  url?: string
+  title?: string
+}
+
+type ResponsesContentPart = {
+  type?: string
+  text?: string
+  annotations?: ResponsesAnnotation[]
 }
 
 type ResponsesItem = {
@@ -95,7 +119,15 @@ type ResponsesItem = {
   action?: {
     type?: string
     query?: string
+    queries?: string[]
+    // OpenAI's web_search_call action may carry the sources it used;
+    // entries are objects ({url, title?}) or bare URL strings.
+    sources?: Array<string | { url?: string; title?: string }>
   }
+  // message items carry content parts; their annotations hold url_citation
+  // entries (DeepSeek attaches them here instead of streaming
+  // response.output_text.annotation.added events).
+  content?: ResponsesContentPart[]
 }
 
 type ResponsesStreamEvent = {
@@ -105,6 +137,9 @@ type ResponsesStreamEvent = {
     model?: string
     usage?: ResponsesUsage
     status?: string
+    // response.completed/incomplete/failed carry the full response object;
+    // output holds every output item (message, web_search_call, ...).
+    output?: ResponsesItem[]
   }
   item?: ResponsesItem
   output_index?: number
@@ -118,11 +153,7 @@ type ResponsesStreamEvent = {
     reason?: string
   }
   response_id?: string
-  annotation?: {
-    type?: string
-    url?: string
-    title?: string
-  }
+  annotation?: ResponsesAnnotation
 }
 
 type ToolCallState = {
@@ -144,8 +175,10 @@ function getToolDefinitions(tools?: BetaToolUnion[]): ResponsesTool[] | undefine
   const mapped = tools.flatMap((tool): ResponsesTool[] => {
     const record = tool as unknown as Record<string, unknown>
     // Anthropic's server-side web search maps to the Responses API's built-in
-    // web_search_preview tool. blocked_domains and max_uses have no Responses
-    // API equivalent and are dropped.
+    // web_search tool (the current name; DeepSeek's /responses endpoint only
+    // accepts 'web_search', not the legacy 'web_search_preview').
+    // blocked_domains and max_uses have no Responses API equivalent and are
+    // dropped.
     if (record.type === 'web_search_20250305') {
       const allowedDomains = Array.isArray(record.allowed_domains)
         ? record.allowed_domains.filter(
@@ -154,7 +187,7 @@ function getToolDefinitions(tools?: BetaToolUnion[]): ResponsesTool[] | undefine
         : []
       return [
         {
-          type: 'web_search_preview' as const,
+          type: 'web_search' as const,
           search_context_size: 'medium' as const,
           ...(allowedDomains.length > 0
             ? { filters: { allowed_domains: allowedDomains } }
@@ -288,9 +321,9 @@ export function convertAnthropicRequestToResponses(input: {
       ? {
           tool_choice:
             // web_search is a server-side tool; select the Responses built-in
-            // web_search_preview tool instead of a (nonexistent) function.
+            // web_search tool instead of a (nonexistent) function.
             input.tool_choice.name === 'web_search'
-              ? ({ type: 'web_search_preview' } as const)
+              ? ({ type: 'web_search' } as const)
               : {
                   type: 'function' as const,
                   name: input.tool_choice.name,
@@ -299,7 +332,13 @@ export function convertAnthropicRequestToResponses(input: {
       : input.tool_choice?.type === 'auto'
         ? { tool_choice: 'auto' as const }
         : {}),
-    ...(input.output_config?.effort ? { effort: input.output_config.effort } : {}),
+    ...(input.output_config?.effort
+      ? // Pass effort through unchanged (under the standard `reasoning`
+        // field) — providers handle their own level mapping. DeepSeek
+        // natively supports low/high/max and maps medium/xhigh server-side;
+        // clamping here would silently downgrade the user's chosen level.
+        { reasoning: { effort: input.output_config.effort } }
+      : {}),
   }
 }
 
@@ -308,19 +347,31 @@ export async function createResponsesCompatStream(
   request: ResponsesRequest,
   signal?: AbortSignal,
 ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
-  const response = await (config.fetch ?? globalThis.fetch)(
-    joinBaseUrl(config.baseURL, '/v1/responses'),
-    {
-      method: 'POST',
-      signal,
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${config.apiKey}`,
-        ...config.headers,
+  let response: Response
+  try {
+    response = await (config.fetch ?? globalThis.fetch)(
+      joinBaseUrl(config.baseURL, '/v1/responses'),
+      {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${config.apiKey}`,
+          ...config.headers,
+        },
+        body: JSON.stringify({ ...request, stream: true }),
       },
-      body: JSON.stringify({ ...request, stream: true }),
-    },
-  )
+    )
+  } catch (error) {
+    // Never convert an intentional abort into a retryable connection error.
+    if (signal?.aborted) throw error
+    // Network-level failure (DNS, reset, TLS) — same treatment as the
+    // OpenAI-compatible path so withRetry can retry it.
+    throw new APIConnectionError({
+      message: `Responses compatible request connection error: ${error instanceof Error ? error.message : String(error)}`,
+      cause: error,
+    })
+  }
 
   if (!response.ok || !response.body) {
     let responseText = ''
@@ -344,6 +395,21 @@ export async function createResponsesCompatStream(
       ) {
         throw new Error(`Prompt is too long: ${responseText}`)
       }
+    }
+    if (response.ok || isTransientUpstreamError(response.status, responseText)) {
+      // Throw a real APIError so withRetry's shouldRetry() classification
+      // applies (408/409/429/5xx are retryable there). A plain Error is NOT
+      // an APIError instance and would abort the turn without any retry.
+      // 408/409/429/5xx keep their native status; gateway 400/422
+      // "upstream failed" wrappers (and ok-with-empty-body) map to 503.
+      const normalizedStatus =
+        response.ok || response.status === 400 || response.status === 422
+          ? 503
+          : response.status
+      const detail = `Responses compatible request failed with status ${response.status}${responseText ? `: ${responseText}` : ''}`
+      // Pass the body as the message (not as APIError.error) so the final
+      // error text keeps the original gateway status and payload verbatim.
+      throw new APIError(normalizedStatus, undefined, detail, response.headers)
     }
     throw new Error(
       `Responses compatible request failed with status ${response.status}${responseText ? `: ${responseText}` : ''}`,
@@ -464,11 +530,45 @@ export async function* createAnthropicStreamFromResponses(input: {
   const toolOrder: string[] = []
   // Server-side web search synthesis state: tracks web_search_call output items
   // (mapped to server_tool_use blocks) and url_citation annotations (collected
-  // into a single synthesized web_search_tool_result block at stream end).
+  // into synthesized web_search_tool_result blocks at stream end).
   const webSearchStates = new Map<string, WebSearchCallState>()
   let lastWebSearchCallId: string | undefined
   const citations: Array<{ url: string; title: string }> = []
   const seenCitationUrls = new Set<string>()
+
+  const addCitation = (url: unknown, title?: unknown) => {
+    if (
+      typeof url !== 'string' ||
+      url.length === 0 ||
+      seenCitationUrls.has(url)
+    ) {
+      return
+    }
+    seenCitationUrls.add(url)
+    citations.push({ url, title: typeof title === 'string' ? title : '' })
+  }
+
+  // Citations arrive differently per provider: OpenAI streams
+  // response.output_text.annotation.added events; DeepSeek never does and
+  // only attaches annotations to the finished message item / final response
+  // object (and may list sources on the web_search_call action).
+  const collectFromAnnotations = (annotations?: ResponsesAnnotation[]) => {
+    for (const annotation of annotations ?? []) {
+      if (annotation?.type === 'url_citation') {
+        addCitation(annotation.url, annotation.title)
+      }
+    }
+  }
+  const collectFromItem = (item?: ResponsesItem) => {
+    if (!item) return
+    for (const source of item.action?.sources ?? []) {
+      if (typeof source === 'string') addCitation(source)
+      else addCitation(source?.url, source?.title)
+    }
+    for (const part of item.content ?? []) {
+      collectFromAnnotations(part?.annotations)
+    }
+  }
 
   while (true) {
     const { done, value } = await input.reader.read()
@@ -518,23 +618,18 @@ export async function* createAnthropicStreamFromResponses(input: {
         if (usage?.output_tokens !== undefined) completionTokens = usage.output_tokens
 
         if (eventType === 'response.output_text.annotation.added') {
-          // url_citation annotations are the only signal that a server-side
-          // search produced results — collect them (deduped by url) for the
-          // synthesized web_search_tool_result block emitted at stream end.
-          const annotation = event.annotation
-          if (
-            annotation?.type === 'url_citation' &&
-            typeof annotation.url === 'string' &&
-            annotation.url.length > 0 &&
-            !seenCitationUrls.has(annotation.url)
-          ) {
-            seenCitationUrls.add(annotation.url)
-            citations.push({
-              url: annotation.url,
-              title: typeof annotation.title === 'string' ? annotation.title : '',
-            })
-          }
+          // Streamed url_citation annotations (OpenAI-style). Collected
+          // deduped by url for the synthesized web_search_tool_result blocks
+          // emitted at stream end.
+          if (event.annotation) collectFromAnnotations([event.annotation])
           continue
+        }
+
+        // DeepSeek streams no annotation events — citations only show up on
+        // the finished message item's content parts (and search sources on
+        // the web_search_call action), so harvest every completed item.
+        if (eventType === 'response.output_item.done') {
+          collectFromItem(event.item)
         }
 
         if (eventType === 'response.output_text.delta') {
@@ -727,6 +822,28 @@ export async function* createAnthropicStreamFromResponses(input: {
         ) {
           finalStopReason = mapResponsesStopReason(event)
 
+          // The final event carries the full response object — harvest
+          // citations from providers (e.g. DeepSeek) that only attach them
+          // here, and register any web_search_call items that never appeared
+          // as streamed output_item events so they still get result blocks.
+          for (const outputItem of event.response?.output ?? []) {
+            collectFromItem(outputItem)
+            if (
+              outputItem?.type === 'web_search_call' &&
+              typeof outputItem.id === 'string' &&
+              !webSearchStates.has(outputItem.id) &&
+              !Array.from(webSearchStates.values()).some(
+                state => state.id === outputItem.id,
+              )
+            ) {
+              webSearchStates.set(outputItem.id, {
+                anthropicIndex: -1,
+                id: outputItem.id,
+                stopped: true,
+              })
+            }
+          }
+
           if (!emittedAnyContent) {
             const startEvent = ensureTextBlockStarted(textStarted, textContentIndex)
             if (startEvent) {
@@ -759,30 +876,50 @@ export async function* createAnthropicStreamFromResponses(input: {
             }
           }
 
-          if (citations.length > 0) {
-            // Synthesize the web_search_tool_result block the Anthropic API
-            // would have produced, from the collected url_citation annotations.
-            const anthropicIndex = nextContentIndex++
-            yield {
-              type: 'content_block_start',
-              index: anthropicIndex,
-              content_block: {
-                type: 'web_search_tool_result',
-                tool_use_id:
-                  lastWebSearchCallId ?? `web_search_${anthropicIndex}`,
-                content: citations.map(citation => ({
-                  type: 'web_search_result',
-                  title: citation.title,
-                  url: citation.url,
-                  encrypted_content: '',
-                  page_age: null,
-                })),
-              },
-            } as BetaRawMessageStreamEvent
-            yield {
-              type: 'content_block_stop',
-              index: anthropicIndex,
-            } as BetaRawMessageStreamEvent
+          if (webSearchStates.size > 0 || citations.length > 0) {
+            // Synthesize the web_search_tool_result blocks the Anthropic API
+            // would have produced: one per server-side search, so the tool's
+            // "Did N searches" count matches reality even when the provider
+            // returns no citations at all (DeepSeek streams no annotation
+            // events). Citations can't be attributed to individual calls —
+            // attach them all to the first block.
+            const states = Array.from(webSearchStates.values())
+            const resultOwners: WebSearchCallState[] =
+              states.length > 0
+                ? states
+                : [
+                    {
+                      anthropicIndex: -1,
+                      id: lastWebSearchCallId ?? `web_search_${nextContentIndex}`,
+                      stopped: true,
+                    },
+                  ]
+            let citationsAttached = false
+            for (const state of resultOwners) {
+              const anthropicIndex = nextContentIndex++
+              yield {
+                type: 'content_block_start',
+                index: anthropicIndex,
+                content_block: {
+                  type: 'web_search_tool_result',
+                  tool_use_id: state.id,
+                  content: !citationsAttached
+                    ? citations.map(citation => ({
+                        type: 'web_search_result',
+                        title: citation.title,
+                        url: citation.url,
+                        encrypted_content: '',
+                        page_age: null,
+                      }))
+                    : [],
+                },
+              } as BetaRawMessageStreamEvent
+              citationsAttached = true
+              yield {
+                type: 'content_block_stop',
+                index: anthropicIndex,
+              } as BetaRawMessageStreamEvent
+            }
           }
 
           yield {
