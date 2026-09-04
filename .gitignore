@@ -24,6 +24,9 @@ config.env
 # Claude Code / 本会话本地状态
 .claude/
 
+# Doge 项目级本地设置（运行时生成，不入库）
+.doge/
+
 # Playwright MCP 运行时缓存（console 日志 / page 快照）
 .playwright-mcp/
 
