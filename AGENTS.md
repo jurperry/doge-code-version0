@@ -1,6 +1,6 @@
 # AGENTS.md — Doge Code 仓库指南
 
-本文件面向 AI 编码代理，假设读者对本项目一无所知。所有内容均基于对当前仓库的实际核实，不要凭空假设。
+本文件面向 AI 编码代理（Claude Code / Doge Code 等），假设读者对本项目一无所知。所有内容均基于对当前仓库的实际核实，不要凭空假设。
 
 ## 项目概述
 
@@ -14,6 +14,15 @@
 - 与原版 Claude Code 数据隔离：默认配置目录为 `~/.doge`（全局配置文件 `~/.doge/.claude.json`），可用 `CLAUDE_CONFIG_DIR` 覆盖；不要与 `~/.claude` 混用
 - 项目级 settings 同样隔离：doge 读写 `<项目>/.doge/settings.json` 与 `<项目>/.doge/settings.local.json`，**不读取** `.claude/settings*.json`（避免被官方 Claude Code 的残留配置注入 env/权限）；但 `.claude/skills`、`.claude/commands`、`.claude/agents`、`CLAUDE.md` 等项目资源目录仍沿用 `.claude` 约定
 - 全局命令名为 `doge`（非 `claude`）
+
+关键 Fork 修改一览：
+
+1. **认证绕过**：使用自定义提供商（`openai`/`responses` 或非官方 Anthropic URL）时跳过密钥审批流程（见 `src/utils/auth.ts`）
+2. **OpenAI 协议转换**：`openaiCompat.ts` 和 `responsesCompat.ts` 在 API 边界做完整协议翻译
+3. **ModelProfile 持久化**：`customApiStorage.ts` 支持每模型保存完整的 provider/baseURL/apiKey/contextWindow 配置
+4. **Agent 模型 fallback**：模型等级不够时自动回退
+5. **Computer Use Windows**：HWND SendMessage + SendInput fallback，四层应用发现
+6. **PTL 错误映射**：Anthropic/OpenAI 格式的上下文溢出错误 → 统一 reactive compact
 
 ## 技术栈与运行时
 
@@ -54,6 +63,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 - `src/bootstrap-entry.ts` — CLI 入口（`bin.doge` 指向它）
 - `src/main.tsx` — 主应用 UI 组件（约 808KB 超大文件，修改需格外谨慎）
 - `src/commands.ts` — 命令路由表
+- `src/interactiveHelpers.tsx` — 交互模式辅助
 - `src/query.ts` / `src/QueryEngine.ts` — 查询处理引擎
 - `src/Task.ts` / `src/Tool.ts` — Task 与 Tool 抽象
 
@@ -64,29 +74,72 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 | `src/commands/` | 所有 `/` 斜杠命令实现，每命令一个 kebab-case 目录 |
 | `src/components/` | React/Ink TUI 组件 |
 | `src/services/` | 业务逻辑服务（API、Compact、MCP、LSP 等） |
-| `src/services/api/` | API 层：`claude.ts` 主客户端（多提供商分发）、`openaiCompat.ts`、`responsesCompat.ts` 协议转换、`client.ts` 凭证解析 |
 | `src/tools/` | 内置 Tool 实现（BashTool、FileEditTool、AgentTool 等） |
-| `src/utils/` | 工具函数（`auth.ts`、`customApiStorage.ts`、`dogeConfigDir.ts`、`model/`、`computerUse/` 等） |
-| `src/skills/` | 内置 Skill 系统 |
+| `src/skills/` | 内置 Skill 系统（含 `bundled/debug.ts` 即 `/debug` 技能） |
+| `src/utils/` | 工具函数（认证、配置、模型、调试、ComputerUse 等，详见下文） |
 | `src/bridge/` | 远程桥接与会话管理 |
 | `src/cli/` | CLI 传输层（SSE/WebSocket/Hybrid）与输出格式化 |
-| `src/context/`、`src/coordinator/`、`src/plugins/`、`src/memdir/`、`src/jobs/`、`src/schemas/` | 上下文管理、多智能体协调、插件系统、Memory 目录、后台任务、Zod 模式 |
+| `src/entrypoints/` | SDK 运行时类型与入口 |
+| `src/context/`、`src/coordinator/`、`src/plugins/`、`src/memdir/`、`src/jobs/`、`src/schemas/` | 上下文窗口管理、多智能体协调、插件系统、Memory 目录、后台任务调度、Zod 模式 |
 | `shims/` | 恢复期 shim 包，替代无法还原的原生/私有模块（以 `file:` 依赖引用） |
 | `packages/@ant/` | 内部 @ant-scoped 包 |
 | `vendor/` | 第三方/原生组件源码（audio-capture、image-processor 等） |
 | `needs/` | claude-to-im 集成所需的 skills、hooks 与 settings.json |
 
+关键子系统细节：
+
+- **API 层**（`src/services/api/`）：`claude.ts`（约 135KB）主客户端做多提供商分发；`openaiCompat.ts` / `responsesCompat.ts` 协议转换；`client.ts` 凭证解析与 SDK 客户端初始化；`errors.ts` / `withRetry.ts` / `errorUtils.ts` 错误处理与重试
+- **认证与配置**（`src/utils/`）：`auth.ts` 认证逻辑（含自定义 API 绕过密钥审批）；`customApiStorage.ts` ModelProfile 持久化；`dogeConfigDir.ts` 配置目录入口（`CLAUDE_CONFIG_DIR ?? ~/.doge`）；`effort.ts` / `thinking.ts` Effort/Thinking 能力检测与模型兼容
+- **模型选择**（`src/utils/model/`）：`model.ts` Agent 模型选择与 fallback；`providers.ts` API 提供商检测（firstParty/bedrock/vertex/foundry）；`modelSupportOverrides.ts` 第三方模型能力覆盖
+- **Computer Use**（`src/utils/computerUse/`）：`platforms/win32.ts` Windows 后端（HWND SendMessage + SendInput fallback），`win32/` 子模块（窗口管理/截图/OCR/输入/UI Automation），`platforms/darwin.ts` macOS 后端
+
 ## API 兼容架构
 
 内部代码始终使用 Anthropic Messages 格式，协议转换只发生在 API 边界。由 `CLAUDE_CODE_COMPATIBLE_API_PROVIDER` 选择提供商：
 
-- `anthropic` → `/v1/messages`，直接使用 Anthropic SDK
-- `openai` → `/v1/chat/completions`，由 `openaiCompat.ts` 双向转换（含流式事件回转）
-- `responses` → `/v1/responses`，由 `responsesCompat.ts` 双向转换
+| 提供商 | 端点 | 转换方式 |
+|--------|------|----------|
+| `anthropic` | `/v1/messages` | 直接使用 Anthropic SDK |
+| `openai` | `/v1/chat/completions` | `openaiCompat.ts` 双向转换（含流式事件回转） |
+| `responses` | `/v1/responses` | `responsesCompat.ts` 双向转换（含流式事件回转） |
 
-凭证解析优先级：`customApiStorage` → 运行时保存的设置 → `DOGE_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 环境变量 → 默认值。关键环境变量还有：`ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_MODEL`、`CLAUDE_CODE_SUBAGENT_MODEL`、`CLAUDE_CODE_MODEL_CONTEXT_WINDOW`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CONFIG_DIR`（完整清单见 `CLAUDE.md`）。
+凭证解析优先级：`customApiStorage` → 运行时保存的设置 → `DOGE_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 环境变量 → 默认值。
 
-根目录的 `start_*.ps1`（`start_deepseek.ps1`、`start_glm.ps1`、`start_kimi.ps1`、`start_qwen.ps1` 等）是针对不同提供商的启动脚本，开头会清理旧环境变量再注入新配置，可作为配置参考。
+### 环境变量
+
+| 变量 | 用途 |
+|------|------|
+| `CLAUDE_CODE_COMPATIBLE_API_PROVIDER` | 指定 API 格式：`anthropic` / `openai` / `responses` |
+| `ANTHROPIC_BASE_URL` | 自定义 API 端点 |
+| `DOGE_API_KEY` | API 密钥（优先于 `ANTHROPIC_AUTH_TOKEN`） |
+| `ANTHROPIC_MODEL` | 默认模型 |
+| `ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_MODEL` | 各层级 Agent 模型 |
+| `ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES` | 能力声明，如 `effort,max_effort,thinking,adaptive_thinking` |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | 子智能体模型覆盖 |
+| `CLAUDE_CODE_MODEL_CONTEXT_WINDOW` | 覆盖上下文窗口大小（字节） |
+| `CLAUDE_CODE_EFFORT_LEVEL` | 努力等级：`low` / `medium` / `high` / `max` |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | 禁用非必要网络请求 |
+| `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` | 禁用非流式回退 |
+| `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | 强制启用 effort 参数 |
+| `CLAUDE_CONFIG_DIR` | 覆盖配置目录（默认 `~/.doge`） |
+
+### 特殊模型行为
+
+- `[1m]` / `[2m]` 后缀仅在本地从模型名中剥离用于上下文窗口计算，不发送到 API
+- DeepSeek：`max_tokens` 自动限制 32k，`reasoning_content` 映射为 thinking 块
+- 第三方 API：上下文窗口硬编码 + `CLAUDE_CODE_MODEL_CONTEXT_WINDOW` 可覆盖
+- 非 Anthropic 模型：上下文溢出错误映射为 PTL（触发 reactive compact）
+
+### 启动脚本
+
+根目录的 `start_*.ps1` 是针对不同提供商的启动脚本，开头会清理旧环境变量再注入新配置，可作为配置参考（切换提供商务必走脚本，避免旧 env 残留）：
+
+- `start_deepseek.ps1` / `start_deepseek_ant.ps1` / `start_deepseek_rep.ps1` — DeepSeek（分别对应不同 API 格式/转接层）
+- `start_glm.ps1` — GLM 模型
+- `start_kimi.ps1` — Kimi 模型
+- `start_qwen.ps1` — Qwen 模型
+- `start_opencode_go.ps1` — OpenCode Go 接入
+- `sync_to_cti.ps1` — 同步配置到 claude-to-im
 
 ## 代码风格约定
 
@@ -105,7 +158,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 
 ## 提交与协作约定
 
-- 这是真实 git 仓库（有提交历史），但按 `CLAUDE.md` 约定：**进行代码开发前先询问用户是否新建 git 分支，不要直接在主分支上开发**
+- 这是真实 git 仓库（有提交历史）：**进行代码开发前先询问用户是否新建 git 分支，不要直接在主分支上开发**
 - 提交信息用简短祈使句（历史风格如 `Support web search for openai and responses API formats`，中英文均有）
 - 无 CI、无发布流水线；分发方式就是 git 源码 + `bun link`
 - 这是还原树而非 pristine 上游：恢复期 fallback/shim 与 Fork 魔改并存，为恢复兜底添加的变通方案要在代码或文档中注明
@@ -115,10 +168,31 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 
 - 调试日志写入 `~/.doge/debug/<sessionId>.txt`
 - `--debug` 启动或 `/debug` 命令动态开启；`--debug=api,hooks` 白名单过滤，`--debug=!file` 黑名单；另有 `--debug-to-stderr`、`--debug-file=<path>`、`CLAUDE_CODE_DEBUG_LOG_LEVEL=verbose`
-- 核心实现：`src/utils/debug.ts`（日志管线）、`src/utils/debugFilter.ts`（分类过滤）
+- 核心实现：`src/utils/debug.ts`（日志管线：过滤/缓冲/写入/symlink）、`src/utils/debugFilter.ts`（分类过滤）、`src/skills/bundled/debug.ts`（`/debug` 内置技能）
+
+## 修复历史
+
+- `debug_updates_1.md` — Chapter 1-10（登录/上下文/Computer Use/高DPI）
+- `debug_updates_2.md` — Chapter 11-25（Windows 输入/压缩/模型管理/持久化）
+- `debug_updates_3.md` — Chapter 26+（凭据覆盖/effort 一致性/模型切换）
+- `debug_updates_4.md` — 最新修改（effort 全链路修复/thinking 守卫）
+- `debug_updates_5.md` — TUI 卡顿修复（skills 跳过 node_modules / `/clear` 软清 fileIndex / 非 git 大目录限深扫描）+ 新增 xhigh 思考档位 + 原生模型 ID 升级 Opus 4.6→4.8、Sonnet 4.6→5
+
+## 常见问题速查
+
+| 问题 | 检查 |
+|------|------|
+| API 连接失败 | `ANTHROPIC_BASE_URL` + `DOGE_API_KEY` + `CLAUDE_CODE_COMPATIBLE_API_PROVIDER` 三者匹配 |
+| 配置冲突 | 清除旧 env var 再切换（`start_*.ps1` 开头都有清理） |
+| DeepSeek | `max_tokens` ≤ 32k，`reasoning_content` 必需 |
+| Agent 模型 "not found" | 设置 `ANTHROPIC_DEFAULT_*_MODEL` 环境变量 |
+| 上下文窗口错误 | 使用 `[1m]` 后缀或 `CLAUDE_CODE_MODEL_CONTEXT_WINDOW` |
+| Windows Computer Use | 管理员应用需要管理员终端；Electron/CEF 自动 SendInput |
+| 依赖/运行报错 | `bun install` + `bun link`，确认 Bun 1.3.5+ |
+| 首次运行报错 | 确保 `~/.doge/.claude.json` 中 `hasCompletedOnboarding: true` |
 
 ## 其他参考文档
 
 - `README.md` — 项目定位、安装、更新流程（中文）
-- `CLAUDE.md` — 面向 Claude Code 的仓库指南，含完整环境变量表与常见问题速查（部分启动脚本名称已过时，以根目录实际文件为准）
 - `computer_use.md`、`SYNC_CTI_CONFIG.md` — 专项说明
+- `debug_updates_1.md` ~ `debug_updates_5.md` — 修复历史（见上文）
