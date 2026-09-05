@@ -58,6 +58,29 @@ test('buildModelProfile trims values and drops empty optionals', () => {
   })
 })
 
+test('buildModelProfile defaults to DOGE_API_KEY when no key type is chosen', () => {
+  const values: ProviderFormValues = {
+    provider: 'anthropic',
+    baseURL: '',
+    apiKey: 'sk-1',
+    model: 'm1',
+  }
+  expect(buildModelProfile(values).authTokenType).toBe('DOGE_API_KEY')
+})
+
+test('buildModelProfile persists the selected ANTHROPIC_AUTH_TOKEN key type', () => {
+  const values: ProviderFormValues = {
+    provider: 'anthropic',
+    baseURL: 'https://gw.example.com',
+    apiKey: 'sk-bearer',
+    authTokenType: 'ANTHROPIC_AUTH_TOKEN',
+    model: 'm1',
+  }
+  const profile = buildModelProfile(values)
+  expect(profile.authTokenType).toBe('ANTHROPIC_AUTH_TOKEN')
+  expect(profile.baseURL).toBe('https://gw.example.com')
+})
+
 // --- maskSecret ---
 
 test('maskSecret masks secrets for display', () => {
@@ -143,6 +166,7 @@ test('saveAndActivateProvider persists profile, credentials and saved list, then
   expect(h.getStorage().modelProfiles?.[1]).toBe(profile)
   expect(h.getStorage().apiKey).toBe('sk-test')
   expect(h.getStorage().provider).toBe('openai')
+  expect(h.getStorage().authTokenType).toBe('DOGE_API_KEY')
 
   // .claude.json mirrors the same fields
   expect(h.getGlobalConfig().customApiEndpoint.model).toBe('deepseek-v4-pro')

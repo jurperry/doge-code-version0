@@ -79,7 +79,7 @@ const apiKeyConflictNotice: StatusNoticeDefinition = {
     } = getAnthropicApiKeyWithSource({
       skipRetrievingKeyFromApiKeyHelper: true
     });
-    return !!getApiKeyFromConfigOrMacOSKeychain() && (apiKeySource === 'DOGE_API_KEY' || apiKeySource === 'apiKeyHelper');
+    return !!getApiKeyFromConfigOrMacOSKeychain() && (apiKeySource === 'DOGE_API_KEY' || apiKeySource === 'ANTHROPIC_AUTH_TOKEN' || apiKeySource === 'apiKeyHelper');
   },
   render: () => {
     const {
@@ -133,7 +133,7 @@ const bothAuthMethodsNotice: StatusNoticeDefinition = {
             · Trying to use{' '}
             {authTokenInfo.source === 'claude.ai' ? 'claude.ai' : authTokenInfo.source}
             ?{' '}
-            {apiKeySource === 'DOGE_API_KEY' ? `Unset the DOGE_API_KEY environment variable, or ${CLI_BINARY_NAME} /logout then say "No" to the API key approval before login.` : apiKeySource === 'apiKeyHelper' ? 'Unset the apiKeyHelper setting.' : `${CLI_BINARY_NAME} /logout`}
+            {apiKeySource === 'DOGE_API_KEY' ? `Unset the DOGE_API_KEY environment variable, or ${CLI_BINARY_NAME} /logout then say "No" to the API key approval before login.` : apiKeySource === 'ANTHROPIC_AUTH_TOKEN' ? 'Unset the ANTHROPIC_AUTH_TOKEN environment variable.' : apiKeySource === 'apiKeyHelper' ? 'Unset the apiKeyHelper setting.' : `${CLI_BINARY_NAME} /logout`}
           </Text>
           <Text color="warning">
             · Trying to use {apiKeySource}?{' '}

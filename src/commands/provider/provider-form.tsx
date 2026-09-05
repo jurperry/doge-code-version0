@@ -11,11 +11,12 @@ import {
   validateProviderForm,
   type ProviderFormValues,
   type ProviderFormat,
+  type AuthTokenType,
 } from './provider-storage.js'
 
-type FormStep = 'provider' | 'baseURL' | 'apiKey' | 'model' | 'opus' | 'sonnet' | 'haiku' | 'review'
+type FormStep = 'provider' | 'baseURL' | 'apiKey' | 'authTokenType' | 'model' | 'opus' | 'sonnet' | 'haiku' | 'review'
 
-const STEP_ORDER: FormStep[] = ['provider', 'baseURL', 'apiKey', 'model', 'opus', 'sonnet', 'haiku', 'review']
+const STEP_ORDER: FormStep[] = ['provider', 'baseURL', 'apiKey', 'authTokenType', 'model', 'opus', 'sonnet', 'haiku', 'review']
 
 const STEP_META: Record<Exclude<FormStep, 'review'>, { title: string; hint: string }> = {
   provider: {
@@ -29,6 +30,10 @@ const STEP_META: Record<Exclude<FormStep, 'review'>, { title: string; hint: stri
   apiKey: {
     title: 'API key',
     hint: 'Stored locally in ~/.doge and sent with every request.',
+  },
+  authTokenType: {
+    title: 'Key type',
+    hint: 'How the key is sent. DOGE_API_KEY → x-api-key header (default); ANTHROPIC_AUTH_TOKEN → Authorization: Bearer header. Pick Bearer if your gateway only accepts token auth.',
   },
   model: {
     title: 'Main model',
@@ -54,11 +59,17 @@ const PROVIDER_OPTIONS: { value: ProviderFormat; label: string; description: str
   { value: 'responses', label: 'responses', description: 'OpenAI Responses (/v1/responses)' },
 ]
 
+const AUTH_TOKEN_TYPE_OPTIONS: { value: AuthTokenType; label: string; description: string }[] = [
+  { value: 'DOGE_API_KEY', label: 'DOGE_API_KEY (x-api-key)', description: 'Sent as the x-api-key header — default, works for most providers' },
+  { value: 'ANTHROPIC_AUTH_TOKEN', label: 'ANTHROPIC_AUTH_TOKEN (Bearer)', description: 'Sent as Authorization: Bearer — for gateways that only accept token auth' },
+]
+
 function initialValues(existing?: ModelProfile, initialModel?: string): ProviderFormValues {
   return {
     provider: existing?.provider ?? 'anthropic',
     baseURL: existing?.baseURL ?? '',
     apiKey: existing?.apiKey ?? '',
+    authTokenType: existing?.authTokenType ?? 'DOGE_API_KEY',
     model: existing?.model ?? initialModel ?? '',
     opusModel: existing?.defaultOpusModel ?? '',
     sonnetModel: existing?.defaultSonnetModel ?? '',
@@ -137,6 +148,11 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
       advance()
       return
     }
+    if (step === 'authTokenType') {
+      setValues(v => ({ ...v, authTokenType: value as AuthTokenType }))
+      advance()
+      return
+    }
     if (step === 'review') {
       if (value === '__SAVE__') {
         void handleSave()
@@ -211,11 +227,23 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         visibleOptionCount={3}
       />
     )
+  } else if (step === 'authTokenType') {
+    body = (
+      <Select
+        options={AUTH_TOKEN_TYPE_OPTIONS}
+        defaultValue={values.authTokenType ?? 'DOGE_API_KEY'}
+        defaultFocusValue={values.authTokenType ?? 'DOGE_API_KEY'}
+        onChange={handleSelect}
+        onCancel={handleCancel}
+        visibleOptionCount={2}
+      />
+    )
   } else if (step === 'review') {
     const reviewOptions = [
       { value: 'edit:provider', label: `API format: ${values.provider}`, description: 'Change' },
       { value: 'edit:baseURL', label: `Base URL: ${values.baseURL || '(official API)'}`, description: 'Change' },
       { value: 'edit:apiKey', label: `API key: ${maskSecret(values.apiKey)}`, description: 'Change' },
+      { value: 'edit:authTokenType', label: `Key type: ${values.authTokenType ?? 'DOGE_API_KEY'} (${values.authTokenType === 'ANTHROPIC_AUTH_TOKEN' ? 'Bearer' : 'x-api-key'})`, description: 'Change' },
       { value: 'edit:model', label: `Main model: ${values.model}`, description: 'Change' },
       { value: 'edit:opus', label: `Opus model: ${values.opusModel || '(inherit main model)'}`, description: 'Change' },
       { value: 'edit:sonnet', label: `Sonnet model: ${values.sonnetModel || '(inherit main model)'}`, description: 'Change' },
@@ -227,7 +255,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         options={reviewOptions}
         onChange={handleSelect}
         onCancel={handleCancel}
-        visibleOptionCount={8}
+        visibleOptionCount={9}
       />
     )
   } else {

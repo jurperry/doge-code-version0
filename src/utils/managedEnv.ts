@@ -2,6 +2,7 @@ import { isRemoteManagedSettingsEligible } from '../services/remoteManagedSettin
 import { clearCACertsCache } from './caCerts.js'
 import { getGlobalConfig } from './config.js'
 import { getModelProfile, readCustomApiStorage } from './customApiStorage.js'
+import { enforceApiKeyExclusivity } from './apiKeyExclusivity.js'
 import { isEnvTruthy } from './envUtils.js'
 import {
   isProviderManagedEnvVar,
@@ -177,6 +178,10 @@ export function applySafeConfigEnvironmentVariables(): void {
       process.env[key] = value
     }
   }
+
+  // Settings-sourced env may (re)introduce both key vars — collapse to one
+  // before anything reads them.
+  enforceApiKeyExclusivity()
 }
 
 /**
@@ -191,6 +196,11 @@ export function applyConfigEnvironmentVariables(): void {
   applyPersistedCustomApiEndpointEnv()
 
   Object.assign(process.env, filterSettingsEnv(getSettings_DEPRECATED()?.env))
+
+  // The full settings env is now applied — re-enforce key-var mutual
+  // exclusion (idempotent) so a settings block carrying both DOGE_API_KEY
+  // and ANTHROPIC_AUTH_TOKEN can't produce conflicting auth headers.
+  enforceApiKeyExclusivity()
 
   // Clear caches so agents are rebuilt with the new env vars
   clearCACertsCache()

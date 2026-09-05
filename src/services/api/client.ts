@@ -343,6 +343,14 @@ async function configureApiKeyHeaders(
   headers: Record<string, string>,
   isNonInteractiveSession: boolean,
 ): Promise<void> {
+  // DOGE_API_KEY (SDK apiKey → x-api-key) and ANTHROPIC_AUTH_TOKEN /
+  // apiKeyHelper (Authorization: Bearer) are mutually exclusive. Sending
+  // both headers with different values makes providers reject the request
+  // with an ambiguous 401, so when DOGE_API_KEY is present the Bearer
+  // header is skipped. Startup enforces the same precedence via
+  // enforceApiKeyExclusivity (utils/apiKeyExclusivity.ts); this is the
+  // last-line defense for env changes that happen after startup.
+  if (process.env.DOGE_API_KEY) return
   const token =
     process.env.ANTHROPIC_AUTH_TOKEN ||
     (await getApiKeyFromApiKeyHelper(isNonInteractiveSession))

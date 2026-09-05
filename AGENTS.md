@@ -22,11 +22,12 @@
 2. **OpenAI 协议转换**：`openaiCompat.ts` 和 `responsesCompat.ts` 在 API 边界做完整协议翻译
 3. **ModelProfile 持久化**：`customApiStorage.ts` 支持每模型保存完整的 provider/baseURL/apiKey/contextWindow 配置
 4. **Agent 模型 fallback**：模型等级不够时自动回退
-5. **Computer Use Windows**：HWND SendMessage + SendInput fallback，四层应用发现
+5. **Computer Use Windows（默认启用）**：HWND SendMessage + SendInput fallback，四层应用发现。fork 已解闸全部官方门控：`gates.ts` 的 `getChicagoEnabled()`/`hasRequiredSubscription()` 硬编码 true，`config.ts` 的 `isDefaultDisabledBuiltin` 恒 false（`computer-use` server 默认连接，仍可经 `/mcp` 禁用）；`main.tsx` 注入 CU MCP 时无条件 append 本地使用提示 `COMPUTER_USE_MCP_PROMPT_HINT`（官方端点的服务端提示在第三方/转接端点不存在）。macOS/Windows 交互式会话默认生效。见 `src/utils/computerUse/`、`test/computer-use-e2e.ts`
 6. **PTL 错误映射**：Anthropic/OpenAI 格式的上下文溢出错误 → 统一 reactive compact
 7. **/auto 与三态模式循环**：TUI 内 `/auto`（支持 `[on|off]`）直接切换 bypassPermissions，Shift+Tab 在 auto → accept → plan 间循环（default 下首次按即进 auto），无需 `--dangerously-skip-permissions`。刻意不改 `isBypassPermissionsModeAvailable`（保持"旗标启动会话"语义，避免 plan 模式被 permissions.ts 当作全放行）；/auto 会话中 plan 仍为只读规划模式。见 `src/commands/auto/`、`src/utils/permissions/getNextPermissionMode.ts`
 8. **会话级模型切换（多终端隔离）**：`/model` 切换默认只作用于当前进程（改 `process.env` + AppState 的 `mainLoopModelForSession`），**不写任何磁盘配置**（`.claude.json`/`settings.json`/`.credentials.json` 全部保持基线），多个终端并行使用互不影响；`/model <model> --save` 显式固化为全局默认，`DOGE_MODEL_SCOPE=global` 恢复旧的"切换即持久化"行为。见 `src/utils/model/modelSwitchScope.ts`、`src/commands/model/handlers.ts`、`src/utils/model/switchModelProfile.ts`（deps.sessionScoped）、`src/state/onChangeAppState.ts`（settings.json 写入 gate）
 9. **agent-teams TUI（多代理面板）**：TUI 底部常驻 `main-<模型>` 行，每个子代理一行 `sub-agent-<模型>-<任务描述>`（`CoordinatorTaskPanel`，原 ant-only 面板解闸）；`Ctrl+Shift+A` 聚焦/取消 agent 列表，↑↓ 导航、Enter 切换到对应 agent 的执行视图（transcript）、`x` 停止/清除、Esc 返回，鼠标点击行同样可切换。子代理模型名在 spawn 时由 `getAgentModel` 解析并写入 `LocalAgentTaskState.model`。内置 Explore/Plan 子代理已在 `src/tools/AgentTool/builtInAgents.ts` 强制启用（源码运行下 `feature()` 恒 false 的兜底）。teammate 群聊模式（队长/成员直连通信）保持运行时开关：`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 或 `--agent-teams` 启动。见 `src/components/CoordinatorAgentStatus.tsx`、`src/hooks/useGlobalKeybindings.tsx`
+10. **双密钥类型严格区分（DOGE_API_KEY / ANTHROPIC_AUTH_TOKEN）**：两者是仅有的两种密钥接入方式，差异在发送语义——`DOGE_API_KEY` → SDK `apiKey` → `x-api-key` header；`ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer` header（`client.ts configureApiKeyHeaders`）。`ModelProfile.authTokenType` 记录每个 provider 用哪种，`/provider` 表单有 "Key type" 选择步骤，`/provider list` 展示；`applyModelProfile` 按类型互斥写 env（写一个删另一个）。两者同时泄漏进 `process.env`（shell 残留 / settings env 块）曾导致双 header 矛盾 401：现在 `enforceApiKeyExclusivity`（`src/utils/apiKeyExclusivity.ts`）在 `managedEnv.ts` 两个 apply 入口末尾收敛为互斥（激活 profile 声明 Bearer 且 key 匹配则保留 AUTH_TOKEN，否则 DOGE 优先），`configureApiKeyHeaders` 在 DOGE 存在时跳过 Bearer 作为最后防线；`ApiKeySource` 区分 `'ANTHROPIC_AUTH_TOKEN'` 来源（errors/statusNotice/auth status 相应适配）。多终端场景下卫兵只改本进程 env，不影响并行终端。
 
 ## 技术栈与运行时
 
@@ -54,7 +55,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 ## 测试策略
 
 - 测试框架：`bun:test`（`import { test, expect } from 'bun:test'`），运行 `bun test`
-- 项目自身测试与代码同目录放置（`*.test.ts`），目前位于 `src/services/api/`、`src/commands/model/`、`src/utils/model/`、`src/hooks/` 下
+- 项目自身测试与代码同目录放置（`*.test.ts`），目前位于 `src/services/api/`、`src/services/mcp/`、`src/commands/model/`、`src/utils/model/`、`src/hooks/` 下；另有实机 e2e 脚本 `test/computer-use-e2e.ts`（Computer Use 只读链路验证）
 - 注意：裸跑 `bun test` 会连带执行 `needs/skills/claude-to-im/node_modules/` 里 vendored zod 的测试（实测共 22 个文件、约 250 个用例）；只跑项目测试时用路径过滤，如 `bun test src/services/api/`
 - 已知既有失败（截至当前提交，非本次改动引入）：`src/hooks/useMainLoopModel.test.ts` 中 `does not fall through to customApiStorage when AppState fields are null` 用例失败
 - 新增测试应放在被测模块旁边，以模块或被测行为命名
@@ -116,7 +117,8 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 |------|------|
 | `CLAUDE_CODE_COMPATIBLE_API_PROVIDER` | 指定 API 格式：`anthropic` / `openai` / `responses` |
 | `ANTHROPIC_BASE_URL` | 自定义 API 端点 |
-| `DOGE_API_KEY` | API 密钥（优先于 `ANTHROPIC_AUTH_TOKEN`） |
+| `DOGE_API_KEY` | API 密钥，以 `x-api-key` header 发送（与 `ANTHROPIC_AUTH_TOKEN` 互斥，同时存在时启动卫兵按激活 profile/DOGE 优先裁决并删除另一个） |
+| `ANTHROPIC_AUTH_TOKEN` | API 密钥的另一接入方式，以 `Authorization: Bearer` header 发送（仅认 Bearer 的网关用它；`/provider` 表单的 "Key type" 步骤可选） |
 | `ANTHROPIC_MODEL` | 默认模型 |
 | `ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_MODEL` | 各层级 Agent 模型 |
 | `ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES` | 能力声明，如 `effort,max_effort,thinking,adaptive_thinking` |

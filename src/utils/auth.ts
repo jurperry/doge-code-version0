@@ -133,7 +133,9 @@ export function isAnthropicAuthEnabled(): boolean {
     skipRetrievingKeyFromApiKeyHelper: true,
   })
   const hasExternalApiKey =
-    apiKeySource === 'DOGE_API_KEY' || apiKeySource === 'apiKeyHelper'
+    apiKeySource === 'DOGE_API_KEY' ||
+    apiKeySource === 'ANTHROPIC_AUTH_TOKEN' ||
+    apiKeySource === 'apiKeyHelper'
 
   // Disable Anthropic auth if:
   // 1. Using 3rd party services (Bedrock/Vertex/Foundry)
@@ -209,6 +211,7 @@ export function getAuthTokenSource() {
 
 export type ApiKeySource =
   | 'DOGE_API_KEY'
+  | 'ANTHROPIC_AUTH_TOKEN'
   | 'apiKeyHelper'
   | '/login managed key'
   | 'none'
@@ -251,13 +254,35 @@ export function getAnthropicApiKeyWithSource(
 
   // On homespace, don't use DOGE_API_KEY (use Console key instead)
   // https://anthropic.slack.com/archives/C08428WSLKV/p1747331773214779
-  const apiKeyEnv = isRunningOnHomespace()
+  const apiKeyEnvSource: ApiKeySource | undefined = isRunningOnHomespace()
     ? undefined
-    : process.env.DOGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN
+    : process.env.DOGE_API_KEY
+      ? 'DOGE_API_KEY'
+      : process.env.ANTHROPIC_AUTH_TOKEN
+        ? 'ANTHROPIC_AUTH_TOKEN'
+        : undefined
+  const apiKeyEnv = apiKeyEnvSource
+    ? process.env[apiKeyEnvSource]
+    : undefined
 
   const customApiStorage = readCustomApiStorage()
+  const globalCustomApiEndpoint = getGlobalConfig().customApiEndpoint
   const persistedCustomApiKey =
-    customApiStorage.apiKey || getGlobalConfig().customApiEndpoint?.apiKey
+    customApiStorage.apiKey || globalCustomApiEndpoint?.apiKey
+  // When the key comes from persistent storage (no env var), the stored
+  // authTokenType says which header style it was saved for.
+  const persistedSource: ApiKeySource =
+    (customApiStorage.authTokenType ?? globalCustomApiEndpoint?.authTokenType) ===
+    'ANTHROPIC_AUTH_TOKEN'
+      ? 'ANTHROPIC_AUTH_TOKEN'
+      : 'DOGE_API_KEY'
+  // Which var the effective key actually came from — drives the reported
+  // source so UI/error paths can tell the two access methods apart.
+  const effectiveSource: ApiKeySource = apiKeyEnv
+    ? (apiKeyEnvSource ?? 'DOGE_API_KEY')
+    : persistedCustomApiKey
+      ? persistedSource
+      : 'DOGE_API_KEY'
   const effectiveApiKeyEnv = apiKeyEnv || persistedCustomApiKey
   const compatProviderEnv = process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER
   // Env var takes priority over stored provider so start scripts
@@ -275,7 +300,7 @@ export function getAnthropicApiKeyWithSource(
   if (preferThirdPartyAuthentication() && effectiveApiKeyEnv) {
     return {
       key: effectiveApiKeyEnv,
-      source: 'DOGE_API_KEY',
+      source: effectiveSource,
     }
   }
 
@@ -284,7 +309,7 @@ export function getAnthropicApiKeyWithSource(
   if (effectiveApiKeyEnv && (customProvider === 'openai' || !isFirstPartyAnthropicBaseUrl())) {
     return {
       key: effectiveApiKeyEnv,
-      source: 'DOGE_API_KEY',
+      source: effectiveSource,
     }
   }
 
@@ -311,7 +336,7 @@ export function getAnthropicApiKeyWithSource(
     if (effectiveApiKeyEnv) {
       return {
         key: effectiveApiKeyEnv,
-        source: 'DOGE_API_KEY',
+        source: effectiveSource,
       }
     }
 
@@ -330,7 +355,7 @@ export function getAnthropicApiKeyWithSource(
   ) {
     return {
       key: effectiveApiKeyEnv,
-      source: 'DOGE_API_KEY',
+      source: effectiveSource,
     }
   }
 
