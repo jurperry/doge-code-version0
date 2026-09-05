@@ -108,7 +108,7 @@ const bothAuthMethodsNotice: StatusNoticeDefinition = {
     const authTokenInfo = getAuthTokenSource();
     // Only report conflict when DOGE_API_KEY is explicitly set in the
     // environment. If the key only exists in persistent storage
-    // (customApiStorage.apiKey from a previous /add-model), it is
+    // (customApiStorage.apiKey from a previous /provider add), it is
     // not a genuine conflict — /model switches will set the correct
     // env var based on authTokenType.
     return apiKeySource !== 'none' && authTokenInfo.source !== 'none' && !!process.env.DOGE_API_KEY && !(apiKeySource === 'apiKeyHelper' && authTokenInfo.source === 'apiKeyHelper');

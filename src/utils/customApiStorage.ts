@@ -144,71 +144,6 @@ export function saveModelProfile(profile: ModelProfile): void {
   })
 }
 
-/** Read a string env var, return undefined if empty */
-function envStr(val: string | undefined): string | undefined {
-  return val && val.trim() ? val.trim() : undefined
-}
-
-/** Read a numeric env var, return undefined if empty/invalid */
-function envNum(val: string | undefined): number | undefined {
-  if (!val || !val.trim()) return undefined
-  const n = parseInt(val, 10)
-  return isNaN(n) ? undefined : n
-}
-
-/** Read a boolean-like env var (1 or true) */
-function envBool(val: string | undefined): boolean | undefined {
-  if (!val || !val.trim()) return undefined
-  return val === '1' || val.toLowerCase() === 'true'
-}
-
-/**
- * Capture the current process environment into a ModelProfile.
- * Used by /add-model to snapshot all relevant env vars.
- */
-export function captureModelProfile(modelName: string): ModelProfile {
-  // Detect which auth token env var is actually in use
-  let authTokenType: 'DOGE_API_KEY' | 'ANTHROPIC_AUTH_TOKEN' | undefined
-  let apiKeyValue: string | undefined
-  if (envStr(process.env.ANTHROPIC_AUTH_TOKEN)) {
-    authTokenType = 'ANTHROPIC_AUTH_TOKEN'
-    apiKeyValue = process.env.ANTHROPIC_AUTH_TOKEN
-  } else if (envStr(process.env.DOGE_API_KEY)) {
-    authTokenType = 'DOGE_API_KEY'
-    apiKeyValue = process.env.DOGE_API_KEY
-  }
-
-  const provider = process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER as
-    | 'anthropic'
-    | 'openai'
-    | 'responses'
-    | undefined
-
-  return {
-    model: modelName,
-    // Save provider for ALL types including 'anthropic' so switching between
-    // different providers can correctly override stale persisted values.
-    provider: provider && (provider === 'openai' || provider === 'responses' || provider === 'anthropic') ? provider : undefined,
-    baseURL: envStr(process.env.ANTHROPIC_BASE_URL),
-    apiKey: apiKeyValue,
-    authTokenType,
-    contextWindow: envNum(process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOW),
-    // Sub-agent models
-    defaultOpusModel: envStr(process.env.ANTHROPIC_DEFAULT_OPUS_MODEL),
-    defaultSonnetModel: envStr(process.env.ANTHROPIC_DEFAULT_SONNET_MODEL),
-    defaultHaikuModel: envStr(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL),
-    subagentModel: envStr(process.env.CLAUDE_CODE_SUBAGENT_MODEL),
-    opusCapabilities: envStr(process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES),
-    sonnetCapabilities: envStr(process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES),
-    // Behavior config
-    disableNonessentialTraffic: envBool(process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC),
-    disableNonstreamingFallback: envBool(process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK),
-    // NOTE: Do NOT capture CLAUDE_CODE_EFFORT_LEVEL. Effort is a runtime user
-    // preference, not model-specific configuration. Capturing it would
-    // contaminate the new model's profile with the previous model's effort.
-  }
-}
-
 /** Helper: set or delete an env var */
 function applyEnvVar(name: string, value: string | undefined): void {
   if (value !== undefined && value !== '') {
@@ -299,7 +234,7 @@ export function applyModelProfile(profile: ModelProfile): void {
 
   // --- Persist model name to storage for next launch ---
   // Only update the model name at the top level. Provider, baseURL, apiKey,
-  // and authTokenType are managed exclusively by /add-model (explicit save).
+  // and authTokenType are managed exclusively by /provider add (explicit save).
   // Writing them here on every /model switch would overwrite the previously
   // saved model's credentials, causing the wrong provider/key to leak across
   // start-script launches. The full profile (including credentials) is stored

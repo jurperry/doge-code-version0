@@ -217,7 +217,7 @@ function applyPersistedCustomApiEndpointEnv(): void {
 
   // When starting without env vars (pure `doge` launch, no start_.ps1),
   // the top-level credentials in customApiStorage reflect the LAST model
-  // added via /add-model, not necessarily the active model. If multiple
+  // added via /provider add, not necessarily the active model. If multiple
   // models are configured and /model was used to switch, the top-level
   // provider/baseURL/apiKey may belong to a different model than the
   // top-level model field — this causes credential misalignment on restart.
