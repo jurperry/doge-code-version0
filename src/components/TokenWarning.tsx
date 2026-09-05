@@ -4,8 +4,9 @@ import * as React from 'react';
 import { useSyncExternalStore } from 'react';
 import { Box, Text } from '../ink.js';
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js';
-import { calculateTokenWarningState, getEffectiveContextWindowSize, isAutoCompactEnabled } from '../services/compact/autoCompact.js';
+import { calculateTokenWarningState, getAutoCompactThreshold, getEffectiveContextWindowSize, isAutoCompactEnabled } from '../services/compact/autoCompact.js';
 import { useCompactWarningSuppression } from '../services/compact/compactWarningHook.js';
+import { formatTokens } from '../utils/format.js';
 import { getUpgradeMessage } from '../utils/model/contextWindowUpgradeCheck.js';
 type Props = {
   tokenUsage: number;
@@ -84,6 +85,53 @@ function CollapseLabel(t0) {
   }
   return t5;
 }
+// Ring glyphs: a circle filling from empty ring to solid circle. The filled
+// portion renders in the terminal's foreground color (white on dark themes),
+// so the glyph works as a miniature donut gauge of context consumption.
+const CONTEXT_RING_STEPS = ['○', '◔', '◑', '◕', '●'];
+
+export function contextRingChar(usedFraction: number): string {
+  if (usedFraction < 0.125) return CONTEXT_RING_STEPS[0];
+  if (usedFraction < 0.375) return CONTEXT_RING_STEPS[1];
+  if (usedFraction < 0.625) return CONTEXT_RING_STEPS[2];
+  if (usedFraction < 0.875) return CONTEXT_RING_STEPS[3];
+  return CONTEXT_RING_STEPS[4];
+}
+
+/**
+ * Always-on context usage gauge: "◔ 68% left · 136k/200k tokens".
+ *
+ * Replaces TokenWarning's old null return below the warning threshold so
+ * context usage stays visible for the whole session instead of only after
+ * the threshold (threshold − 20k tokens) is crossed. Ring fill tracks the
+ * consumed fraction; the percentage uses the same basis as the near-full
+ * labels (auto-compact threshold when enabled, effective window otherwise).
+ */
+function ContextUsageGauge({
+  tokenUsage,
+  model,
+  percentLeft,
+  isAboveWarningThreshold,
+  isAboveErrorThreshold
+}: {
+  tokenUsage: number;
+  model: string;
+  percentLeft: number;
+  isAboveWarningThreshold: boolean;
+  isAboveErrorThreshold: boolean;
+}): React.ReactNode {
+  const basis = isAutoCompactEnabled() ? getAutoCompactThreshold(model) : getEffectiveContextWindowSize(model);
+  const usedFraction = basis > 0 ? Math.min(1, Math.max(0, tokenUsage / basis)) : 0;
+  const ring = contextRingChar(usedFraction);
+  // The token-buffer thresholds (threshold − 20k) fire very late on large
+  // windows (≈2% of 1M), so the gauge adds percent-left color bands to warn
+  // earlier. Threshold colors carry over even when the textual warning is
+  // suppressed, so the gauge alone still signals pressure.
+  const color = isAboveErrorThreshold || percentLeft <= 5 ? 'error' : isAboveWarningThreshold || percentLeft <= 20 ? 'warning' : undefined;
+  return <Box flexDirection="row">
+      <Text color={color} dimColor={color === undefined} wrap="truncate">{ring} {percentLeft}% left · {formatTokens(tokenUsage)}/{formatTokens(basis)} tokens</Text>
+    </Box>;
+}
 export function TokenWarning(t0) {
   const $ = _c(13);
   const {
@@ -106,7 +154,9 @@ export function TokenWarning(t0) {
   } = t1;
   const suppressWarning = useCompactWarningSuppression();
   if (!isAboveWarningThreshold || suppressWarning) {
-    return null;
+    // Below the warning threshold (or textual warning suppressed): render
+    // the dim always-on gauge instead of hiding context usage entirely.
+    return <ContextUsageGauge tokenUsage={tokenUsage} model={model} percentLeft={percentLeft} isAboveWarningThreshold={isAboveWarningThreshold} isAboveErrorThreshold={isAboveErrorThreshold} />;
   }
   let t2;
   if ($[3] === Symbol.for("react.memo_cache_sentinel")) {

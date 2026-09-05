@@ -130,7 +130,9 @@ function ModelPickerWrapper(t0) {
       // resolveAppliedEffort() priority. No unconditional delete here.
       let message = `Set model to ${chalk.bold(renderModelLabel(model))}`;
       if (scope === 'session') {
-        message += " \xB7 session only (/model <model> --save to persist)";
+        // Show the concrete persist command; a "<model>" placeholder gets
+        // swallowed when the result is rendered, leaving a confusing gap.
+        message += ` · session only (use "/model ${model ?? 'default'} --save" to persist)`;
       }
       if (effort !== undefined) {
         message = message + ` with ${chalk.bold(effort)} effort`;
@@ -302,7 +304,9 @@ function SetModelAndClose({
       if (explicitSave) {
         message += " \xB7 saved as default for new terminals";
       } else if (scope === 'session') {
-        message += " \xB7 session only (/model <model> --save to persist)";
+        // Show the concrete persist command; a "<model>" placeholder gets
+        // swallowed when the result is rendered, leaving a confusing gap.
+        message += ` · session only (use "/model ${modelValue ?? 'default'} --save" to persist)`;
       }
       let wasFastModeToggledOn = undefined;
       if (isFastModeEnabled()) {
