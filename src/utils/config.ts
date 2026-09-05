@@ -1823,7 +1823,7 @@ export function getMemoryPath(memoryType: MemoryType): string {
 }
 
 export function getManagedClaudeRulesDir(): string {
-  return join(getManagedFilePath(), '.claude', 'rules')
+  return join(getManagedFilePath(), '.doge', 'rules')
 }
 
 export function getUserClaudeRulesDir(): string {

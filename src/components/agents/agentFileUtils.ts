@@ -73,19 +73,20 @@ function getAgentDirectoryPath(location: SettingSource): string {
       throw new Error(`Cannot get directory path for ${location} agents`)
     case 'userSettings':
       return join(getClaudeConfigHomeDir(), 'agents')
+    // DOGE: project agents live under .doge/agents — never touch .claude/
     case 'projectSettings':
-      return join(getCwd(), '.claude', 'agents')
+      return join(getCwd(), '.doge', 'agents')
     case 'policySettings':
-      return join(getManagedFilePath(), '.claude', 'agents')
+      return join(getManagedFilePath(), '.doge', 'agents')
     case 'localSettings':
-      return join(getCwd(), '.claude', 'agents')
+      return join(getCwd(), '.doge', 'agents')
   }
 }
 
 function getRelativeAgentDirectoryPath(location: SettingSource): string {
   switch (location) {
     case 'projectSettings':
-      return join('.', '.claude', 'agents')
+      return join('.', '.doge', 'agents')
     default:
       return getAgentDirectoryPath(location)
   }

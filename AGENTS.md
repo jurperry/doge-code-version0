@@ -12,7 +12,8 @@
 - 通过中间转接层支持 OpenAI Chat Completions 与 OpenAI Responses 两种 API 格式（协议级转换，**实验性功能，不完全稳定**）
 - 自定义模型与模型档案（ModelProfile）管理
 - 与原版 Claude Code 数据隔离：默认配置目录为 `~/.doge`（全局配置文件 `~/.doge/.claude.json`），可用 `CLAUDE_CONFIG_DIR` 覆盖；不要与 `~/.claude` 混用
-- 项目级 settings 同样隔离：doge 读写 `<项目>/.doge/settings.json` 与 `<项目>/.doge/settings.local.json`，**不读取** `.claude/settings*.json`（避免被官方 Claude Code 的残留配置注入 env/权限）；但 `.claude/skills`、`.claude/commands`、`.claude/agents`、`CLAUDE.md` 等项目资源目录仍沿用 `.claude` 约定
+- 项目级 settings 同样隔离：doge 读写 `<项目>/.doge/settings.json` 与 `<项目>/.doge/settings.local.json`，**不读取** `.claude/settings*.json`（避免被官方 Claude Code 的残留配置注入 env/权限）
+- **项目资源目录完全隔离（创始原则，2026-09-05 起全面生效）**：agents/skills/commands/rules/worktrees/agent-memory/定时任务等一切项目级资源一律使用 `.doge/` 下的对应目录（如 `<项目>/.doge/agents/`、`.doge/skills/`、`.doge/commands/`、`.doge/rules/`、`.doge/worktrees/`、`.doge/scheduled_tasks.json`），**代码不读也不写任何 `.claude/` 路径**。嵌套项目记忆为 `.doge/CLAUDE.md`；根目录 `CLAUDE.md`/`CLAUDE.local.md` 文件名约定保持不变（跨工具记忆文件）。唯二例外（有意保留的官方互操作）：`src/utils/ide.ts` 读取官方 VSCode 扩展的 `~/.claude/ide` lockfile、`src/utils/doctorDiagnostic.ts` 检测官方安装，均不涉及 doge 配置
 - 全局命令名为 `doge`（非 `claude`）
 
 关键 Fork 修改一览：
@@ -24,6 +25,8 @@
 5. **Computer Use Windows**：HWND SendMessage + SendInput fallback，四层应用发现
 6. **PTL 错误映射**：Anthropic/OpenAI 格式的上下文溢出错误 → 统一 reactive compact
 7. **/auto 与三态模式循环**：TUI 内 `/auto`（支持 `[on|off]`）直接切换 bypassPermissions，Shift+Tab 在 auto → accept → plan 间循环（default 下首次按即进 auto），无需 `--dangerously-skip-permissions`。刻意不改 `isBypassPermissionsModeAvailable`（保持"旗标启动会话"语义，避免 plan 模式被 permissions.ts 当作全放行）；/auto 会话中 plan 仍为只读规划模式。见 `src/commands/auto/`、`src/utils/permissions/getNextPermissionMode.ts`
+8. **会话级模型切换（多终端隔离）**：`/model` 切换默认只作用于当前进程（改 `process.env` + AppState 的 `mainLoopModelForSession`），**不写任何磁盘配置**（`.claude.json`/`settings.json`/`.credentials.json` 全部保持基线），多个终端并行使用互不影响；`/model <model> --save` 显式固化为全局默认，`DOGE_MODEL_SCOPE=global` 恢复旧的"切换即持久化"行为。见 `src/utils/model/modelSwitchScope.ts`、`src/commands/model/handlers.ts`、`src/utils/model/switchModelProfile.ts`（deps.sessionScoped）、`src/state/onChangeAppState.ts`（settings.json 写入 gate）
+9. **agent-teams TUI（多代理面板）**：TUI 底部常驻 `main-<模型>` 行，每个子代理一行 `sub-agent-<模型>-<任务描述>`（`CoordinatorTaskPanel`，原 ant-only 面板解闸）；`Ctrl+Shift+A` 聚焦/取消 agent 列表，↑↓ 导航、Enter 切换到对应 agent 的执行视图（transcript）、`x` 停止/清除、Esc 返回，鼠标点击行同样可切换。子代理模型名在 spawn 时由 `getAgentModel` 解析并写入 `LocalAgentTaskState.model`。内置 Explore/Plan 子代理已在 `src/tools/AgentTool/builtInAgents.ts` 强制启用（源码运行下 `feature()` 恒 false 的兜底）。teammate 群聊模式（队长/成员直连通信）保持运行时开关：`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 或 `--agent-teams` 启动。见 `src/components/CoordinatorAgentStatus.tsx`、`src/hooks/useGlobalKeybindings.tsx`
 
 ## 技术栈与运行时
 
@@ -123,6 +126,8 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | 禁用非必要网络请求 |
 | `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` | 禁用非流式回退 |
 | `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | 强制启用 effort 参数 |
+| `DOGE_MODEL_SCOPE` | 模型切换作用域：`session`（默认，仅当前终端） / `global`（切换即写全局配置） |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | 设为 `1` 启用 teammate 群聊模式（亦可改用 `--agent-teams` 旗标） |
 | `CLAUDE_CONFIG_DIR` | 覆盖配置目录（默认 `~/.doge`） |
 
 ### 特殊模型行为
@@ -201,6 +206,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 | DeepSeek | `max_tokens` ≤ 32k，`reasoning_content` 必需 |
 | Agent 模型 "not found" | 设置 `ANTHROPIC_DEFAULT_*_MODEL` 环境变量 |
 | 上下文窗口错误 | 使用 `[1m]` 后缀或 `CLAUDE_CODE_MODEL_CONTEXT_WINDOW` |
+| 多终端模型互相影响 | 默认已是会话级隔离；如需固化当前模型为全局默认，用 `/model <model> --save` |
 | Windows Computer Use | 管理员应用需要管理员终端；Electron/CEF 自动 SendInput |
 | 依赖/运行报错 | `bun install` + `bun link`，确认 Bun 1.3.5+ |
 | 首次运行报错 | 确保 `~/.doge/.claude.json` 中 `hasCompletedOnboarding: true` |
