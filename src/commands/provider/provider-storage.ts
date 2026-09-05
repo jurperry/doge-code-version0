@@ -12,11 +12,16 @@ import { switchModelProfileAtomicBound } from '../../utils/model/switchModelProf
 /** API format used at the protocol-conversion boundary. */
 export type ProviderFormat = 'anthropic' | 'openai' | 'responses'
 
+/** Which env var / header style the key is sent with. */
+export type AuthTokenType = 'DOGE_API_KEY' | 'ANTHROPIC_AUTH_TOKEN'
+
 /** Values collected by the /provider add form. */
 export type ProviderFormValues = {
   provider: ProviderFormat
   baseURL?: string
   apiKey?: string
+  /** Defaults to DOGE_API_KEY (x-api-key header). */
+  authTokenType?: AuthTokenType
   model: string
   opusModel?: string
   sonnetModel?: string
@@ -40,8 +45,9 @@ export function buildModelProfile(values: ProviderFormValues): ModelProfile {
     provider: values.provider,
     baseURL: values.baseURL?.trim() || undefined,
     apiKey: values.apiKey?.trim() || undefined,
-    // /provider always takes the key from direct input; store it as DOGE_API_KEY.
-    authTokenType: 'DOGE_API_KEY',
+    // The form explicitly picks which header style the endpoint expects:
+    // DOGE_API_KEY → x-api-key, ANTHROPIC_AUTH_TOKEN → Authorization: Bearer.
+    authTokenType: values.authTokenType ?? 'DOGE_API_KEY',
     defaultOpusModel: values.opusModel?.trim() || undefined,
     defaultSonnetModel: values.sonnetModel?.trim() || undefined,
     defaultHaikuModel: values.haikuModel?.trim() || undefined,

@@ -918,8 +918,9 @@ export function getAssistantMessageFromError(
     // the env var. The three guards ensure we only blame the env var when it's
     // actually set and actually on the wire.
     if (
-      source === 'DOGE_API_KEY' &&
-      process.env.DOGE_API_KEY &&
+      ((source === 'DOGE_API_KEY' && process.env.DOGE_API_KEY) ||
+        (source === 'ANTHROPIC_AUTH_TOKEN' &&
+          process.env.ANTHROPIC_AUTH_TOKEN)) &&
       !isClaudeAISubscriber()
     ) {
       const hasStoredOAuth = getClaudeAIOAuthTokens()?.accessToken != null
@@ -950,7 +951,9 @@ export function getAssistantMessageFromError(
     // Check if the API key is from an external source
     const { source } = getAnthropicApiKeyWithSource()
     const isExternalSource =
-      source === 'DOGE_API_KEY' || source === 'apiKeyHelper'
+      source === 'DOGE_API_KEY' ||
+      source === 'ANTHROPIC_AUTH_TOKEN' ||
+      source === 'apiKeyHelper'
 
     return createAssistantAPIErrorMessage({
       error: 'authentication_failed',

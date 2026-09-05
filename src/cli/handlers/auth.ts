@@ -237,7 +237,8 @@ export async function authStatus(opts: {
   const { source: authTokenSource, hasToken } = getAuthTokenSource()
   const { source: apiKeySource } = getAnthropicApiKeyWithSource()
   const hasApiKeyEnvVar =
-    !!process.env.DOGE_API_KEY && !isRunningOnHomespace()
+    !!(process.env.DOGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) &&
+    !isRunningOnHomespace()
   const oauthAccount = getOauthAccountInfo()
   const subscriptionType = getSubscriptionType()
   const using3P = isUsing3PServices()
@@ -254,7 +255,11 @@ export async function authStatus(opts: {
     authMethod = 'api_key_helper'
   } else if (authTokenSource !== 'none') {
     authMethod = 'oauth_token'
-  } else if (apiKeySource === 'DOGE_API_KEY' || hasApiKeyEnvVar) {
+  } else if (
+    apiKeySource === 'DOGE_API_KEY' ||
+    apiKeySource === 'ANTHROPIC_AUTH_TOKEN' ||
+    hasApiKeyEnvVar
+  ) {
     authMethod = 'api_key'
   } else if (apiKeySource === '/login managed key') {
     authMethod = 'claude.ai'
@@ -284,7 +289,9 @@ export async function authStatus(opts: {
       }
     }
     if (!hasAuthProperty && hasApiKeyEnvVar) {
-      process.stdout.write('API key: DOGE_API_KEY\n')
+      process.stdout.write(
+        `API key: ${process.env.DOGE_API_KEY ? 'DOGE_API_KEY' : 'ANTHROPIC_AUTH_TOKEN'}\n`,
+      )
     }
     if (!loggedIn) {
       process.stdout.write(
@@ -293,11 +300,14 @@ export async function authStatus(opts: {
     }
   } else {
     const apiProvider = getAPIProvider()
+    const envKeyVarName = process.env.DOGE_API_KEY
+      ? 'DOGE_API_KEY'
+      : 'ANTHROPIC_AUTH_TOKEN'
     const resolvedApiKeySource =
       apiKeySource !== 'none'
         ? apiKeySource
         : hasApiKeyEnvVar
-          ? 'DOGE_API_KEY'
+          ? envKeyVarName
           : null
     const output: Record<string, string | boolean | null> = {
       loggedIn,
