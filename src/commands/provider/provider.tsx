@@ -29,9 +29,32 @@ type ProviderMenuProps = {
   onDone: (result?: string, options?: { display?: 'system' }) => void
 }
 
-function ProviderMenu({ onDone }: ProviderMenuProps): React.ReactNode {
+export function ProviderMenu({ onDone }: ProviderMenuProps): React.ReactNode {
   const [view, setView] = React.useState<'menu' | 'add' | 'edit' | 'remove'>('menu')
   const [editProfile, setEditProfile] = React.useState<ModelProfile | undefined>()
+
+  // All hooks must run before the view early-returns below — switching views
+  // changes the subtree but not this component's hook count.
+  const handleSelect = React.useCallback((value: string) => {
+    if (value === '__ADD__') {
+      setView('add')
+      return
+    }
+    if (value === '__REMOVE__') {
+      setView('remove')
+      return
+    }
+    if (value.startsWith('edit:')) {
+      const model = value.slice('edit:'.length)
+      // Entries without a stored profile still open the form with the model prefilled.
+      setEditProfile(getModelProfile(model) ?? { model })
+      setView('edit')
+    }
+  }, [])
+
+  const handleCancel = React.useCallback(() => {
+    onDone('No changes made.')
+  }, [onDone])
 
   if (view === 'add') return <ProviderForm onDone={onDone} />
   if (view === 'edit') return <ProviderForm existing={editProfile} onDone={onDone} />
@@ -59,27 +82,6 @@ function ProviderMenu({ onDone }: ProviderMenuProps): React.ReactNode {
         }]
       : []),
   ]
-
-  const handleSelect = React.useCallback((value: string) => {
-    if (value === '__ADD__') {
-      setView('add')
-      return
-    }
-    if (value === '__REMOVE__') {
-      setView('remove')
-      return
-    }
-    if (value.startsWith('edit:')) {
-      const model = value.slice('edit:'.length)
-      // Entries without a stored profile still open the form with the model prefilled.
-      setEditProfile(getModelProfile(model) ?? { model })
-      setView('edit')
-    }
-  }, [])
-
-  const handleCancel = React.useCallback(() => {
-    onDone('No changes made.')
-  }, [onDone])
 
   return (
     <Box flexDirection="column">
