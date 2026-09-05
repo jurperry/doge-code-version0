@@ -23,7 +23,8 @@ import { validateModel } from '../../utils/model/validateModel.js';
 import { matchesTierModel as isTierModelMatch } from '../../utils/model/modelSupportOverrides.js';
 import { getAPIProvider } from '../../utils/model/providers.js';
 /** Persist model change to .claude.json, .credentials.json and settings.json so all three config
- *  files stay in sync. */
+ *  files stay in sync. Writing a new main model invalidates any tier selection
+ *  (activeTier), since the tier mapping belonged to the previous main model. */
 function syncModelConfigToDisk(
   model: string,
   clearCredentials?: boolean,
@@ -42,21 +43,23 @@ function syncModelConfigToDisk(
       authTokenType: profile.authTokenType,
     }
   }
-  
+
   saveGlobalConfig(current => ({
     ...current,
     customApiEndpoint: {
       ...current.customApiEndpoint,
       model,
+      activeTier: undefined,
       ...credsUpdate,
     },
   }))
   updateSettingsForSource('userSettings', { model })
-  
+
   const currentStorage = readCustomApiStorage()
   writeCustomApiStorage({
     ...currentStorage,
     model,
+    activeTier: undefined,
     ...credsUpdate,
   })
 }

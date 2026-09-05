@@ -33,7 +33,7 @@ import {
 } from './model.js'
 import { has1mContext, has2mContext } from '../context.js'
 import { getGlobalConfig } from '../config.js'
-import { getModelProfile, normalizeModelName } from '../customApiStorage.js'
+import { getModelProfile, normalizeModelName, readCustomApiStorage } from '../customApiStorage.js'
 import { getGlobalCompatProvider } from '../../services/api/client.js'
 
 // @[MODEL LAUNCH]: Update all the available and default model option strings below.
@@ -327,12 +327,25 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     // Resolve Opus/Sonnet/Haiku tiers with priority:
     // 1. Environment variables (set by start scripts or applyModelProfile)
     // 2. Stored model profile (from .credentials.json modelProfiles)
-    // 3. Main model (fallback when nothing is explicitly configured)
+    // 3. Persisted tier mapping snapshot (captured at the last tier/profile
+    //    switch — also injected into env at startup by restoreTierState)
+    // 4. Main model (fallback when nothing is explicitly configured)
     const mainModel = customConfiguredModel || savedModels[0] || ''
     const activeProfile = customConfiguredModel ? getModelProfile(customConfiguredModel) : undefined
-    const opusModel = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL || activeProfile?.defaultOpusModel || mainModel
-    const sonnetModel = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || activeProfile?.defaultSonnetModel || mainModel
-    const haikuModel = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || activeProfile?.defaultHaikuModel || mainModel
+    const tierSnapshot = readCustomApiStorage().tierModels
+    // Explicitly-configured tier values (non-fallback). Used to decide
+    // whether a tier equals the main model because it was CONFIGURED that
+    // way (show "(current)") or merely because it INHERITS the main model
+    // (no marker — every tier would otherwise show "(current)").
+    const opusExplicit =
+      process.env.ANTHROPIC_DEFAULT_OPUS_MODEL || activeProfile?.defaultOpusModel || tierSnapshot?.opus
+    const sonnetExplicit =
+      process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || activeProfile?.defaultSonnetModel || tierSnapshot?.sonnet
+    const haikuExplicit =
+      process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || activeProfile?.defaultHaikuModel || tierSnapshot?.haiku
+    const opusModel = opusExplicit || mainModel
+    const sonnetModel = sonnetExplicit || mainModel
+    const haikuModel = haikuExplicit || mainModel
 
     const options: ModelOption[] = [
       getDefaultOptionForUser(),
@@ -341,13 +354,10 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     // Add the main model as a first-class option so it's always visible
     // and selectable, even when tiers inherit from it.
     if (customConfiguredModel) {
-      const mainIsTier = [opusModel, sonnetModel, haikuModel].some(
-        t => normalizeModelName(t) === normalizeModelName(customConfiguredModel)
-      )
       options.push({
         value: customConfiguredModel,
         label: formatCustomModelLabel(customConfiguredModel),
-        description: 'Current main model' + (mainIsTier ? '' : ''),
+        description: 'Current main model',
         descriptionForModel: `Main model — ${customConfiguredModel}`,
       })
     }
@@ -357,21 +367,21 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
         value: 'opus',
         label: 'Opus',
         description: `Most capable · ${formatCustomModelLabel(opusModel)}` +
-          (normalizeModelName(opusModel) === normalizeModelName(mainModel) ? ' (current)' : ''),
+          (opusExplicit && normalizeModelName(opusModel) === normalizeModelName(mainModel) ? ' (current)' : ''),
         descriptionForModel: `Opus tier — ${opusModel}`,
       },
       {
         value: 'sonnet',
         label: 'Sonnet',
         description: `Best for everyday tasks · ${formatCustomModelLabel(sonnetModel)}` +
-          (normalizeModelName(sonnetModel) === normalizeModelName(mainModel) ? ' (current)' : ''),
+          (sonnetExplicit && normalizeModelName(sonnetModel) === normalizeModelName(mainModel) ? ' (current)' : ''),
         descriptionForModel: `Sonnet tier — ${sonnetModel}`,
       },
       {
         value: 'haiku',
         label: 'Haiku',
         description: `Fastest for quick answers · ${formatCustomModelLabel(haikuModel)}` +
-          (normalizeModelName(haikuModel) === normalizeModelName(mainModel) ? ' (current)' : ''),
+          (haikuExplicit && normalizeModelName(haikuModel) === normalizeModelName(mainModel) ? ' (current)' : ''),
         descriptionForModel: `Haiku tier — ${haikuModel}`,
       },
     )

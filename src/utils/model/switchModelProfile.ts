@@ -111,7 +111,11 @@ export function restoreApplyEnvSnapshot(snap: Record<string, string | undefined>
  */
 export interface SwitchProfileDeps {
   applyProfile: (profile: ModelProfile) => void
-  syncToDisk: (model: string, clearCredentials: boolean) => void
+  syncToDisk: (
+    model: string,
+    clearCredentials: boolean,
+    credentialSourceProfile?: ModelProfile,
+  ) => void
   commitAppState: (updater: (prev: AppStateSlice) => AppStateSlice) => void
 }
 
@@ -126,9 +130,13 @@ export interface SwitchTierDeps {
    *  the active profile maps it to (e.g. 'haiku' → 'deepseek-v4-flash').
    *  Real binding: parseUserSpecifiedModel(tier). */
   resolveTierModel: (tier: 'opus' | 'sonnet' | 'haiku') => string
-  /** Return the currently active ModelProfile (for credential write-back).
-   *  Real binding: () => process.env.ANTHROPIC_MODEL ? getModelProfile(...) : undefined. */
-  getActiveProfile: () => ModelProfile | undefined
+  /** Persist the tier selection (activeTier + tier mapping snapshot) to disk.
+   *  Real binding: persistTierSelection. */
+  persistTier: (tier: TierAlias) => void
+  /** Return the persisted main model id (custom API users), or undefined for
+   *  first-party users with no custom API config.
+   *  Real binding: () => readCustomApiStorage().model */
+  getStoredMainModel: () => string | undefined
 }
 
 export interface AppStateSlice {
@@ -149,7 +157,13 @@ export type TierAlias = 'opus' | 'sonnet' | 'haiku' | null
  *     endpoint/key/provider that would otherwise leak on rollback.
  *  2. Clear the white-list env vars (white-list reset; see profileEnvKeys.ts).
  *  3. applyProfile(profile) → writes new env vars + persists customApiStorage.
- *  4. syncToDisk(profile.model, true) → updates .claude.json + settings.json.
+ *  4. syncToDisk(profile.model, false, profile) → updates .claude.json +
+ *     settings.json AND persists the target profile's credentials as the
+ *     top-level credentials. clearCredentials MUST be false here: wiping
+ *     top-level credentials on every profile switch left a bare `doge`
+ *     relaunch with no key at all ("Not logged in"). That wipe used to be
+ *     masked because the tier-switch path re-persisted credentials as a
+ *     side effect; it must not come back.
  *  5. commitAppState → mainLoopModel := profile.model, mainLoopModelForSession := null.
  *
  * On failure at step 3/4/5 BOTH snapshots are restored (so env is exactly as
@@ -177,9 +191,10 @@ export async function switchModelProfileAtomic(
     throw new ModelSwitchError('apply', cause)
   }
 
-  // Step 4: syncToDisk
+  // Step 4: syncToDisk — persist the new model together with ITS OWN
+  // credentials so a bare restart (no start-script env) can authenticate.
   try {
-    deps.syncToDisk(profile.model, true)
+    deps.syncToDisk(profile.model, false, profile)
   } catch (cause) {
     restoreEnvSnapshot(snapshot)
     restoreApplyEnvSnapshot(applySnapshot)
@@ -219,25 +234,41 @@ export async function switchModelProfileAtomic(
 /**
  * Switch to a tier alias (opus/sonnet/haiku) or back to default (null).
  *
- * Tier path (opus/sonnet/haiku) — persists the REAL tier model ID (resolved
- * from the active profile's ANTHROPIC_DEFAULT_<TIER>_MODEL via resolveTierModel),
- * NOT the bare alias string, plus writes back the active profile's credentials
- * (getActiveProfile) so a bare `doge` restart can restore baseURL/apiKey. The
- * alias string alone would break the restart recovery chain: getModelProfile
- * keys profiles by real model ID, so a persisted "haiku" finds no profile and
- * ANTHROPIC_MODEL ends up as the literal "haiku" → API request fails.
+ * Tier path (opus/sonnet/haiku) — resolves the tier's REAL model id from env
+ * (start scripts / applied profile) and commits it as the session's
+ * mainLoopModel, but does NOT write it into the main-model slot on disk.
+ * The old implementation persisted the resolved tier model as the main model
+ * (.claude.json customApiEndpoint.model / settings.json model / storage),
+ * which polluted the main model identity: after a restart the stored tier
+ * mapping no longer matched any profile (profiles are keyed by main model),
+ * so Opus/Sonnet/Haiku ALL fell back to that one model in /model — the
+ * "switched to haiku, now every tier shows haiku" bug.
  *
- * Does NOT touch any env vars (only reads env via injected deps for resolution).
- * Relies on the invariant that env reflects the active ModelProfile.
+ * Instead the tier selection is persisted separately (activeTier + a tier→model
+ * snapshot, via persistTierSelection) and restored at startup by
+ * restoreTierState.ts, which injects the env vars a start script would have.
  *
- * - tier = 'opus' | 'sonnet' | 'haiku': commits the resolved real model ID
- *   as mainLoopModel; persists real ID + active profile credentials.
- * - tier = null (revert to default): clears mainLoopModel, clears stored
- *   credentials and model (existing semantics preserved).
+ * Default path (tier = null) —
+ *  - custom API users (stored main model exists): clear the tier selection
+ *    and return to the stored main model. Credentials are untouched: tier
+ *    switches run against the same provider, so clearing them would break
+ *    the next launch.
+ *  - first-party users: clear model + stored credentials (legacy semantics).
  */
 export function switchTier(tier: TierAlias, deps: SwitchTierDeps): void {
   if (tier === null) {
-    // default 路径：清凭证 + 清 model，保持现有语义
+    const storedMainModel = deps.getStoredMainModel()
+    if (storedMainModel) {
+      // 自定义 API 用户：清层级选择，主循环模型回到持久化的主模型
+      deps.persistTier(null)
+      deps.commitAppState((prev) => ({
+        ...prev,
+        mainLoopModel: storedMainModel,
+        mainLoopModelForSession: null,
+      }))
+      return
+    }
+    // 官方用户：清 model + 凭证（保持原有语义）
     deps.syncToDisk('', true, undefined)
     deps.commitAppState((prev) => ({
       ...prev,
@@ -246,10 +277,9 @@ export function switchTier(tier: TierAlias, deps: SwitchTierDeps): void {
     }))
     return
   }
-  // tier 路径：解析真实 tier 模型 ID + 从当前活跃 profile 回写凭证
+  // tier 路径：解析真实 tier 模型 ID，仅持久化层级选择，不改写主模型槽位
   const realTierModel = deps.resolveTierModel(tier)
-  const activeProfile = deps.getActiveProfile()
-  deps.syncToDisk(realTierModel, false, activeProfile)
+  deps.persistTier(tier)
   deps.commitAppState((prev) => ({
     ...prev,
     mainLoopModel: realTierModel,

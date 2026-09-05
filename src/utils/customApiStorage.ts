@@ -1,4 +1,19 @@
+import { saveGlobalConfig } from './config.js'
 import { getSecureStorage } from './secureStorage/index.js'
+
+export type TierAliasName = 'opus' | 'sonnet' | 'haiku'
+
+/**
+ * Persisted tier→model mapping snapshot. Captured from the process env at
+ * the moment a tier switch (or profile switch) happens, so a later bare
+ * `doge` launch (no start-script env) can restore the tier configuration
+ * instead of falling back every tier to the main model.
+ */
+export type TierModelsSnapshot = {
+  opus?: string
+  sonnet?: string
+  haiku?: string
+}
 
 /**
  * Complete model profile that captures ALL environment variables
@@ -50,6 +65,10 @@ export type CustomApiStorageData = {
   savedModels?: string[]
   /** Per-model profiles with full provider/credentials config */
   modelProfiles?: ModelProfile[]
+  /** Tier selected via /model (Opus/Sonnet/Haiku). Absent = main model. */
+  activeTier?: TierAliasName
+  /** Last known tier→model mapping, snapshotted from env when a switch happened. */
+  tierModels?: TierModelsSnapshot
 }
 
 const CUSTOM_API_STORAGE_KEY = 'customApiEndpoint'
@@ -84,7 +103,118 @@ export function readCustomApiStorage(): CustomApiStorageData {
             typeof p === 'object' && p !== null && typeof p.model === 'string',
         )
       : [],
+    activeTier:
+      value.activeTier === 'opus' || value.activeTier === 'sonnet' || value.activeTier === 'haiku'
+        ? value.activeTier
+        : undefined,
+    tierModels:
+      value.tierModels && typeof value.tierModels === 'object'
+        ? {
+            opus: typeof value.tierModels.opus === 'string' ? value.tierModels.opus : undefined,
+            sonnet:
+              typeof value.tierModels.sonnet === 'string' ? value.tierModels.sonnet : undefined,
+            haiku: typeof value.tierModels.haiku === 'string' ? value.tierModels.haiku : undefined,
+          }
+        : undefined,
   }
+}
+
+// --- Tier selection persistence ---
+
+/**
+ * Self-heal: restore top-level credentials in SECURE STORAGE from the active
+ * model's profile when they are missing or diverge from it.
+ *
+ * Profile switches historically wiped the top-level provider/baseURL/apiKey
+ * (switchModelProfileAtomic's clearCredentials=true), which left a bare
+ * `doge` launch — no start-script env — with no credentials at all
+ * ("Not logged in · Run /login"). The wipe was masked for a long time by the
+ * tier-switch path re-persisting credentials as a side effect. This heal runs
+ * at startup (restoreTierState) and repairs already-wiped installs from the
+ * intact modelProfiles entries.
+ *
+ * Deliberately writes ONLY secure storage:
+ *  - Secure storage is the auth source of truth (getAnthropicApiKeyWithSource
+ *    reads it first); the .claude.json copy is a fallback that re-syncs on
+ *    the next interactive model operation.
+ *  - At startup the global-config guard is not yet unlocked (enableConfigs),
+ *    so touching saveGlobalConfig here would crash the CLI before main().
+ *
+ * Returns true if a repair write happened.
+ */
+export function healStoredCredentials(): boolean {
+  const current = readCustomApiStorage()
+  const model = current.model?.trim()
+  if (!model) return false
+  const profile = getModelProfile(model)
+  if (!profile?.apiKey) return false
+
+  const credsMatch =
+    current.apiKey === profile.apiKey &&
+    current.provider === profile.provider &&
+    current.baseURL === profile.baseURL &&
+    current.authTokenType === profile.authTokenType
+  if (credsMatch) return false
+
+  writeCustomApiStorage({
+    ...current,
+    provider: profile.provider,
+    baseURL: profile.baseURL,
+    apiKey: profile.apiKey,
+    authTokenType: profile.authTokenType,
+  })
+  return true
+}
+
+/**
+ * Persist the tier selection (and refresh the tier→model snapshot from the
+ * current process env) to BOTH config stores (secure storage customApiEndpoint
+ * and .claude.json customApiEndpoint), without touching the main model,
+ * credentials, or saved models.
+ *
+ * This is the tier-switch counterpart of syncModelConfigToDisk: selecting
+ * Opus/Sonnet/Haiku must NOT rewrite the main model slot (the old behavior
+ * polluted it with the tier's model id, so after a restart every tier fell
+ * back to that model — the "/model shows the same model everywhere" bug).
+ *
+ * @param tier  'opus'|'sonnet'|'haiku' to select a tier, null to clear back
+ *              to the main model.
+ * @param tierModels  Optional snapshot; defaults to reading the tier env vars
+ *              from the current process. Pass {} to keep stored snapshot.
+ */
+export function persistTierSelection(
+  tier: TierAliasName | null,
+  tierModels?: TierModelsSnapshot,
+): void {
+  const snapshot: TierModelsSnapshot =
+    tierModels ?? {
+      opus: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,
+      sonnet: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,
+      haiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+    }
+  const hasSnapshotValue = !!(snapshot.opus || snapshot.sonnet || snapshot.haiku)
+
+  const applyFields = (current: CustomApiStorageData): CustomApiStorageData => ({
+    ...current,
+    activeTier: tier ?? undefined,
+    // Keep the previous snapshot when the new one is empty (clearing a tier
+    // selection should not erase the remembered tier mapping).
+    tierModels: hasSnapshotValue
+      ? snapshot
+      : current.tierModels
+        ? current.tierModels
+        : undefined,
+  })
+
+  const current = readCustomApiStorage()
+  writeCustomApiStorage(applyFields(current))
+
+  saveGlobalConfig(cfg => ({
+    ...cfg,
+    customApiEndpoint: applyFields(
+      (cfg.customApiEndpoint ?? {}) as CustomApiStorageData,
+    ),
+  }))
 }
 
 export function writeCustomApiStorage(next: CustomApiStorageData): void {
@@ -239,9 +369,18 @@ export function applyModelProfile(profile: ModelProfile): void {
   // saved model's credentials, causing the wrong provider/key to leak across
   // start-script launches. The full profile (including credentials) is stored
   // in modelProfiles[] and applied to process.env for the current session.
+  // A profile switch also selects a NEW main model, so any tier selection is
+  // reset (activeTier cleared) and the tier snapshot refreshed from the env
+  // values this profile just applied.
   const current = readCustomApiStorage()
   writeCustomApiStorage({
     ...current,
     model: profile.model,
+    activeTier: undefined,
+    tierModels: {
+      opus: profile.defaultOpusModel,
+      sonnet: profile.defaultSonnetModel,
+      haiku: profile.defaultHaikuModel,
+    },
   })
 }

@@ -11,14 +11,13 @@
  * dependency direction clean (model utils → lower layers, not → commands
  * or React) and leaves the test path fully dep-injected.
  */
-import { applyModelProfile, getModelProfile, type ModelProfile } from '../customApiStorage.js'
+import { applyModelProfile, persistTierSelection, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
 import {
   switchModelProfileAtomic as switchModelProfileAtomicCore,
   switchTier as switchTierCore,
   type AppStateSlice,
   type TierAlias,
 } from './switchModelProfile.js'
-import { getUserSpecifiedModelSetting } from './model.js'
 
 type SyncToDisk = (
   model: string,
@@ -68,12 +67,11 @@ export function switchTierBound(
         : 'ANTHROPIC_DEFAULT_HAIKU_MODEL'
       return process.env[envKey] || process.env.ANTHROPIC_MODEL || t
     },
-    getActiveProfile: () => {
-      // Use getUserSpecifiedModelSetting() to track the current AppState model
-      // (including P3 bare-model switches that don't update env), falling back
-      // to env when AppState hasn't been set yet.
-      const activeModel = getUserSpecifiedModelSetting() || process.env.ANTHROPIC_MODEL
-      return activeModel ? getModelProfile(activeModel) : undefined
+    persistTier: (t) => persistTierSelection(t),
+    getStoredMainModel: () => {
+      // Persisted main model from custom API storage; trimmed, may be ''.
+      const stored = readCustomApiStorage().model?.trim()
+      return stored ? stored : undefined
     },
   })
 }

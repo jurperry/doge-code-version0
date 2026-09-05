@@ -185,8 +185,18 @@ export type GlobalConfig = {
     provider?: 'anthropic' | 'openai' | 'responses'
     baseURL?: string
     apiKey?: string
+    authTokenType?: 'DOGE_API_KEY' | 'ANTHROPIC_AUTH_TOKEN'
     model?: string
     savedModels?: string[]
+    modelProfiles?: unknown[]
+    /** Tier selected via /model (Opus/Sonnet/Haiku). Absent = main model. */
+    activeTier?: 'opus' | 'sonnet' | 'haiku'
+    /** Last known tier→model mapping snapshot for restart recovery. */
+    tierModels?: {
+      opus?: string
+      sonnet?: string
+      haiku?: string
+    }
   }
   /**
    * @deprecated Use settings.apiKeyHelper instead.

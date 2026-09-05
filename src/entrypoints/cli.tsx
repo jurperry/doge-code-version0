@@ -289,6 +289,11 @@ async function main(): Promise<void> {
     startCapturingEarlyInput
   } = await import('../utils/earlyInput.js');
   startCapturingEarlyInput();
+  // Restore tier env (ANTHROPIC_DEFAULT_*_MODEL / tier-selected main model)
+  // from persisted custom API storage before any UI or query code reads them.
+  // Only fills in vars a start script didn't already set.
+  const { restoreTierStateFromStorage } = await import('../utils/model/restoreTierState.js');
+  restoreTierStateFromStorage();
   profileCheckpoint('cli_before_main_import');
   if (process.env.CLAUDE_CODE_ENTRYPOINT === 'sdk-ts') {
     console.error('[DOGE-DEBUG] About to import main.js');
