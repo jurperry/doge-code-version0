@@ -5,6 +5,7 @@ import type { PermissionMode } from './PermissionMode.js'
 import {
   getAutoModeUnavailableReason,
   isAutoModeGateEnabled,
+  isBypassPermissionsModeDisabled,
   transitionPermissionMode,
 } from './permissionSetup.js'
 
@@ -30,18 +31,28 @@ function canCycleToAuto(ctx: ToolPermissionContext): boolean {
 
 /**
  * Determines the next permission mode when cycling through modes with Shift+Tab.
+ *
+ * doge fork: the carousel is auto (bypassPermissions) → acceptEdits → plan →
+ * auto. Entering from default lands on auto directly. bypassPermissions is
+ * offered whenever it is not explicitly disabled — no
+ * --dangerously-skip-permissions launch flag required. The gate deliberately
+ * uses isBypassPermissionsModeDisabled() rather than
+ * ctx.isBypassPermissionsModeAvailable: the latter stays tied to flag-launched
+ * sessions so its other semantics (plan mode bypassing all checks in
+ * permissions.ts, bridge/SDK guards) don't leak into /auto sessions.
  */
 export function getNextPermissionMode(
   toolPermissionContext: ToolPermissionContext,
   _teamContext?: { leadAgentId: string },
 ): PermissionMode {
+  const canBypass = !isBypassPermissionsModeDisabled()
   switch (toolPermissionContext.mode) {
     case 'default':
+      if (canBypass) {
+        return 'bypassPermissions'
+      }
       // Ants skip acceptEdits and plan — auto mode replaces them
       if (process.env.USER_TYPE === 'ant') {
-        if (toolPermissionContext.isBypassPermissionsModeAvailable) {
-          return 'bypassPermissions'
-        }
         if (canCycleToAuto(toolPermissionContext)) {
           return 'auto'
         }
@@ -49,19 +60,19 @@ export function getNextPermissionMode(
       }
       return 'acceptEdits'
 
+    case 'bypassPermissions':
+      if (canCycleToAuto(toolPermissionContext)) {
+        return 'auto'
+      }
+      return 'acceptEdits'
+
     case 'acceptEdits':
       return 'plan'
 
     case 'plan':
-      if (toolPermissionContext.isBypassPermissionsModeAvailable) {
+      if (canBypass) {
         return 'bypassPermissions'
       }
-      if (canCycleToAuto(toolPermissionContext)) {
-        return 'auto'
-      }
-      return 'default'
-
-    case 'bypassPermissions':
       if (canCycleToAuto(toolPermissionContext)) {
         return 'auto'
       }

@@ -64,8 +64,10 @@ const PERMISSION_MODE_CONFIG: Partial<
     external: 'acceptEdits',
   },
   bypassPermissions: {
-    title: 'Bypass Permissions',
-    shortTitle: 'Bypass',
+    // doge fork: surfaced as "auto" mode (/auto command, Shift+Tab carousel);
+    // bypassPermissions stays the internal/wire name.
+    title: 'Auto Mode',
+    shortTitle: 'Auto',
     symbol: '⏵⏵',
     color: 'error',
     external: 'bypassPermissions',

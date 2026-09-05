@@ -23,6 +23,7 @@
 4. **Agent 模型 fallback**：模型等级不够时自动回退
 5. **Computer Use Windows**：HWND SendMessage + SendInput fallback，四层应用发现
 6. **PTL 错误映射**：Anthropic/OpenAI 格式的上下文溢出错误 → 统一 reactive compact
+7. **/auto 与三态模式循环**：TUI 内 `/auto`（支持 `[on|off]`）直接切换 bypassPermissions，Shift+Tab 在 auto → accept → plan 间循环（default 下首次按即进 auto），无需 `--dangerously-skip-permissions`。刻意不改 `isBypassPermissionsModeAvailable`（保持"旗标启动会话"语义，避免 plan 模式被 permissions.ts 当作全放行）；/auto 会话中 plan 仍为只读规划模式。见 `src/commands/auto/`、`src/utils/permissions/getNextPermissionMode.ts`
 
 ## 技术栈与运行时
 

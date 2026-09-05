@@ -404,7 +404,7 @@ const externalTips: Tip[] = [
     content: async () =>
       process.env.USER_TYPE === 'ant'
         ? `Hit ${getShortcutDisplay('chat:cycleMode', 'Chat', 'shift+tab')} to cycle between default mode and auto mode`
-        : `Hit ${getShortcutDisplay('chat:cycleMode', 'Chat', 'shift+tab')} to cycle between default mode, auto-accept edit mode, and plan mode`,
+        : `Hit ${getShortcutDisplay('chat:cycleMode', 'Chat', 'shift+tab')} to cycle between auto, accept-edits, and plan modes`,
     cooldownSessions: 10,
     isRelevant: async () => true,
   },
