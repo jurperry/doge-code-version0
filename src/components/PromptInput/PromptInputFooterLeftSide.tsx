@@ -398,8 +398,9 @@ function ModeIndicator({
       </Box>;
   }
 
-  // Add "↓ to manage tasks" hint when panel has visible rows
-  const hasCoordinatorTasks = "external" === 'ant' && getVisibleAgentTasks(tasks).length > 0;
+  // Add "↓ to manage tasks" hint when panel has visible agent rows
+  // (coordinatorTaskCount's +1 is the always-visible main row)
+  const hasCoordinatorTasks = getVisibleAgentTasks(tasks).length > 0;
 
   // Tasks pill renders as a Box sibling (not a parts entry) so its
   // click-target Box isn't nested inside <Text wrap="truncate"> — the

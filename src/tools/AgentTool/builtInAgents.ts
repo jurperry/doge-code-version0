@@ -16,7 +16,11 @@ export function areExplorePlanAgentsEnabled(): boolean {
     // external behavior). A/B test treatment sets false to measure impact of removal.
     return getFeatureValue_CACHED_MAY_BE_STALE('tengu_amber_stoat', true)
   }
-  return false
+  // doge-code fork: source runs never bundle-define BUILTIN_EXPLORE_PLAN_AGENTS
+  // (feature() is false for every flag when running TS directly), which left
+  // the built-in Explore/Plan subagents unregistered. Multi-agent exploration
+  // is a first-class doge feature (agent-teams panel), so keep them available.
+  return true
 }
 
 export function getBuiltInAgents(): AgentDefinition[] {

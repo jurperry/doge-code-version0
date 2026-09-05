@@ -2,14 +2,17 @@ import { c as _c } from "react/compiler-runtime";
 /**
  * CoordinatorTaskPanel — Steerable list of background agents.
  *
- * Renders below the prompt input footer whenever local_agent tasks exist.
- * Visibility is driven by evictAfter: undefined (running/retained) shows
- * always; a timestamp shows until passed. Enter to view/steer, x to dismiss.
+ * Renders below the prompt input footer: the main row (main-<model>) is
+ * always visible; each local_agent task gets a row (sub-agent-<model>-<task>).
+ * Visibility of agent rows is driven by evictAfter: undefined (running/
+ * retained) shows always; a timestamp shows until passed. Enter to view/
+ * steer, x to dismiss.
  */
 
 import figures from 'figures';
 import * as React from 'react';
 import { BLACK_CIRCLE, PAUSE_ICON, PLAY_ICON } from '../constants/figures.js';
+import { useMainLoopModel } from '../hooks/useMainLoopModel.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { stringWidth } from '../ink/stringWidth.js';
 import { Box, Text, wrapText } from '../ink.js';
@@ -31,16 +34,28 @@ import { isTerminalStatus } from './tasks/taskStatusUtils.js';
 export function getVisibleAgentTasks(tasks: AppState['tasks']): LocalAgentTaskState[] {
   return Object.values(tasks).filter((t): t is LocalAgentTaskState => isPanelAgentTask(t) && t.evictAfter !== 0).sort((a, b) => a.startTime - b.startTime);
 }
+/**
+ * Short model label for panel rows: strip the local-only [1m]/[2m] context
+ * suffix (never sent to the API) and trim. Empty → fallback label.
+ */
+function shortModelName(model: string | undefined, fallback = 'default'): string {
+  const m = (model ?? '').trim();
+  if (!m) return fallback;
+  return m.replace(/\[[12]m\]$/i, '');
+}
 export function CoordinatorTaskPanel(): React.ReactNode {
   const tasks = useAppState(s => s.tasks);
   const viewingAgentTaskId = useAppState(s_0 => s_0.viewingAgentTaskId);
-  const agentNameRegistry = useAppState(s_1 => s_1.agentNameRegistry);
   const coordinatorTaskIndex = useAppState(s_2 => s_2.coordinatorTaskIndex);
   const tasksSelected = useAppState(s_3 => s_3.footerSelection === 'tasks');
   const selectedIndex = tasksSelected ? coordinatorTaskIndex : undefined;
   const setAppState = useSetAppState();
   const visibleTasks = getVisibleAgentTasks(tasks);
   const hasTasks = Object.values(tasks).some(isPanelAgentTask);
+  // Main row label: resolved main-loop model (display-only resolution, same
+  // as other footer consumers) → e.g. `main-kimi-k3`.
+  const mainModel = useMainLoopModel();
+  const mainLabel = `main-${shortModelName(mainModel)}`;
 
   // 1s tick: re-render for elapsed time + evict tasks past their deadline.
   // The eviction deletes from prev.tasks, which makes useCoordinatorTaskCount
@@ -61,30 +76,23 @@ export function CoordinatorTaskPanel(): React.ReactNode {
     }, 1000, tasksRef, setAppState, setTick);
     return () => clearInterval(interval);
   }, [hasTasks, setAppState]);
-  const nameByAgentId = React.useMemo(() => {
-    const inv = new Map<string, string>();
-    for (const [n, id] of agentNameRegistry) inv.set(id, n);
-    return inv;
-  }, [agentNameRegistry]);
-  if (visibleTasks.length === 0) {
-    return null;
-  }
+  // Panel is always visible: the main row (main-<model>) renders even with
+  // no sub-agents, so the team roster is a stable fixture below the prompt.
   return <Box flexDirection="column" marginTop={1}>
-      <MainLine isSelected={selectedIndex === 0} isViewed={viewingAgentTaskId === undefined} onClick={() => exitTeammateView(setAppState)} />
-      {visibleTasks.map((task, i) => <AgentLine key={task.id} task={task} name={nameByAgentId.get(task.id)} isSelected={selectedIndex === i + 1} isViewed={viewingAgentTaskId === task.id} onClick={() => enterTeammateView(task.id, setAppState)} />)}
+      <MainLine label={mainLabel} isSelected={selectedIndex === 0} isViewed={viewingAgentTaskId === undefined} onClick={() => exitTeammateView(setAppState)} />
+      {visibleTasks.map((task, i) => <AgentLine key={task.id} task={task} name={`sub-agent-${shortModelName(task.model, 'inherit')}`} isSelected={selectedIndex === i + 1} isViewed={viewingAgentTaskId === task.id} onClick={() => enterTeammateView(task.id, setAppState)} />)}
     </Box>;
 }
 
 /**
- * Returns the number of visible coordinator tasks (for selection bounds).
- * The panel's 1s tick evicts expired tasks from prev.tasks, so this count
- * stays accurate without needing its own tick.
+ * Returns the number of selectable rows in CoordinatorTaskPanel (for
+ * selection bounds): the always-visible main row + one per visible agent
+ * task. The panel's 1s tick evicts expired tasks from prev.tasks, so this
+ * count stays accurate without needing its own tick.
  */
-export function useCoordinatorTaskCount() {
+export function useCoordinatorTaskCount(): number {
   const tasks = useAppState(_temp);
-  let t0;
-  t0 = 0;
-  return t0;
+  return React.useMemo(() => getVisibleAgentTasks(tasks).length + 1, [tasks]);
 }
 function _temp(s) {
   return s.tasks;
@@ -94,7 +102,8 @@ function MainLine(t0) {
   const {
     isSelected,
     isViewed,
-    onClick
+    onClick,
+    label
   } = t0;
   const [hover, setHover] = React.useState(false);
   const prefix = isSelected || hover ? figures.pointer + " " : "  ";
@@ -112,21 +121,21 @@ function MainLine(t0) {
   }
   const t3 = !isSelected && !isViewed && !hover;
   let t4;
-  if ($[2] !== bullet || $[3] !== isViewed || $[4] !== prefix || $[5] !== t3) {
-    t4 = <Text dimColor={t3} bold={isViewed}>{prefix}{bullet} main</Text>;
+  if ($[2] !== bullet || $[3] !== isViewed || $[4] !== prefix || $[5] !== t3 || $[6] !== label) {
+    t4 = <Text dimColor={t3} bold={isViewed}>{prefix}{bullet} {label}</Text>;
     $[2] = bullet;
     $[3] = isViewed;
     $[4] = prefix;
     $[5] = t3;
-    $[6] = t4;
+    $[6] = label;
+    $[7] = t4;
   } else {
-    t4 = $[6];
+    t4 = $[7];
   }
   let t5;
-  if ($[7] !== onClick || $[8] !== t4) {
+  if ($[8] !== onClick || $[9] !== t4) {
     t5 = <Box onClick={onClick} onMouseEnter={t1} onMouseLeave={t2}>{t4}</Box>;
-    $[7] = onClick;
-    $[8] = t4;
+    $[8] = onClick;
     $[9] = t5;
   } else {
     t5 = $[9];
@@ -186,7 +195,9 @@ function AgentLine(t0) {
   const bullet = isViewed ? BLACK_CIRCLE : figures.circle;
   const dim = !highlighted && !isViewed;
   const sep = isRunning ? PLAY_ICON : PAUSE_ICON;
-  const namePart = name ? `${name}: ` : "";
+  // Row label format: `sub-agent-<model>-<task>` — the name is the steering
+  // handle kept out of truncation and undimmed; '-' joins it to the task.
+  const namePart = name ? `${name}-` : "";
   const hintPart = isSelected && !isViewed ? ` · x to ${isRunning ? "stop" : "clear"}` : "";
   const suffixPart = ` ${sep} ${elapsed}${tokenText}${queuedText}${hintPart}`;
   const availableForDesc = columns - stringWidth(prefix) - stringWidth(`${bullet} `) - stringWidth(namePart) - stringWidth(suffixPart);
@@ -203,7 +214,7 @@ function AgentLine(t0) {
   const truncated = t4;
   let t5;
   if ($[8] !== name) {
-    t5 = name && <><Text dimColor={false} bold={true}>{name}</Text>{": "}</>;
+    t5 = name && <><Text dimColor={false} bold={true}>{name}</Text>{"-"}</>;
     $[8] = name;
     $[9] = t5;
   } else {

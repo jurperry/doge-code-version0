@@ -470,7 +470,8 @@ export function registerAsyncAgent({
   selectedAgent,
   setAppState,
   parentAbortController,
-  toolUseId
+  toolUseId,
+  model
 }: {
   agentId: string;
   description: string;
@@ -479,6 +480,9 @@ export function registerAsyncAgent({
   setAppState: SetAppState;
   parentAbortController?: AbortController;
   toolUseId?: string;
+  /** Resolved model id (getAgentModel) — shown in the CoordinatorTaskPanel
+   *  row label (`sub-agent-<model>-<task>`). Undefined = inherit display. */
+  model?: string;
 }): LocalAgentTaskState {
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
 
@@ -492,6 +496,7 @@ export function registerAsyncAgent({
     prompt,
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
+    model,
     abortController,
     retrieved: false,
     lastReportedToolCount: 0,
@@ -530,7 +535,8 @@ export function registerAgentForeground({
   selectedAgent,
   setAppState,
   autoBackgroundMs,
-  toolUseId
+  toolUseId,
+  model
 }: {
   agentId: string;
   description: string;
@@ -539,6 +545,9 @@ export function registerAgentForeground({
   setAppState: SetAppState;
   autoBackgroundMs?: number;
   toolUseId?: string;
+  /** Resolved model id (getAgentModel) — shown in the CoordinatorTaskPanel
+   *  row label (`sub-agent-<model>-<task>`). Undefined = inherit display. */
+  model?: string;
 }): {
   taskId: string;
   backgroundSignal: Promise<void>;
@@ -557,6 +566,7 @@ export function registerAgentForeground({
     prompt,
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
+    model,
     abortController,
     unregisterCleanup,
     retrieved: false,

@@ -205,6 +205,20 @@ export function GlobalKeybindingHandlers({
     context: 'Global'
   });
 
+  // Focus the agent-teams panel (ctrl+shift+a): select the 'tasks' footer
+  // item with the pointer on the main row. ↑/↓ move across main + sub-agent
+  // rows, Enter opens the selected agent's transcript, Esc clears. Toggle:
+  // pressing again clears the selection.
+  useKeybinding('app:focusAgentList', () => {
+    setAppState(prev_4 => ({
+      ...prev_4,
+      footerSelection: prev_4.footerSelection === 'tasks' ? null : 'tasks',
+      coordinatorTaskIndex: 0
+    }));
+  }, {
+    context: 'Global'
+  });
+
   // Toggle built-in terminal panel (meta+j).
   // toggle() blocks in spawnSync until the user detaches from tmux.
   const handleToggleTerminal = useCallback(() => {

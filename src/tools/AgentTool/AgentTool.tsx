@@ -694,7 +694,8 @@ export const AgentTool = buildTool({
         // Don't link to parent's abort controller -- background agents should
         // survive when the user presses ESC to cancel the main thread.
         // They are killed explicitly via chat:killAgents.
-        toolUseId: toolUseContext.toolUseId
+        toolUseId: toolUseContext.toolUseId,
+        model: resolvedAgentModel
       });
 
       // Register name → agentId for SendMessage routing. Post-registerAsyncAgent
@@ -823,7 +824,8 @@ export const AgentTool = buildTool({
             selectedAgent,
             setAppState: rootSetAppState,
             toolUseId: toolUseContext.toolUseId,
-            autoBackgroundMs: getAutoBackgroundMs() || undefined
+            autoBackgroundMs: getAutoBackgroundMs() || undefined,
+            model: resolvedAgentModel
           });
           foregroundTaskId = registration.taskId;
           backgroundPromise = registration.backgroundSignal.then(() => ({
