@@ -1,6 +1,7 @@
 import { test, expect } from 'bun:test'
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
-import { createOpenAICompatStream } from './openaiCompat.js'
+import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import { convertAnthropicRequestToOpenAI, createOpenAICompatStream } from './openaiCompat.js'
 
 const GATEWAY_UPSTREAM_400 =
   '{"error":{"message":"Error from provider (Console Go): Upstream request failed","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}'
@@ -137,4 +138,169 @@ test('200 with body returns a stream reader', async () => {
   )
   expect(typeof reader.read).toBe('function')
   await reader.cancel()
+})
+
+// --- Multimodal image conversion (vision through Chat Completions) ---
+
+const IMAGE_B64 = 'aGVsbG8gd29ybGQ='
+
+const imageToolResultMessage = {
+  role: 'user',
+  content: [
+    {
+      type: 'tool_result',
+      tool_use_id: 'toolu_01',
+      content: [
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: IMAGE_B64,
+          },
+        },
+      ],
+    },
+  ],
+} as unknown as BetaMessageParam
+
+test('tool_result with image → tool message stays textual, image rides a follow-up user message as image_url data URL', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'toolu_01', name: 'Read', input: {} }],
+      } as unknown as BetaMessageParam,
+      imageToolResultMessage,
+    ],
+  })
+
+  const toolMessage = request.messages.find(m => m.role === 'tool')
+  expect(toolMessage).toBeDefined()
+  expect(toolMessage!.content).not.toContain(IMAGE_B64)
+  expect(JSON.stringify(toolMessage!.content)).not.toContain('"type":"image"')
+
+  const imageMessage = request.messages.find(
+    m => m.role === 'user' && Array.isArray(m.content),
+  )
+  expect(imageMessage).toBeDefined()
+  const parts = imageMessage!.content as Array<Record<string, unknown>>
+  const imagePart = parts.find(p => p.type === 'image_url')
+  expect(imagePart).toEqual({
+    type: 'image_url',
+    image_url: { url: `data:image/png;base64,${IMAGE_B64}` },
+  })
+})
+
+test('tool_result mixing text and image → text in tool message, image in follow-up user message', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_02',
+            content: [
+              { type: 'text', text: 'screenshot taken' },
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/jpeg', data: IMAGE_B64 },
+              },
+            ],
+          },
+        ],
+      } as unknown as BetaMessageParam,
+    ],
+  })
+
+  const toolMessage = request.messages.find(m => m.role === 'tool')
+  expect(toolMessage!.content).toBe('screenshot taken')
+  const imageMessage = request.messages.find(
+    m => m.role === 'user' && Array.isArray(m.content),
+  )
+  expect(imageMessage).toBeDefined()
+  const parts = imageMessage!.content as Array<Record<string, unknown>>
+  expect(parts.some(p => p.type === 'image_url')).toBe(true)
+  expect(
+    parts.some(
+      p =>
+        p.type === 'image_url' &&
+        (p.image_url as { url: string }).url === `data:image/jpeg;base64,${IMAGE_B64}`,
+    ),
+  ).toBe(true)
+})
+
+test('user message with text + image blocks → multimodal content array (text part + image_url part)', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what is in this picture?' },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: IMAGE_B64 },
+          },
+        ],
+      },
+    ],
+  })
+
+  const userMessage = request.messages.find(m => m.role === 'user')
+  expect(Array.isArray(userMessage!.content)).toBe(true)
+  const parts = userMessage!.content as Array<Record<string, unknown>>
+  expect(parts[0]).toEqual({ type: 'text', text: 'what is in this picture?' })
+  expect(parts[1]).toEqual({
+    type: 'image_url',
+    image_url: { url: `data:image/png;base64,${IMAGE_B64}` },
+  })
+})
+
+test('url-sourced image block passes the URL through as image_url', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'url', url: 'https://example.test/cat.png' },
+          },
+        ],
+      },
+    ],
+  })
+
+  const userMessage = request.messages.find(m => m.role === 'user')
+  const parts = userMessage!.content as Array<Record<string, unknown>>
+  expect(parts).toEqual([
+    { type: 'image_url', image_url: { url: 'https://example.test/cat.png' } },
+  ])
+})
+
+test('plain text request shape is unchanged (string content, no follow-up messages)', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      { role: 'user', content: 'plain question' },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'toolu_03', content: 'plain result' },
+        ],
+      } as unknown as BetaMessageParam,
+    ],
+  })
+
+  expect(request.messages[0]).toEqual({ role: 'user', content: 'plain question' })
+  const toolMessage = request.messages.find(m => m.role === 'tool')
+  expect(toolMessage!.content).toBe('plain result')
+  expect(
+    request.messages.filter(m => Array.isArray(m.content)),
+  ).toHaveLength(0)
 })

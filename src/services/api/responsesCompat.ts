@@ -10,8 +10,10 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import {
   contentToText,
+  imageBlockToImageURL,
   isTransientUpstreamError,
   joinBaseUrl,
+  splitToolResultContent,
   toBlocks,
 } from './openaiCompat.js'
 
@@ -27,10 +29,17 @@ type ResponsesInputText = {
   text: string
 }
 
+// Responses API image part: image_url is a bare string (data: URL or remote
+// URL), unlike Chat Completions' { image_url: { url } } wrapper.
+type ResponsesInputImage = {
+  type: 'input_image'
+  image_url: string
+}
+
 type ResponsesMessageInputItem = {
   type: 'message'
   role: 'user' | 'assistant'
-  content: ResponsesInputText[]
+  content: Array<ResponsesInputText | ResponsesInputImage>
 }
 
 type ResponsesFunctionCallItem = {
@@ -247,18 +256,59 @@ export function convertAnthropicRequestToResponses(input: {
       for (const result of toolResults) {
         const toolUseId =
           typeof result.tool_use_id === 'string' ? result.tool_use_id : undefined
-        const content = result.content
+        const { text, imageURLs } = splitToolResultContent(result.content)
+        const hasImages = imageURLs.length > 0
+        // function_call_output takes a plain string; images are emitted as a
+        // follow-up user message right below. JSON.stringify would send raw
+        // base64 as text, which the model cannot interpret as an image.
+        const output = text
+          ? text
+          : hasImages
+            ? '(tool returned image content)'
+            : JSON.stringify(result.content)
         convertedInput.push({
           type: 'function_call_output',
           call_id: toolUseId,
-          output: typeof content === 'string' ? content : JSON.stringify(content),
+          output,
         })
+        if (hasImages) {
+          convertedInput.push({
+            type: 'message',
+            role: 'user',
+            content: [
+              {
+                type: 'input_text',
+                text: `[Images returned by tool call ${toolUseId ?? ''}]`,
+              },
+              ...imageURLs.map(url => ({
+                type: 'input_image' as const,
+                image_url: url,
+              })),
+            ],
+          })
+        }
       }
 
+      const nonToolBlocks = blocks.filter(block => block.type !== 'tool_result')
+      const imageURLs = nonToolBlocks
+        .map(block => imageBlockToImageURL(block))
+        .filter((url): url is string => url !== undefined)
       const text = contentToText(
-        blocks.filter(block => block.type !== 'tool_result') as unknown as BetaMessageParam['content'],
+        nonToolBlocks as unknown as BetaMessageParam['content'],
       )
-      if (text) {
+      if (imageURLs.length > 0) {
+        convertedInput.push({
+          type: 'message',
+          role: 'user',
+          content: [
+            ...(text ? [{ type: 'input_text' as const, text }] : []),
+            ...imageURLs.map(url => ({
+              type: 'input_image' as const,
+              image_url: url,
+            })),
+          ],
+        })
+      } else if (text) {
         convertedInput.push({
           type: 'message',
           role: 'user',

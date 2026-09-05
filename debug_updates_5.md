@@ -436,3 +436,32 @@ Zod schema（`settings/types.ts`）、`toPersistableEffort`、`configureEffortPa
 | `effort.ts` | 两分支改相邻行 | auto-merge 正确，xhigh 逻辑与 4.8 文案共存 |
 
 冲突解决后三个文件 transpile 通过，src/ 无冲突标记残留。
+
+## 2026-09-05 OpenAI/Responses 转接层多模态图片修复
+
+### 现象
+
+经 `openai` / `responses` 转接层使用多模态模型时，Read 工具读图片后模型"看不到"图片，自述收到的是"一大段 base64 编码的像素数据以及附加的元数据"。
+
+### 根因
+
+`src/services/api/openaiCompat.ts` 与 `responsesCompat.ts` 的请求转换从未处理 image 块：
+
+1. **tool_result 图片被 JSON.stringify 成文本**：FileReadTool 读图片返回 `content: [{type:'image', source:{type:'base64',...}}]` 数组，两个转换函数对非字符串 content 一律 `JSON.stringify`，模型收到的正是 base64 数据 + `type`/`source`/`media_type` 元数据的 JSON 文本——与现象描述完全吻合。
+2. **user 消息 image 块被静默丢弃**：`contentToText` 对 image 块返回空串，用户直接粘贴的图片经转接层后消失。
+
+### 修复
+
+协议约束：Chat Completions 的 `role:'tool'` 消息与 Responses API 的 `function_call_output.output` 都只接受字符串，图片不能放在 tool 消息内。两个协议的标准做法是把图片作为紧随 tool 消息之后的 `user` 消息携带。
+
+- `openaiCompat.ts` 新增导出 `imageBlockToImageURL`（base64→data URL、url→透传）与 `splitToolResultContent`（拆分 tool_result 文本与图片）：
+  - tool_result：文本进 tool 消息（无文本且有图时给 `(tool returned image content)` 占位），图片转为 `{type:'image_url', image_url:{url:'data:...'}}` 紧随其后放 user 多部分消息
+  - user 消息：含图时 content 变为 `[text?, ...image_url]` 多部分数组；纯文本请求保持原字符串形状（网关兼容）
+- `responsesCompat.ts` 复用上述辅助，图片转 `{type:'input_image', image_url:'data:...'}`（Responses 的 `image_url` 是裸字符串，与 Chat Completions 的对象包装不同）
+- 无图/纯文本请求的形状与修复前逐字节一致（有回归测试保护）
+
+### 测试
+
+- 新增 9 个用例：tool_result 纯图 / 文本+图混合、user 文本+图、url 图透传、纯文本形状回归（两协议各一套）
+- `bun test src/services/api/ src/commands/model/ src/utils/model/ src/hooks/` 77 pass / 0 fail
+- `bun run version` 冒烟通过；tsc 对改动文件无新错误（仓库既有的 bun types / baseUrl 配置报错与本次无关）

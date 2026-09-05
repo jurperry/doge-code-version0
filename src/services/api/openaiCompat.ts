@@ -27,9 +27,16 @@ type OpenAIToolCall = {
   }
 }
 
+type OpenAIImageURLPart = {
+  type: 'image_url'
+  image_url: { url: string }
+}
+
+type OpenAIContentPart = { type: 'text'; text: string } | OpenAIImageURLPart
+
 type OpenAIChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content?: string | null
+  content?: string | Array<OpenAIContentPart> | null
   reasoning_content?: string
   tool_call_id?: string
   tool_calls?: OpenAIToolCall[]
@@ -119,6 +126,45 @@ export function toBlocks(content: BetaMessageParam['content']): AnyBlock[] {
     : [{ type: 'text', text: content }]
 }
 
+// Convert an Anthropic image block to a URL string usable by both OpenAI
+// protocols: base64 sources become data: URLs, url sources pass through.
+// Returns undefined for non-image blocks or malformed sources.
+export function imageBlockToImageURL(block: AnyBlock): string | undefined {
+  if (block.type !== 'image') return undefined
+  const source = block.source
+  if (!source || typeof source !== 'object') return undefined
+  if (source.type === 'base64' && typeof source.data === 'string') {
+    const mediaType =
+      typeof source.media_type === 'string' ? source.media_type : 'image/png'
+    return `data:${mediaType};base64,${source.data}`
+  }
+  if (source.type === 'url' && typeof source.url === 'string') return source.url
+  return undefined
+}
+
+// Tool-result content must be plain text in both OpenAI protocols; images
+// cannot ride inside tool messages. Split an Anthropic tool_result content
+// into its textual part and image URL list so callers can emit the images as
+// a follow-up user message.
+export function splitToolResultContent(content: unknown): {
+  text: string
+  imageURLs: string[]
+} {
+  if (typeof content === 'string') return { text: content, imageURLs: [] }
+  if (!Array.isArray(content)) return { text: '', imageURLs: [] }
+  const texts: string[] = []
+  const imageURLs: string[] = []
+  for (const block of content as AnyBlock[]) {
+    if (block.type === 'text' && typeof block.text === 'string') {
+      texts.push(block.text)
+      continue
+    }
+    const url = imageBlockToImageURL(block)
+    if (url) imageURLs.push(url)
+  }
+  return { text: texts.join('\n'), imageURLs }
+}
+
 function getToolDefinitions(tools?: BetaToolUnion[]): OpenAIChatRequest['tools'] {
   if (!tools || tools.length === 0) return undefined
   const mapped = tools.flatMap(tool => {
@@ -175,18 +221,61 @@ export function convertAnthropicRequestToOpenAI(input: {
       for (const result of toolResults) {
         const toolUseId =
           typeof result.tool_use_id === 'string' ? result.tool_use_id : undefined
-        const content = result.content
+        const { text, imageURLs } = splitToolResultContent(result.content)
+        const hasImages = imageURLs.length > 0
+        // Chat Completions tool messages are text-only. Images are emitted as
+        // a follow-up user message right below; JSON.stringify would send raw
+        // base64 as text, which the model cannot interpret as an image.
+        const toolContent = text
+          ? text
+          : hasImages
+            ? '(tool returned image content)'
+            : JSON.stringify(result.content)
         messages.push({
           role: 'tool',
           tool_call_id: toolUseId,
-          content: typeof content === 'string' ? content : JSON.stringify(content),
+          content: toolContent,
         })
+        if (hasImages) {
+          messages.push({
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: `[Images returned by tool call ${toolUseId ?? ''}]`,
+              },
+              ...imageURLs.map(url => ({
+                type: 'image_url' as const,
+                image_url: { url },
+              })),
+            ],
+          })
+        }
       }
 
+      const nonToolBlocks = blocks.filter(block => block.type !== 'tool_result')
+      const imageURLs = nonToolBlocks
+        .map(block => imageBlockToImageURL(block))
+        .filter((url): url is string => url !== undefined)
       const text = contentToText(
-        blocks.filter(block => block.type !== 'tool_result') as unknown as BetaMessageParam['content'],
+        nonToolBlocks as unknown as BetaMessageParam['content'],
       )
-      if (text) messages.push({ role: 'user', content: text })
+      if (imageURLs.length > 0) {
+        // Multimodal user content: text + image_url parts. Text-only requests
+        // keep the plain string content for maximal gateway compatibility.
+        messages.push({
+          role: 'user',
+          content: [
+            ...(text ? [{ type: 'text' as const, text }] : []),
+            ...imageURLs.map(url => ({
+              type: 'image_url' as const,
+              image_url: { url },
+            })),
+          ],
+        })
+      } else if (text) {
+        messages.push({ role: 'user', content: text })
+      }
       continue
     }
 

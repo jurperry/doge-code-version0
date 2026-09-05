@@ -1,6 +1,9 @@
 import { test, expect } from 'bun:test'
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
-import type { BetaToolUnion } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import type {
+  BetaMessageParam,
+  BetaToolUnion,
+} from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import {
   convertAnthropicRequestToResponses,
   createAnthropicStreamFromResponses,
@@ -368,4 +371,129 @@ test('one web_search_tool_result block per search call even with zero citations 
   expect(blocks[1].tool_use_id).toBe('ws_2')
   expect(blocks[0].content).toEqual([])
   expect(blocks[1].content).toEqual([])
+})
+
+// --- Multimodal image conversion (vision through the Responses API) ---
+
+const IMAGE_B64 = 'aGVsbG8gd29ybGQ='
+
+test('tool_result with image → function_call_output stays textual, image rides a follow-up user message as input_image', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_01',
+            content: [
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/png', data: IMAGE_B64 },
+              },
+            ],
+          },
+        ],
+      } as unknown as BetaMessageParam,
+    ],
+  })
+
+  const outputItem = request.input.find(i => i.type === 'function_call_output')
+  expect(outputItem).toBeDefined()
+  expect((outputItem as { output: string }).output).not.toContain(IMAGE_B64)
+  expect((outputItem as { output: string }).output).not.toContain('"type":"image"')
+
+  const imageMessage = request.input.find(
+    i =>
+      i.type === 'message' &&
+      i.role === 'user' &&
+      Array.isArray(i.content) &&
+      i.content.some((part: { type: string }) => part.type === 'input_image'),
+  ) as { content: Array<Record<string, unknown>> }
+  expect(imageMessage).toBeDefined()
+  const imagePart = imageMessage.content.find(p => p.type === 'input_image')
+  expect(imagePart).toEqual({
+    type: 'input_image',
+    image_url: `data:image/png;base64,${IMAGE_B64}`,
+  })
+})
+
+test('user message with text + image blocks → content array (input_text + input_image)', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what is in this picture?' },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: IMAGE_B64 },
+          },
+        ],
+      },
+    ],
+  })
+
+  const userMessage = request.input.find(
+    i => i.type === 'message' && i.role === 'user',
+  ) as { content: Array<Record<string, unknown>> }
+  expect(userMessage.content[0]).toEqual({
+    type: 'input_text',
+    text: 'what is in this picture?',
+  })
+  expect(userMessage.content[1]).toEqual({
+    type: 'input_image',
+    image_url: `data:image/png;base64,${IMAGE_B64}`,
+  })
+})
+
+test('url-sourced image block passes the URL through as input_image', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'url', url: 'https://example.test/cat.png' },
+          },
+        ],
+      },
+    ],
+  })
+
+  const userMessage = request.input.find(
+    i => i.type === 'message' && i.role === 'user',
+  ) as { content: Array<Record<string, unknown>> }
+  expect(userMessage.content).toEqual([
+    { type: 'input_image', image_url: 'https://example.test/cat.png' },
+  ])
+})
+
+test('plain text request shape is unchanged (string tool output, single input_text)', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      { role: 'user', content: 'plain question' },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'toolu_02', content: 'plain result' },
+        ],
+      } as unknown as BetaMessageParam,
+    ],
+  })
+
+  const outputItem = request.input.find(i => i.type === 'function_call_output')
+  expect((outputItem as { output: string }).output).toBe('plain result')
+  const userMessages = request.input.filter(
+    i => i.type === 'message' && i.role === 'user',
+  )
+  expect(userMessages).toHaveLength(1)
+  expect((userMessages[0] as { content: unknown[] }).content).toEqual([
+    { type: 'input_text', text: 'plain question' },
+  ])
 })
