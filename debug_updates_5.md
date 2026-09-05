@@ -465,3 +465,27 @@ Zod schema（`settings/types.ts`）、`toPersistableEffort`、`configureEffortPa
 - 新增 9 个用例：tool_result 纯图 / 文本+图混合、user 文本+图、url 图透传、纯文本形状回归（两协议各一套）
 - `bun test src/services/api/ src/commands/model/ src/utils/model/ src/hooks/` 77 pass / 0 fail
 - `bun run version` 冒烟通过；tsc 对改动文件无新错误（仓库既有的 bun types / baseUrl 配置报错与本次无关）
+
+## 2026-09-05 Computer Use 永久开启与 Windows zoom 修复
+
+参考 [niejiaqiang/claude-code-haha](https://github.com/niejiaqiang/claude-code-haha) 的 Computer Use 架构文档（其核心是"保留官方 MCP 工具定义与安全关卡、替换底层执行、绕过灰度门控"）逐层核对后发现，doge 的 CU 门控只放开了表层，真正的挡板在后面；另有一个让包彻底 import 失败的坏 shim 和一个 Windows zoom 静默失败 bug。
+
+### 问题（四层）
+
+1. **MCP server 默认禁用（"默认关闭"的根因）**：`gates.ts` 的 `getChicagoEnabled()` 已硬编码 `true`、`main.tsx` 也注入了 server 配置，但 `src/services/mcp/config.ts` 的 `isDefaultDisabledBuiltin` 把 `computer-use` 列为"默认禁用的内置 server"——`client.ts:2239` 连接时因 `isMcpServerDisabled` 默认返回 true 直接标记 `disabled` 不连接，工具从不进模型列表，必须去 `/mcp` 手动启用。即 haha 文档所述"第 9 层判决 Gate"。
+2. **`@ant/computer-use-mcp` 包 import 必挂**：`shims/ant-computer-use-mcp/index.ts` 用 `export * from '../../../packages/...'`（三级上跳出仓库），Bun 按真实路径解析时指向仓库外 → `client.ts` 动态 import 静默失败。`ant-computer-use-input` 同病。
+3. **第三方端点无 CU 提示**：官方 Anthropic 后端检测 `mcp__computer-use__*` 工具名会注入 CU 可用性提示（在服务端），openai/responses 转接层没有——模型不知道这些工具的存在与用法，更不会 screenshot→act→verify 循环。
+4. **Windows zoom 静默返回空图**：`handleZoom` 的 image-px→logical 比率转换产生非整数坐标（如 1106.0266），`platforms/win32.ts` 的 `captureRegion` 把非整数直接插进 PowerShell 的 `.NET Bitmap(int,int)` 构造，脚本挂掉后 catch 分支返回 `{base64:''}`——模型收到空图且无任何错误信息。
+
+### 修复
+
+- `src/services/mcp/config.ts`：`isDefaultDisabledBuiltin` 恒 `return false`（haha 同款绕过），删除 dead require。`computer-use` 变为普通 server 语义：默认启用，仍可经 `/mcp` 禁用（`disabledMcpServers`）；历史 `enabledMcpServers` 残留条目无害。
+- `package.json`：`@ant/computer-use-mcp` / `@ant/computer-use-input` 的 `file:` 依赖从 shims 改指 `packages/@ant/` 真包（两者本就自足），删除两个坏 shim；`bun install` 后 node_modules 为硬拷贝，彻底消除 symlink 解析歧义。
+- `src/utils/computerUse/setup.ts`：新增导出 `COMPUTER_USE_MCP_PROMPT_HINT`（request_access 先行、screenshot→观察→操作→verify 循环、坐标取自截图图像像素、zoom 放大、computer_batch 批量）；`src/main.tsx` 在注入 CU MCP 时无条件 append 进 system prompt（官方直连重复注入无害）。
+- `src/utils/computerUse/platforms/win32.ts`：`captureRegion`/`captureScreen` 对所有插值坐标与尺寸 `Math.round()`；`captureRegion` 失败改为 throw（带 PS 输出摘要）而非静默空图。
+
+### 测试
+
+- 新增 `src/services/mcp/config.test.ts` 6 用例：默认启用（always-on 核心断言）、显式禁用/恢复、普通 server 语义不变、遗留 `enabledMcpServers` 兼容、`setupComputerUseMCP` 输出完整工具集（stdio/dynamic + 全部 `mcp__computer-use__` 前缀 + 核心工具在列）、本地 hint 覆盖工作流要点。
+- 新增 `test/computer-use-e2e.ts`（可复用实机验证脚本，只读操作）：MCP 协议层 ListTools（in-process server + linked transport，24 个工具）、`bindSessionContext` 真实 dispatch 链的 screenshot（1389×868 JPEG 落盘验证）/ zoom（修复前 0 字符，修复后有图）/ cursor_position / 跨会话锁获取与释放。锁与临时产物隔离在 `test/tmp-cu-e2e-config`，结束即清。
+- `bun test src/services/api/ src/utils/model/ src/commands/model/ src/hooks/ src/services/mcp/` 103 pass / 0 fail；`bun run version` 冒烟通过。

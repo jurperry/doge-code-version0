@@ -7,8 +7,8 @@
       "dependencies": {
         "@alcalzone/ansi-tokenize": "*",
         "@ant/claude-for-chrome-mcp": "file:./shims/ant-claude-for-chrome-mcp",
-        "@ant/computer-use-input": "file:./shims/ant-computer-use-input",
-        "@ant/computer-use-mcp": "file:./shims/ant-computer-use-mcp",
+        "@ant/computer-use-input": "file:./packages/@ant/computer-use-input",
+        "@ant/computer-use-mcp": "file:./packages/@ant/computer-use-mcp",
         "@ant/computer-use-swift": "file:./shims/ant-computer-use-swift",
         "@anthropic-ai/claude-agent-sdk": "*",
         "@anthropic-ai/mcpb": "*",
@@ -87,9 +87,9 @@
 
     "@ant/claude-for-chrome-mcp": ["@ant/claude-for-chrome-mcp@file:shims/ant-claude-for-chrome-mcp", {}],
 
-    "@ant/computer-use-input": ["@ant/computer-use-input@file:shims/ant-computer-use-input", {}],
+    "@ant/computer-use-input": ["@ant/computer-use-input@file:packages/@ant/computer-use-input", {}],
 
-    "@ant/computer-use-mcp": ["@ant/computer-use-mcp@file:shims/ant-computer-use-mcp", {}],
+    "@ant/computer-use-mcp": ["@ant/computer-use-mcp@file:packages/@ant/computer-use-mcp", {}],
 
     "@ant/computer-use-swift": ["@ant/computer-use-swift@file:shims/ant-computer-use-swift", {}],
 

@@ -664,6 +664,9 @@ function parseCaptureOutput(raw: string): ScreenshotResult | null {
 
 const screenshot: ScreenshotPlatform = {
   async captureScreen(displayId, targetW?: number, targetH?: number) {
+    // computeTargetDims can yield non-integers; .NET Bitmap ctor takes ints.
+    if (targetW != null) targetW = Math.round(targetW)
+    if (targetH != null) targetH = Math.round(targetH)
     // If HWND is bound, capture that specific window via PrintWindow
     if (boundHwnd) {
       const result = this.captureWindow?.(String(boundHwnd))
@@ -725,6 +728,10 @@ $bmp.Dispose()
   },
 
   async captureRegion(x, y, w, h) {
+    // handleZoom's image-px→logical ratio produces non-integers (e.g.
+    // 1106.0266). .NET Bitmap/CopyFromScreen ctors take ints and the PS
+    // script dies on the double literals — round before interpolation.
+    const rx = Math.round(x), ry = Math.round(y), rw = Math.round(w), rh = Math.round(h)
     // When HWND is bound, crop from cached full-window screenshot (avoids PrintWindow on every zoom)
     if (boundHwnd) {
       const now = Date.now()
@@ -735,7 +742,7 @@ $bmp.Dispose()
         }
       }
       if (cachedScreenshot) {
-        return cropScreenshot(cachedScreenshot, x, y, w, h)
+        return cropScreenshot(cachedScreenshot, rx, ry, rw, rh)
       }
       // Fallback: full capture if cache miss
       const result = this.captureWindow?.(String(boundHwnd))
@@ -747,22 +754,24 @@ $bmp.Dispose()
 ${DPI_AWARE_PS}
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$bmp = New-Object System.Drawing.Bitmap(${w}, ${h})
+$bmp = New-Object System.Drawing.Bitmap(${rw}, ${rh})
 $g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen(${x}, ${y}, 0, 0, (New-Object System.Drawing.Size(${w}, ${h})))
+$g.CopyFromScreen(${rx}, ${ry}, 0, 0, (New-Object System.Drawing.Size(${rw}, ${rh})))
 $g.Dispose()
 $bmp.Save('${tmpFile}', [System.Drawing.Imaging.ImageFormat]::Jpeg)
 $bmp.Dispose()
-"${w},${h}"
+"${rw},${rh}"
 `)
     const [wStr, hStr] = (raw || '').split(',')
     try {
       const fs = require('fs')
       const buf = fs.readFileSync(tmpFile.replace(/\\\\/g, '\\'))
       try { fs.unlinkSync(tmpFile.replace(/\\\\/g, '\\')) } catch {}
-      return { base64: buf.toString('base64'), width: Number(wStr), height: Number(hStr), displayWidth: Number(wStr), displayHeight: Number(hStr), originX: x, originY: y }
+      return { base64: buf.toString('base64'), width: Number(wStr), height: Number(hStr), displayWidth: Number(wStr), displayHeight: Number(hStr), originX: rx, originY: ry }
     } catch {
-      return { base64: '', width: w, height: h, displayWidth: w, displayHeight: h, originX: x, originY: y }
+      // Surface the failure instead of a silent empty image — the model
+      // can't tell a blank zoom from a broken one otherwise.
+      throw new Error(`win32 captureRegion failed (region ${rx},${ry} ${rw}x${rh}, ps output: ${JSON.stringify(raw).slice(0, 200)})`)
     }
   },
 

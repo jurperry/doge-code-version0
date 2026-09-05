@@ -1618,7 +1618,8 @@ async function run(): Promise<CommanderCommand> {
         } = await import('src/utils/computerUse/gates.js');
         if (getChicagoEnabled()) {
           const {
-            setupComputerUseMCP
+            setupComputerUseMCP,
+            COMPUTER_USE_MCP_PROMPT_HINT
           } = await import('src/utils/computerUse/setup.js');
           const {
             mcpConfig,
@@ -1629,6 +1630,12 @@ async function run(): Promise<CommanderCommand> {
             ...mcpConfig
           };
           allowedTools.push(...cuTools);
+          // Doge fork: the official Anthropic backend emits a CU availability
+          // hint server-side on seeing mcp__computer-use__* tool names;
+          // custom/translated endpoints (openai/responses bridges) don't.
+          // Append the local hint so the model discovers and drives the CU
+          // tools regardless of provider. Same pattern as the Chrome hint.
+          appendSystemPrompt = appendSystemPrompt ? `${appendSystemPrompt}\n\n${COMPUTER_USE_MCP_PROMPT_HINT}` : COMPUTER_USE_MCP_PROMPT_HINT;
         }
       } catch (error) {
         logForDebugging(`[Computer Use MCP] Setup failed: ${errorMessage(error)}`);

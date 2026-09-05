@@ -1503,19 +1503,14 @@ export function areMcpConfigsAllowedWithEnterpriseMcpConfig(
   )
 }
 
-/**
- * Built-in MCP server that defaults to disabled. Unlike user-configured servers
- * (opt-out via disabledMcpServers), this requires explicit opt-in via
- * enabledMcpServers. Shows up in /mcp as disabled until the user enables it.
- */
-/* eslint-disable @typescript-eslint/no-require-imports */
-const DEFAULT_DISABLED_BUILTIN = (
-  require('../../utils/computerUse/common.js') as typeof import('../../utils/computerUse/common.js')
-).COMPUTER_USE_MCP_SERVER_NAME
-/* eslint-enable @typescript-eslint/no-require-imports */
-
-function isDefaultDisabledBuiltin(name: string): boolean {
-  return name === DEFAULT_DISABLED_BUILTIN
+// Doge fork: computer-use ships always-on (mirrors gates.ts hardcoding
+// getChicagoEnabled() to true). Upstream defaults this server to disabled
+// pending explicit /mcp opt-in via enabledMcpServers — keeping that gate would
+// leave the tools absent from the model's list until manual enablement, i.e.
+// "off by default". Treating it like any user server instead: enabled by
+// default, opt-out still available via /mcp (disabledMcpServers).
+function isDefaultDisabledBuiltin(_name: string): boolean {
+  return false
 }
 
 /**

@@ -22,7 +22,7 @@
 2. **OpenAI 协议转换**：`openaiCompat.ts` 和 `responsesCompat.ts` 在 API 边界做完整协议翻译
 3. **ModelProfile 持久化**：`customApiStorage.ts` 支持每模型保存完整的 provider/baseURL/apiKey/contextWindow 配置
 4. **Agent 模型 fallback**：模型等级不够时自动回退
-5. **Computer Use Windows**：HWND SendMessage + SendInput fallback，四层应用发现
+5. **Computer Use Windows（默认启用）**：HWND SendMessage + SendInput fallback，四层应用发现。fork 已解闸全部官方门控：`gates.ts` 的 `getChicagoEnabled()`/`hasRequiredSubscription()` 硬编码 true，`config.ts` 的 `isDefaultDisabledBuiltin` 恒 false（`computer-use` server 默认连接，仍可经 `/mcp` 禁用）；`main.tsx` 注入 CU MCP 时无条件 append 本地使用提示 `COMPUTER_USE_MCP_PROMPT_HINT`（官方端点的服务端提示在第三方/转接端点不存在）。macOS/Windows 交互式会话默认生效。见 `src/utils/computerUse/`、`test/computer-use-e2e.ts`
 6. **PTL 错误映射**：Anthropic/OpenAI 格式的上下文溢出错误 → 统一 reactive compact
 7. **/auto 与三态模式循环**：TUI 内 `/auto`（支持 `[on|off]`）直接切换 bypassPermissions，Shift+Tab 在 auto → accept → plan 间循环（default 下首次按即进 auto），无需 `--dangerously-skip-permissions`。刻意不改 `isBypassPermissionsModeAvailable`（保持"旗标启动会话"语义，避免 plan 模式被 permissions.ts 当作全放行）；/auto 会话中 plan 仍为只读规划模式。见 `src/commands/auto/`、`src/utils/permissions/getNextPermissionMode.ts`
 8. **会话级模型切换（多终端隔离）**：`/model` 切换默认只作用于当前进程（改 `process.env` + AppState 的 `mainLoopModelForSession`），**不写任何磁盘配置**（`.claude.json`/`settings.json`/`.credentials.json` 全部保持基线），多个终端并行使用互不影响；`/model <model> --save` 显式固化为全局默认，`DOGE_MODEL_SCOPE=global` 恢复旧的"切换即持久化"行为。见 `src/utils/model/modelSwitchScope.ts`、`src/commands/model/handlers.ts`、`src/utils/model/switchModelProfile.ts`（deps.sessionScoped）、`src/state/onChangeAppState.ts`（settings.json 写入 gate）
@@ -54,7 +54,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 ## 测试策略
 
 - 测试框架：`bun:test`（`import { test, expect } from 'bun:test'`），运行 `bun test`
-- 项目自身测试与代码同目录放置（`*.test.ts`），目前位于 `src/services/api/`、`src/commands/model/`、`src/utils/model/`、`src/hooks/` 下
+- 项目自身测试与代码同目录放置（`*.test.ts`），目前位于 `src/services/api/`、`src/services/mcp/`、`src/commands/model/`、`src/utils/model/`、`src/hooks/` 下；另有实机 e2e 脚本 `test/computer-use-e2e.ts`（Computer Use 只读链路验证）
 - 注意：裸跑 `bun test` 会连带执行 `needs/skills/claude-to-im/node_modules/` 里 vendored zod 的测试（实测共 22 个文件、约 250 个用例）；只跑项目测试时用路径过滤，如 `bun test src/services/api/`
 - 已知既有失败（截至当前提交，非本次改动引入）：`src/hooks/useMainLoopModel.test.ts` 中 `does not fall through to customApiStorage when AppState fields are null` 用例失败
 - 新增测试应放在被测模块旁边，以模块或被测行为命名
