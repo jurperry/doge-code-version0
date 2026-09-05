@@ -19,6 +19,7 @@ import {
   type SessionExternalMetadata,
 } from '../utils/sessionState.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
+import { resolveModelSwitchScope } from '../utils/model/modelSwitchScope.js'
 import type { AppState } from './AppStateStore.js'
 
 // Inverse of the push below — restore on worker restart.
@@ -97,8 +98,13 @@ export function onChangeAppState({
     newState.mainLoopModel !== oldState.mainLoopModel &&
     newState.mainLoopModel === null
   ) {
-    // Remove from settings
-    updateSettingsForSource('userSettings', { model: undefined })
+    // Remove from settings. Session-scoped model switching (multi-terminal
+    // isolation) keeps settings.json untouched — session switches land in
+    // mainLoopModelForSession and don't reach this branch; the scope guard
+    // protects against any other in-process mainLoopModel writer.
+    if (resolveModelSwitchScope() === 'global') {
+      updateSettingsForSource('userSettings', { model: undefined })
+    }
     setMainLoopModelOverride(null)
     emitModelChanged()
   }
@@ -108,8 +114,10 @@ export function onChangeAppState({
     newState.mainLoopModel !== oldState.mainLoopModel &&
     newState.mainLoopModel !== null
   ) {
-    // Save to settings
-    updateSettingsForSource('userSettings', { model: newState.mainLoopModel })
+    // Save to settings (global scope only — see above)
+    if (resolveModelSwitchScope() === 'global') {
+      updateSettingsForSource('userSettings', { model: newState.mainLoopModel })
+    }
     setMainLoopModelOverride(newState.mainLoopModel)
     emitModelChanged()
   }

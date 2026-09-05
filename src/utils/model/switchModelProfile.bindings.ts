@@ -10,6 +10,12 @@
  * drag React into a model util). Passing both at call time keeps the
  * dependency direction clean (model utils → lower layers, not → commands
  * or React) and leaves the test path fully dep-injected.
+ *
+ * `sessionScoped` (default true) is the multi-terminal isolation switch:
+ * when set, profile/tier switches mutate env + AppState only — applyModelProfile
+ * skips its storage write, persistTierSelection / syncToDisk are replaced by
+ * no-ops, and the commit targets `mainLoopModelForSession`. Pass false to
+ * restore the legacy persist-to-disk behavior (e.g. /model <name> --save).
  */
 import { applyModelProfile, persistTierSelection, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
 import {
@@ -18,6 +24,7 @@ import {
   type AppStateSlice,
   type TierAlias,
 } from './switchModelProfile.js'
+import { noopSyncToDisk } from './modelSwitchScope.js'
 
 type SyncToDisk = (
   model: string,
@@ -38,24 +45,35 @@ function bindCommit(setAppState: (f: (prev: any) => any) => void) {
     setAppState((prev: any) => updater(prev))
 }
 
+export interface BoundSwitchDeps {
+  syncToDisk: SyncToDisk
+  setAppState: (f: (prev: any) => any) => void
+  /** true (default) = session-scoped switch, no disk writes. */
+  sessionScoped?: boolean
+}
+
 export async function switchModelProfileAtomicBound(
   profile: ModelProfile,
-  deps: { syncToDisk: SyncToDisk; setAppState: (f: (prev: any) => any) => void },
+  deps: BoundSwitchDeps,
 ): Promise<void> {
+  const sessionScoped = deps.sessionScoped ?? true
   return switchModelProfileAtomicCore(profile, {
-    applyProfile: applyModelProfile,
-    syncToDisk: deps.syncToDisk,
+    applyProfile: (p) => applyModelProfile(p, { persist: !sessionScoped }),
+    syncToDisk: sessionScoped ? noopSyncToDisk : deps.syncToDisk,
     commitAppState: bindCommit(deps.setAppState),
+    sessionScoped,
   })
 }
 
 export function switchTierBound(
   tier: TierAlias,
-  deps: { syncToDisk: SyncToDisk; setAppState: (f: (prev: any) => any) => void },
+  deps: BoundSwitchDeps,
 ): void {
+  const sessionScoped = deps.sessionScoped ?? true
   switchTierCore(tier, {
-    syncToDisk: deps.syncToDisk,
+    syncToDisk: sessionScoped ? noopSyncToDisk : deps.syncToDisk,
     commitAppState: bindCommit(deps.setAppState),
+    sessionScoped,
     resolveTierModel: (t) => {
       // Direct env lookup: bypass parseUserSpecifiedModel's fallback chain
       // which consults getUserSpecifiedModelSetting() and can be polluted by
@@ -67,7 +85,10 @@ export function switchTierBound(
         : 'ANTHROPIC_DEFAULT_HAIKU_MODEL'
       return process.env[envKey] || process.env.ANTHROPIC_MODEL || t
     },
-    persistTier: (t) => persistTierSelection(t),
+    persistTier: (t) => {
+      if (sessionScoped) return
+      persistTierSelection(t)
+    },
     getStoredMainModel: () => {
       // Persisted main model from custom API storage; trimmed, may be ''.
       const stored = readCustomApiStorage().model?.trim()

@@ -1,5 +1,6 @@
 import { MODEL_FAMILY_ALIASES } from '../../utils/model/aliases.js'
 import type { ModelProfile } from '../../utils/customApiStorage.js'
+import { noopSyncToDisk, type ModelSwitchScope } from '../../utils/model/modelSwitchScope.js'
 import type { TierAlias } from '../../utils/model/switchModelProfile.js'
 
 export type ModelInput = string | null
@@ -15,14 +16,18 @@ export interface DecideContext {
   findProfile: (model: ModelInput) => ModelProfile | null
   switchModelProfileAtomicBound: (
     profile: ModelProfile,
-    deps: { syncToDisk: SyncModelConfigToDisk; setAppState: (f: (prev: any) => any) => void },
+    deps: { syncToDisk: SyncModelConfigToDisk; setAppState: (f: (prev: any) => any) => void; sessionScoped?: boolean },
   ) => Promise<void>
   switchTierBound: (
     tier: TierAlias,
-    deps: { syncToDisk: SyncModelConfigToDisk; setAppState: (f: (prev: any) => any) => void },
+    deps: { syncToDisk: SyncModelConfigToDisk; setAppState: (f: (prev: any) => any) => void; sessionScoped?: boolean },
   ) => void
   syncModelConfigToDisk: SyncModelConfigToDisk
   setAppState: (f: (prev: any) => any) => void
+  /** 'session' (default) — the switch only affects this process: no disk
+   *  writes, commit lands in `mainLoopModelForSession`. Multi-terminal
+   *  isolation. 'global' — legacy behavior, persists to all config files. */
+  scope?: ModelSwitchScope
 }
 
 const TIER_ALIASES = new Set<ModelInput>(MODEL_FAMILY_ALIASES)
@@ -33,31 +38,38 @@ const TIER_ALIASES = new Set<ModelInput>(MODEL_FAMILY_ALIASES)
  *   P2 — tier alias / null / "default" → switchTier(null or alias)
  *   P3 — bare unknown string → AppState + sync only (no env mutation)
  *
+ * Scope: 'session' (default) keeps every switch in-process (no disk writes
+ * — concurrent terminals are unaffected); 'global' restores the legacy
+ * persist-everywhere behavior (also reachable via `/model <name> --save`).
+ *
  * This function is pure (effects only via injected ctx). model.tsx wires it
  * to the live bindings; tests pass mocks.
  */
 export async function decideAndSwitch(input: ModelInput, ctx: DecideContext): Promise<void> {
+  const sessionScoped = ctx.scope !== 'global'
+  const syncToDisk = sessionScoped ? noopSyncToDisk : ctx.syncModelConfigToDisk
   // P2: explicit default / null revert
   if (input === null || input === 'default') {
-    ctx.switchTierBound(null, { syncToDisk: ctx.syncModelConfigToDisk, setAppState: ctx.setAppState })
+    ctx.switchTierBound(null, { syncToDisk, setAppState: ctx.setAppState, sessionScoped })
     return
   }
   // P2: tier alias
   if (TIER_ALIASES.has(input)) {
-    ctx.switchTierBound(input as 'opus' | 'sonnet' | 'haiku', { syncToDisk: ctx.syncModelConfigToDisk, setAppState: ctx.setAppState })
+    ctx.switchTierBound(input as 'opus' | 'sonnet' | 'haiku', { syncToDisk, setAppState: ctx.setAppState, sessionScoped })
     return
   }
   // P1: matching profile
   const profile = ctx.findProfile(input)
   if (profile) {
-    await ctx.switchModelProfileAtomicBound(profile, { syncToDisk: ctx.syncModelConfigToDisk, setAppState: ctx.setAppState })
+    await ctx.switchModelProfileAtomicBound(profile, { syncToDisk, setAppState: ctx.setAppState, sessionScoped })
     return
   }
-  // P3: bare unknown model string — write AppState + persist, no env mutation.
-  ctx.syncModelConfigToDisk(input, false)
-  ctx.setAppState((prev) => ({
-    ...prev,
-    mainLoopModel: input,
-    mainLoopModelForSession: null,
-  }))
+  // P3: bare unknown model string — AppState only, no env mutation.
+  // Global scope additionally persists; session scope keeps it in-process.
+  if (!sessionScoped) {
+    ctx.syncModelConfigToDisk(input, false)
+  }
+  ctx.setAppState(sessionScoped
+    ? (prev) => ({ ...prev, mainLoopModelForSession: input })
+    : (prev) => ({ ...prev, mainLoopModel: input, mainLoopModelForSession: null }))
 }

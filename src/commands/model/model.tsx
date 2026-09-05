@@ -15,6 +15,7 @@ import { checkOpus1mAccess, checkSonnet1mAccess } from '../../utils/model/check1
 import { applyModelProfile, getModelProfile, readCustomApiStorage, writeCustomApiStorage, type ModelProfile } from '../../utils/customApiStorage.js';
 import { decideAndSwitch } from './handlers.js';
 import { switchModelProfileAtomicBound, switchTierBound } from '../../utils/model/switchModelProfile.bindings.js';
+import { type ModelSwitchScope, resolveModelSwitchScope } from '../../utils/model/modelSwitchScope.js';
 import { saveGlobalConfig } from '../../utils/config.js';
 import { updateSettingsForSource } from '../../utils/settings/settings.js';
 import { formatCustomModelLabel, getDefaultMainLoopModelSetting, isOpus1mMergeEnabled, parseUserSpecifiedModel, renderDefaultModelSetting } from '../../utils/model/model.js';
@@ -101,6 +102,10 @@ function ModelPickerWrapper(t0) {
       });
       // Model switch: unified decideAndSwitch handles P1 (profile), P2 (alias),
       // and P3 (bare string) with atomic env cleanup. See handlers.ts.
+      // Session scope (default) keeps the switch in-process so other doge
+      // terminals are unaffected; DOGE_MODEL_SCOPE=global restores legacy
+      // persist-everywhere behavior.
+      const scope = resolveModelSwitchScope();
       const profiles = readCustomApiStorage().modelProfiles ?? [];
       const findProfile = (m) => profiles.find((p) => p.model === m) ?? null;
       decideAndSwitch(model ?? null, {
@@ -109,6 +114,7 @@ function ModelPickerWrapper(t0) {
         switchTierBound,
         syncModelConfigToDisk,
         setAppState,
+        scope,
       }).catch((e) => {
         // eslint-disable-next-line no-console
         console.error('Model switch failed:', e);
@@ -123,6 +129,9 @@ function ModelPickerWrapper(t0) {
       // When the user did NOT toggle, the env var is preserved and wins via
       // resolveAppliedEffort() priority. No unconditional delete here.
       let message = `Set model to ${chalk.bold(renderModelLabel(model))}`;
+      if (scope === 'session') {
+        message += " \xB7 session only (/model <model> --save to persist)";
+      }
       if (effort !== undefined) {
         message = message + ` with ${chalk.bold(effort)} effort`;
       }
@@ -196,16 +205,21 @@ function _temp(s) {
 }
 function SetModelAndClose({
   args,
-  onDone
+  onDone,
+  scope: scopeOverride
 }: {
   args: string;
   onDone: (result?: string, options?: {
     display?: CommandResultDisplay;
   }) => void;
+  /** 'global' from an explicit `--save` flag; undefined = resolve from env (session default). */
+  scope?: ModelSwitchScope;
 }): React.ReactNode {
   const isFastMode = useAppState(s => s.fastMode);
   const effortValue = useAppState(s => s.effortValue);
   const setAppState = useSetAppState();
+  const scope = scopeOverride ?? resolveModelSwitchScope();
+  const explicitSave = scopeOverride === 'global';
   const model = args === 'default' ? null : args;
   React.useEffect(() => {
     async function handleModelChange(): Promise<void> {
@@ -274,6 +288,7 @@ function SetModelAndClose({
         switchTierBound,
         syncModelConfigToDisk,
         setAppState,
+        scope,
       }).catch((e) => {
         // eslint-disable-next-line no-console
         console.error('Model switch failed:', e);
@@ -284,6 +299,11 @@ function SetModelAndClose({
       // Preserving the env here ensures start-script configured effort
       // survives inline /model switches.
       let message = `Set model to ${chalk.bold(renderModelLabel(modelValue))}`;
+      if (explicitSave) {
+        message += " \xB7 saved as default for new terminals";
+      } else if (scope === 'session') {
+        message += " \xB7 session only (/model <model> --save to persist)";
+      }
       let wasFastModeToggledOn = undefined;
       if (isFastModeEnabled()) {
         clearFastModeCooldown();
@@ -389,7 +409,21 @@ export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
     logEvent('tengu_model_command_inline', {
       args: args as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
     });
-    return <SetModelAndClose args={args} onDone={onDone} />;
+    // `/model <name> --save` = explicit global persist (multi-terminal
+    // isolation makes session scope the default). Bare `--save` is an error.
+    let modelArg = args;
+    let scope: ModelSwitchScope | undefined;
+    if (/(^|\s)--save(\s|$)/.test(args)) {
+      scope = 'global';
+      modelArg = args.replace(/--save/g, ' ').trim();
+    }
+    if (!modelArg) {
+      onDone('--save requires a model name, e.g. /model kimi-k3 --save', {
+        display: 'system'
+      });
+      return;
+    }
+    return <SetModelAndClose args={modelArg} scope={scope} onDone={onDone} />;
   }
   return <ModelPickerWrapper onDone={onDone} />;
 };

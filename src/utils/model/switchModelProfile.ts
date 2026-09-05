@@ -117,6 +117,11 @@ export interface SwitchProfileDeps {
     credentialSourceProfile?: ModelProfile,
   ) => void
   commitAppState: (updater: (prev: AppStateSlice) => AppStateSlice) => void
+  /** Session-scoped switch (multi-terminal isolation): commit writes
+   *  `mainLoopModelForSession` only and the commit-phase disk rollback is
+   *  skipped. The caller is expected to pass a no-op syncToDisk and a
+   *  non-persisting applyProfile alongside this flag. */
+  sessionScoped?: boolean
 }
 
 export interface SwitchTierDeps {
@@ -137,6 +142,10 @@ export interface SwitchTierDeps {
    *  first-party users with no custom API config.
    *  Real binding: () => readCustomApiStorage().model */
   getStoredMainModel: () => string | undefined
+  /** Session-scoped switch: commit targets `mainLoopModelForSession` and a
+   *  `null` tier simply clears the session override (back to baseline).
+   *  Callers pass a no-op persistTier / syncToDisk alongside this flag. */
+  sessionScoped?: boolean
 }
 
 export interface AppStateSlice {
@@ -145,6 +154,26 @@ export interface AppStateSlice {
 }
 
 export type TierAlias = 'opus' | 'sonnet' | 'haiku' | null
+
+/**
+ * Commit-fields factory shared by the atomic profile switch and the tier
+ * switch. Global scope (legacy) writes the main-model slot and clears any
+ * session override; session scope writes only `mainLoopModelForSession`
+ * so `mainLoopModel` (and everything persisted from it) stays untouched.
+ */
+function commitFields(
+  model: string | null,
+  sessionScoped?: boolean,
+): (prev: AppStateSlice) => AppStateSlice {
+  if (sessionScoped) {
+    return prev => ({ ...prev, mainLoopModelForSession: model })
+  }
+  return prev => ({
+    ...prev,
+    mainLoopModel: model,
+    mainLoopModelForSession: null,
+  })
+}
 
 /**
  * Atomically switch to a new ModelProfile. See design §1.2 / §4.A.
@@ -163,8 +192,11 @@ export type TierAlias = 'opus' | 'sonnet' | 'haiku' | null
  *     top-level credentials on every profile switch left a bare `doge`
  *     relaunch with no key at all ("Not logged in"). That wipe used to be
  *     masked because the tier-switch path re-persisted credentials as a
- *     side effect; it must not come back.
- *  5. commitAppState → mainLoopModel := profile.model, mainLoopModelForSession := null.
+ *     side effect; it must not come back. (Session-scoped switches pass a
+ *     no-op syncToDisk here — disk keeps the global baseline.)
+ *  5. commitAppState → global scope: mainLoopModel := profile.model,
+ *     mainLoopModelForSession := null; session scope:
+ *     mainLoopModelForSession := profile.model (mainLoopModel untouched).
  *
  * On failure at step 3/4/5 BOTH snapshots are restored (so env is exactly as
  * before the transaction) and a ModelSwitchError (phase 'apply' | 'persist' |
@@ -203,28 +235,27 @@ export async function switchModelProfileAtomic(
 
   // Step 5: commit AppState
   try {
-    deps.commitAppState((prev) => ({
-      ...prev,
-      mainLoopModel: profile.model,
-      mainLoopModelForSession: null,
-    }))
+    deps.commitAppState(commitFields(profile.model, deps.sessionScoped))
   } catch (cause) {
     restoreEnvSnapshot(snapshot)
     restoreApplyEnvSnapshot(applySnapshot)
     // Best-effort disk revert. If oldModel was undefined (running on default)
     // persist empty string so disk does not retain the failed profile's model.
-    const oldModel = applySnapshot.ANTHROPIC_MODEL
-    try {
-      deps.syncToDisk(oldModel ?? '', true)
-    } catch (rollbackCause) {
-      // Best-effort; surface to console so the swallowed failure is observable.
+    // Session-scoped switches never wrote disk, so nothing to revert.
+    if (!deps.sessionScoped) {
+      const oldModel = applySnapshot.ANTHROPIC_MODEL
       try {
-        ;(globalThis as any)?.console?.warn?.(
-          'modelSwitch: best-effort disk rollback failed:',
-          rollbackCause instanceof Error ? rollbackCause.message : String(rollbackCause),
-        )
-      } catch {
-        /* truly best-effort */
+        deps.syncToDisk(oldModel ?? '', true)
+      } catch (rollbackCause) {
+        // Best-effort; surface to console so the swallowed failure is observable.
+        try {
+          ;(globalThis as any)?.console?.warn?.(
+            'modelSwitch: best-effort disk rollback failed:',
+            rollbackCause instanceof Error ? rollbackCause.message : String(rollbackCause),
+          )
+        } catch {
+          /* truly best-effort */
+        }
       }
     }
     throw new ModelSwitchError('commit', cause)
@@ -256,33 +287,34 @@ export async function switchModelProfileAtomic(
  *  - first-party users: clear model + stored credentials (legacy semantics).
  */
 export function switchTier(tier: TierAlias, deps: SwitchTierDeps): void {
+  // Session scope: tier switches and "default" only move the session
+  // override; disk (persistTier/syncToDisk) is expected to be no-oped by
+  // the caller, keeping other terminals on the global baseline.
+  if (deps.sessionScoped) {
+    if (tier === null) {
+      // Revert to baseline by clearing the session override.
+      deps.commitAppState(commitFields(null, true))
+      return
+    }
+    const realTierModel = deps.resolveTierModel(tier)
+    deps.commitAppState(commitFields(realTierModel, true))
+    return
+  }
   if (tier === null) {
     const storedMainModel = deps.getStoredMainModel()
     if (storedMainModel) {
       // 自定义 API 用户：清层级选择，主循环模型回到持久化的主模型
       deps.persistTier(null)
-      deps.commitAppState((prev) => ({
-        ...prev,
-        mainLoopModel: storedMainModel,
-        mainLoopModelForSession: null,
-      }))
+      deps.commitAppState(commitFields(storedMainModel, false))
       return
     }
     // 官方用户：清 model + 凭证（保持原有语义）
     deps.syncToDisk('', true, undefined)
-    deps.commitAppState((prev) => ({
-      ...prev,
-      mainLoopModel: null,
-      mainLoopModelForSession: null,
-    }))
+    deps.commitAppState(commitFields(null, false))
     return
   }
   // tier 路径：解析真实 tier 模型 ID，仅持久化层级选择，不改写主模型槽位
   const realTierModel = deps.resolveTierModel(tier)
   deps.persistTier(tier)
-  deps.commitAppState((prev) => ({
-    ...prev,
-    mainLoopModel: realTierModel,
-    mainLoopModelForSession: null,
-  }))
+  deps.commitAppState(commitFields(realTierModel, false))
 }

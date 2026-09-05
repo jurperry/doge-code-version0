@@ -310,7 +310,7 @@ function applyEnvVar(name: string, value: string | undefined): void {
  *    restores them on rollback; standalone callers should be aware they are
  *    mutated.
  */
-export function applyModelProfile(profile: ModelProfile): void {
+export function applyModelProfile(profile: ModelProfile, opts?: { persist?: boolean }): void {
   // --- Core config ---
   process.env.ANTHROPIC_MODEL = profile.model
   applyEnvVar('ANTHROPIC_BASE_URL', profile.baseURL)
@@ -372,6 +372,9 @@ export function applyModelProfile(profile: ModelProfile): void {
   // A profile switch also selects a NEW main model, so any tier selection is
   // reset (activeTier cleared) and the tier snapshot refreshed from the env
   // values this profile just applied.
+  // Session-scoped switches (multi-terminal isolation) skip this block:
+  // disk stays at the global baseline so other terminals are unaffected.
+  if (opts?.persist === false) return
   const current = readCustomApiStorage()
   writeCustomApiStorage({
     ...current,
