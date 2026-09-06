@@ -20,7 +20,7 @@
 
 1. **认证绕过**：使用自定义提供商（`openai`/`responses` 或非官方 Anthropic URL）时跳过密钥审批流程（见 `src/utils/auth.ts`）
 2. **OpenAI 协议转换**：`openaiCompat.ts` 和 `responsesCompat.ts` 在 API 边界做完整协议翻译
-3. **ModelProfile 持久化**：`customApiStorage.ts` 支持每模型保存完整的 provider/baseURL/apiKey/contextWindow 配置
+3. **ModelProfile 持久化**：`customApiStorage.ts` 支持每模型保存完整的 provider/baseURL/apiKey/contextWindow 配置；`/provider` 表单含上下文窗口栏（tokens，存 `ModelProfile.contextWindow`，激活/启动恢复时应用为 `CLAUDE_CODE_MODEL_CONTEXT_WINDOW`）；Doge Code 桌面壳的 provider 下拉直接读写本存储（与 /provider 互通）
 4. **Agent 模型 fallback**：模型等级不够时自动回退
 5. **Computer Use Windows（默认启用）**：HWND SendMessage + SendInput fallback，四层应用发现。fork 已解闸全部官方门控：`gates.ts` 的 `getChicagoEnabled()`/`hasRequiredSubscription()` 硬编码 true，`config.ts` 的 `isDefaultDisabledBuiltin` 恒 false（`computer-use` server 默认连接，仍可经 `/mcp` 禁用）；`main.tsx` 注入 CU MCP 时无条件 append 本地使用提示 `COMPUTER_USE_MCP_PROMPT_HINT`（官方端点的服务端提示在第三方/转接端点不存在）。macOS/Windows 交互式会话默认生效。见 `src/utils/computerUse/`、`test/computer-use-e2e.ts`
 6. **PTL 错误映射**：Anthropic/OpenAI 格式的上下文溢出错误 → 统一 reactive compact

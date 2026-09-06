@@ -34,6 +34,16 @@ test('validateProviderForm: anthropic without base URL is valid (official endpoi
   expect(validateProviderForm(values)).toBeUndefined()
 })
 
+test('validateProviderForm: context window must be a positive integer when given', () => {
+  const base: ProviderFormValues = { provider: 'anthropic', baseURL: '', apiKey: 'sk-1', model: 'm1' }
+  expect(validateProviderForm({ ...base, contextWindow: '' })).toBeUndefined()
+  expect(validateProviderForm({ ...base, contextWindow: '  ' })).toBeUndefined()
+  expect(validateProviderForm({ ...base, contextWindow: '200000' })).toBeUndefined()
+  expect(validateProviderForm({ ...base, contextWindow: 'abc' })).toContain('positive integer')
+  expect(validateProviderForm({ ...base, contextWindow: '0' })).toContain('positive integer')
+  expect(validateProviderForm({ ...base, contextWindow: '1.5' })).toContain('positive integer')
+})
+
 // --- buildModelProfile ---
 
 test('buildModelProfile trims values and drops empty optionals', () => {
@@ -66,6 +76,13 @@ test('buildModelProfile defaults to DOGE_API_KEY when no key type is chosen', ()
     model: 'm1',
   }
   expect(buildModelProfile(values).authTokenType).toBe('DOGE_API_KEY')
+})
+
+test('buildModelProfile parses contextWindow text to a number, empty stays undefined', () => {
+  const base: ProviderFormValues = { provider: 'anthropic', baseURL: '', apiKey: 'sk-1', model: 'm1' }
+  expect(buildModelProfile({ ...base, contextWindow: ' 200000 ' }).contextWindow).toBe(200000)
+  expect(buildModelProfile({ ...base, contextWindow: '' }).contextWindow).toBeUndefined()
+  expect(buildModelProfile(base).contextWindow).toBeUndefined()
 })
 
 test('buildModelProfile persists the selected ANTHROPIC_AUTH_TOKEN key type', () => {

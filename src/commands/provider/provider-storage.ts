@@ -23,6 +23,8 @@ export type ProviderFormValues = {
   /** Defaults to DOGE_API_KEY (x-api-key header). */
   authTokenType?: AuthTokenType
   model: string
+  /** Context window override, typed as text in the form (e.g. "200000"). */
+  contextWindow?: string
   opusModel?: string
   sonnetModel?: string
   haikuModel?: string
@@ -35,11 +37,19 @@ export function validateProviderForm(values: ProviderFormValues): string | undef
   if (values.provider !== 'anthropic' && !values.baseURL?.trim()) {
     return `Base URL is required for ${values.provider} providers.`
   }
+  const cw = values.contextWindow?.trim()
+  if (cw) {
+    const n = Number(cw)
+    if (!Number.isInteger(n) || n <= 0) {
+      return 'Context window must be a positive integer (tokens), e.g. 200000.'
+    }
+  }
   return undefined
 }
 
 /** Build the ModelProfile persisted by /provider add from form values. */
 export function buildModelProfile(values: ProviderFormValues): ModelProfile {
+  const cw = values.contextWindow?.trim()
   return {
     model: values.model.trim(),
     provider: values.provider,
@@ -48,6 +58,7 @@ export function buildModelProfile(values: ProviderFormValues): ModelProfile {
     // The form explicitly picks which header style the endpoint expects:
     // DOGE_API_KEY → x-api-key, ANTHROPIC_AUTH_TOKEN → Authorization: Bearer.
     authTokenType: values.authTokenType ?? 'DOGE_API_KEY',
+    contextWindow: cw ? Number(cw) : undefined,
     defaultOpusModel: values.opusModel?.trim() || undefined,
     defaultSonnetModel: values.sonnetModel?.trim() || undefined,
     defaultHaikuModel: values.haikuModel?.trim() || undefined,

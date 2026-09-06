@@ -14,9 +14,9 @@ import {
   type AuthTokenType,
 } from './provider-storage.js'
 
-type FormStep = 'provider' | 'baseURL' | 'apiKey' | 'authTokenType' | 'model' | 'opus' | 'sonnet' | 'haiku' | 'review'
+type FormStep = 'provider' | 'baseURL' | 'apiKey' | 'authTokenType' | 'model' | 'contextWindow' | 'opus' | 'sonnet' | 'haiku' | 'review'
 
-const STEP_ORDER: FormStep[] = ['provider', 'baseURL', 'apiKey', 'authTokenType', 'model', 'opus', 'sonnet', 'haiku', 'review']
+const STEP_ORDER: FormStep[] = ['provider', 'baseURL', 'apiKey', 'authTokenType', 'model', 'contextWindow', 'opus', 'sonnet', 'haiku', 'review']
 
 const STEP_META: Record<Exclude<FormStep, 'review'>, { title: string; hint: string }> = {
   provider: {
@@ -38,6 +38,10 @@ const STEP_META: Record<Exclude<FormStep, 'review'>, { title: string; hint: stri
   model: {
     title: 'Main model',
     hint: 'Model ID for the main loop, e.g. deepseek-v4-pro. A [1m]/[2m] suffix widens the context window.',
+  },
+  contextWindow: {
+    title: 'Context window',
+    hint: 'Optional. Context window size in tokens, e.g. 200000. Applied as CLAUDE_CODE_MODEL_CONTEXT_WINDOW. Leave empty to use the model default (or the [1m]/[2m] suffix).',
   },
   opus: {
     title: 'Opus model',
@@ -71,6 +75,7 @@ function initialValues(existing?: ModelProfile, initialModel?: string): Provider
     apiKey: existing?.apiKey ?? '',
     authTokenType: existing?.authTokenType ?? 'DOGE_API_KEY',
     model: existing?.model ?? initialModel ?? '',
+    contextWindow: existing?.contextWindow !== undefined ? String(existing.contextWindow) : '',
     opusModel: existing?.defaultOpusModel ?? '',
     sonnetModel: existing?.defaultSonnetModel ?? '',
     haikuModel: existing?.defaultHaikuModel ?? '',
@@ -82,6 +87,7 @@ function prefillForStep(step: FormStep, values: ProviderFormValues): string {
     case 'baseURL': return values.baseURL ?? ''
     case 'apiKey': return values.apiKey ?? ''
     case 'model': return values.model ?? ''
+    case 'contextWindow': return values.contextWindow ?? ''
     case 'opus': return values.opusModel ?? ''
     case 'sonnet': return values.sonnetModel ?? ''
     case 'haiku': return values.haikuModel ?? ''
@@ -192,6 +198,18 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
       advance()
       return
     }
+    if (step === 'contextWindow') {
+      if (raw) {
+        const n = Number(raw)
+        if (!Number.isInteger(n) || n <= 0) {
+          setError('Context window must be a positive integer (tokens), e.g. 200000.')
+          return
+        }
+      }
+      setValues(v => ({ ...v, contextWindow: raw }))
+      advance()
+      return
+    }
     if (step === 'opus') {
       setValues(v => ({ ...v, opusModel: raw }))
       advance()
@@ -245,6 +263,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
       { value: 'edit:apiKey', label: `API key: ${maskSecret(values.apiKey)}`, description: 'Change' },
       { value: 'edit:authTokenType', label: `Key type: ${values.authTokenType ?? 'DOGE_API_KEY'} (${values.authTokenType === 'ANTHROPIC_AUTH_TOKEN' ? 'Bearer' : 'x-api-key'})`, description: 'Change' },
       { value: 'edit:model', label: `Main model: ${values.model}`, description: 'Change' },
+      { value: 'edit:contextWindow', label: `Context window: ${values.contextWindow || '(model default)'}`, description: 'Change' },
       { value: 'edit:opus', label: `Opus model: ${values.opusModel || '(inherit main model)'}`, description: 'Change' },
       { value: 'edit:sonnet', label: `Sonnet model: ${values.sonnetModel || '(inherit main model)'}`, description: 'Change' },
       { value: 'edit:haiku', label: `Haiku model: ${values.haikuModel || '(inherit main model)'}`, description: 'Change' },
@@ -255,7 +274,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         options={reviewOptions}
         onChange={handleSelect}
         onCancel={handleCancel}
-        visibleOptionCount={9}
+        visibleOptionCount={10}
       />
     )
   } else {
