@@ -123,5 +123,6 @@ export function formatProviderEntry(entry: ProviderEntry): string {
   if (p?.defaultOpusModel) lines.push(`  opus:    ${p.defaultOpusModel}`)
   if (p?.defaultSonnetModel) lines.push(`  sonnet:  ${p.defaultSonnetModel}`)
   if (p?.defaultHaikuModel) lines.push(`  haiku:   ${p.defaultHaikuModel}`)
+  if (p?.contextWindow !== undefined) lines.push(`  context: ${p.contextWindow} tokens`)
   return lines.join('\n')
 }

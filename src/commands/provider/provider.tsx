@@ -14,7 +14,7 @@ const USAGE = [
   '  /provider                    Open the provider manager',
   '  /provider add [model]        Add or edit a provider: API format, base URL, API key,',
   '                              key type (DOGE_API_KEY x-api-key / ANTHROPIC_AUTH_TOKEN Bearer),',
-  '                              and main / opus / sonnet / haiku models',
+  '                              context window, and main / opus / sonnet / haiku models',
   '  /provider remove [model]     Remove a saved provider (by its main model)',
   '  /provider list               List saved providers',
 ].join('\n')
