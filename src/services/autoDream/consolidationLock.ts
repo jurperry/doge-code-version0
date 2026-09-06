@@ -12,6 +12,7 @@ import { logForDebugging } from '../../utils/debug.js'
 import { isProcessRunning } from '../../utils/genericProcessUtils.js'
 import { listCandidates } from '../../utils/listSessionsImpl.js'
 import { getProjectDir } from '../../utils/sessionStorage.js'
+import { findProjectDir } from '../../utils/sessionStoragePortable.js'
 
 const LOCK_FILE = '.consolidate-lock'
 
@@ -118,7 +119,10 @@ export async function rollbackConsolidationLock(
 export async function listSessionsTouchedSince(
   sinceMs: number,
 ): Promise<string[]> {
-  const dir = getProjectDir(getOriginalCwd())
+  // Read path: findProjectDir falls back to the v1 encoding for
+  // directories created before the 2026-09-06 switch.
+  const dir =
+    (await findProjectDir(getOriginalCwd())) ?? getProjectDir(getOriginalCwd())
   const candidates = await listCandidates(dir, true)
   return candidates.filter(c => c.mtime > sinceMs).map(c => c.sessionId)
 }

@@ -289,6 +289,15 @@ async function main(): Promise<void> {
     startCapturingEarlyInput
   } = await import('../utils/earlyInput.js');
   startCapturingEarlyInput();
+  // Rename legacy v1-named session project dirs to the v2 encoding BEFORE
+  // any session path is resolved, so new sessions and resumed ones land in
+  // the same directory. Best-effort and idempotent: dirs locked by a live
+  // session (EPERM on Windows) or without a recoverable cwd are skipped and
+  // retried on the next startup.
+  const {
+    migrateLegacyProjectDirs
+  } = await import('../utils/sessionStoragePortable.js');
+  await migrateLegacyProjectDirs();
   // Restore tier env (ANTHROPIC_DEFAULT_*_MODEL / tier-selected main model)
   // from persisted custom API storage before any UI or query code reads them.
   // Only fills in vars a start script didn't already set.

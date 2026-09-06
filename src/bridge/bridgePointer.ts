@@ -8,6 +8,7 @@ import { lazySchema } from '../utils/lazySchema.js'
 import {
   getProjectsDir,
   sanitizePath,
+  sanitizePathCandidates,
 } from '../utils/sessionStoragePortable.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 
@@ -54,6 +55,16 @@ export function getBridgePointerPath(dir: string): string {
 }
 
 /**
+ * Pointer file candidates for a dir: the v2 encoding first, then v1 for
+ * pointers written before the 2026-09-06 encoding switch.
+ */
+function getBridgePointerPathCandidates(dir: string): string[] {
+  return sanitizePathCandidates(dir).map(encoded =>
+    join(getProjectsDir(), encoded, 'bridge-pointer.json'),
+  )
+}
+
+/**
  * Write the pointer. Also used to refresh mtime during long sessions —
  * calling with the same IDs is a cheap no-content-change write that bumps
  * the staleness clock. Best-effort — a crash-recovery file must never
@@ -83,7 +94,16 @@ export async function writeBridgePointer(
 export async function readBridgePointer(
   dir: string,
 ): Promise<(BridgePointer & { ageMs: number }) | null> {
-  const path = getBridgePointerPath(dir)
+  for (const path of getBridgePointerPathCandidates(dir)) {
+    const pointer = await readBridgePointerFile(path)
+    if (pointer) return pointer
+  }
+  return null
+}
+
+async function readBridgePointerFile(
+  path: string,
+): Promise<(BridgePointer & { ageMs: number }) | null> {
   let raw: string
   let mtimeMs: number
   try {
@@ -98,14 +118,14 @@ export async function readBridgePointer(
   const parsed = BridgePointerSchema().safeParse(safeJsonParse(raw))
   if (!parsed.success) {
     logForDebugging(`[bridge:pointer] invalid schema, clearing: ${path}`)
-    await clearBridgePointer(dir)
+    await unlinkPointerFile(path)
     return null
   }
 
   const ageMs = Math.max(0, Date.now() - mtimeMs)
   if (ageMs > BRIDGE_POINTER_TTL_MS) {
     logForDebugging(`[bridge:pointer] stale (>4h mtime), clearing: ${path}`)
-    await clearBridgePointer(dir)
+    await unlinkPointerFile(path)
     return null
   }
 
@@ -147,11 +167,14 @@ export async function readBridgePointerAcrossWorktrees(
     return null
   }
 
-  // Dedupe against `dir` so we don't re-stat it. sanitizePath normalizes
-  // case/separators so worktree-list output matches our fast-path key even
-  // on Windows where git may emit C:/ vs stored c:/.
-  const dirKey = sanitizePath(dir)
-  const candidates = worktrees.filter(wt => sanitizePath(wt) !== dirKey)
+  // Dedupe against `dir` so we don't re-stat it. Encoding candidates
+  // normalize separators, so worktree-list output (forward slashes on
+  // Windows) matches our fast-path key regardless of which encoding
+  // variant either side resolves to.
+  const dirKeys = sanitizePathCandidates(dir)
+  const candidates = worktrees.filter(
+    wt => !sanitizePathCandidates(wt).some(k => dirKeys.includes(k)),
+  )
 
   // Parallel stat+read. Each readBridgePointer is a stat() that ENOENTs
   // for worktrees with no pointer (cheap) plus a ~100-byte read for the
@@ -185,10 +208,16 @@ export async function readBridgePointerAcrossWorktrees(
 
 /**
  * Delete the pointer. Idempotent — ENOENT is expected when the process
- * shut down clean previously.
+ * shut down clean previously. Clears every encoding candidate so legacy
+ * pointers disappear too.
  */
 export async function clearBridgePointer(dir: string): Promise<void> {
-  const path = getBridgePointerPath(dir)
+  for (const path of getBridgePointerPathCandidates(dir)) {
+    await unlinkPointerFile(path)
+  }
+}
+
+async function unlinkPointerFile(path: string): Promise<void> {
   try {
     await unlink(path)
     logForDebugging(`[bridge:pointer] cleared ${path}`)

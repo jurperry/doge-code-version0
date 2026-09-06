@@ -7,7 +7,16 @@
  */
 
 import type { UUID } from 'crypto'
-import { open as fsOpen, readdir, realpath, stat } from 'fs/promises'
+import {
+  mkdir,
+  open as fsOpen,
+  readdir,
+  realpath,
+  rename,
+  rmdir,
+  stat,
+  unlink,
+} from 'fs/promises'
 import { join } from 'path'
 import { getClaudeConfigHomeDir } from './envUtils.js'
 import { getWorktreePathsPortable } from './getWorktreePathsPortable.js'
@@ -296,26 +305,304 @@ function simpleHash(str: string): string {
   return Math.abs(djb2Hash(str)).toString(36)
 }
 
-/**
- * Makes a string safe for use as a directory or file name.
- * Replaces all non-alphanumeric characters with hyphens.
- * This ensures compatibility across all platforms, including Windows
- * where characters like colons are reserved.
- *
- * For deeply nested paths that would exceed filesystem limits (255 bytes),
- * truncates and appends a hash suffix for uniqueness.
- *
- * @param name - The string to make safe (e.g., '/Users/foo/my-project' or 'plugin:name:server')
- * @returns A safe name (e.g., '-Users-foo-my-project' or 'plugin-name-server')
- */
-export function sanitizePath(name: string): string {
-  const sanitized = name.replace(/[^a-zA-Z0-9]/g, '-')
-  if (sanitized.length <= MAX_SANITIZED_LENGTH) {
-    return sanitized
+// Append `-<hash>` when the encoded name would exceed filesystem component
+// limits. Hash is computed over the *source* path so it is stable across
+// encode variants. Shared by sanitizePath (v2) and legacySanitizePath (v1).
+function withTruncationHash(encoded: string, source: string): string {
+  if (encoded.length <= MAX_SANITIZED_LENGTH) {
+    return encoded
   }
   const hash =
-    typeof Bun !== 'undefined' ? Bun.hash(name).toString(36) : simpleHash(name)
-  return `${sanitized.slice(0, MAX_SANITIZED_LENGTH)}-${hash}`
+    typeof Bun !== 'undefined' ? Bun.hash(source).toString(36) : simpleHash(source)
+  return `${encoded.slice(0, MAX_SANITIZED_LENGTH)}-${hash}`
+}
+
+const plainCharRegex = /[a-zA-Z0-9-]/
+
+function percentEscape(ch: string): string {
+  const hex = Buffer.from(ch, 'utf8').toString('hex')
+  let out = ''
+  for (let i = 0; i < hex.length; i += 2) {
+    out += '%' + hex.slice(i, i + 2)
+  }
+  return out
+}
+
+/**
+ * Encodes a project path as a filesystem-safe directory name (v2, 2026-09-06).
+ *
+ * v1 replaced every non-alphanumeric character with '-', which made the
+ * result ambiguous: `E:\a-b` and `E:\a\b` both encoded to `E--a-b`, so the
+ * real path could not be recovered from the directory name alone (hyphens in
+ * folder names vs. path separators). v2 is injective and reversible:
+ *
+ *   - path separators (`\` and `/`) encode to `~`
+ *   - `~` itself encodes as `%7e`, so `~` always means "separator"
+ *   - every other non-alphanumeric character percent-escapes its UTF-8 bytes
+ *     as `%xx` (multi-byte characters become consecutive escapes)
+ *   - `[a-zA-Z0-9]` and `-` stay literal
+ *
+ * Example: `E:\ClaudeCode\doge-code` → `E%3a~ClaudeCode~doge-code`
+ * (the hyphen inside `doge-code` survives, unlike v1).
+ *
+ * Deeply nested paths that would exceed filesystem limits (255 bytes per
+ * component) truncate and append a hash suffix for uniqueness, mirroring v1.
+ * decodeProjectDirName reverses this encoding.
+ *
+ * Writes always use v2. Directories named with v1 remain readable through
+ * the legacySanitizePath fallback in findProjectDir.
+ *
+ * @param name - The string to encode (e.g., '/Users/foo/my-project')
+ * @returns An encoded name (e.g., '~Users~foo~my-project')
+ */
+export function sanitizePath(name: string): string {
+  let encoded = ''
+  for (const ch of name) {
+    if (ch === '\\' || ch === '/') {
+      encoded += '~'
+    } else if (plainCharRegex.test(ch)) {
+      encoded += ch
+    } else {
+      encoded += percentEscape(ch)
+    }
+  }
+  return withTruncationHash(encoded, name)
+}
+
+/**
+ * v1 encoding (pre-2026-09-06): every non-alphanumeric character → '-'.
+ * Preserved verbatim so directories created before the v2 switch stay
+ * discoverable — see findProjectDir / sanitizePathCandidates.
+ */
+export function legacySanitizePath(name: string): string {
+  return withTruncationHash(name.replace(/[^a-zA-Z0-9]/g, '-'), name)
+}
+
+/**
+ * Candidate directory names for a project path, in preference order:
+ * the v2 encoding first (current writes), then v1 (legacy reads).
+ * A single entry when both variants coincide.
+ */
+export function sanitizePathCandidates(name: string): string[] {
+  const v2 = sanitizePath(name)
+  const v1 = legacySanitizePath(name)
+  return v1 === v2 ? [v2] : [v2, v1]
+}
+
+/**
+ * Inverse of sanitizePath. Joins segments with `sep` (`\\` by default —
+ * pass `path.sep` on POSIX). Returns undefined for malformed input (a `%`
+ * not followed by two hex digits). Names that were truncated with a hash
+ * suffix decode with a literal `-<hash>` tail, so treat the result as a
+ * strong hint, not a guarantee (verify with existsSync where it matters).
+ */
+export function decodeProjectDirName(
+  name: string,
+  sep: string = '\\',
+): string | undefined {
+  const sepChar = sep === '/' ? '/' : '\\'
+  const bytes: number[] = []
+  let out = ''
+  const flushBytes = () => {
+    if (bytes.length > 0) {
+      out += Buffer.from(bytes).toString('utf8')
+      bytes.length = 0
+    }
+  }
+  for (let i = 0; i < name.length; i++) {
+    const ch = name[i]!
+    if (ch === '~') {
+      flushBytes()
+      out += sepChar
+    } else if (ch === '%') {
+      const hex = name.slice(i + 1, i + 3)
+      if (!/^[0-9a-fA-F]{2}$/.test(hex)) return undefined
+      bytes.push(parseInt(hex, 16))
+      i += 2
+    } else {
+      flushBytes()
+      out += ch
+    }
+  }
+  flushBytes()
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// One-time migration: v1-named project dirs → v2 encoding
+// ---------------------------------------------------------------------------
+
+export type ProjectDirMigrationResult = {
+  renamed: number
+  merged: number
+  skipped: number
+}
+
+/**
+ * Rename legacy v1-named project directories (~/.doge/projects/<v1>) to
+ * their v2-encoded names, so existing data converges on the unambiguous
+ * naming instead of living forever in the read-compat fallback.
+ *
+ * A v1 name cannot be reversed (that is the flaw v2 fixes), so the real
+ * path is recovered from the `cwd` field of the jsonl files inside the
+ * directory — newest session wins and decides the target for the whole
+ * dir. Two distinct real paths that already collide into one v1 name (a
+ * pre-existing v1 flaw) migrate together, preserving current behavior.
+ *
+ *   target missing → atomic dir rename (everything inside moves with it:
+ *                    sessions, <uuid>/ sidecars, archived/, memory/, casts)
+ *   target exists  → merge contents file-by-file; newest mtime wins on a
+ *                    name collision; source rmdir'd when empty
+ *   no cwd recoverable (no jsonl), or dir locked by a live session
+ *   (EPERM/EBUSY on Windows) → skip, the next startup retries
+ *
+ * Idempotent and cheap to re-run: v2 names always contain `~` and are
+ * rejected by the name check alone; v1 dirs without sessions never read
+ * a single jsonl byte.
+ */
+export async function migrateLegacyProjectDirs(): Promise<ProjectDirMigrationResult> {
+  const result: ProjectDirMigrationResult = {
+    renamed: 0,
+    merged: 0,
+    skipped: 0,
+  }
+  const projectsDir = getProjectsDir()
+  let dirents
+  try {
+    dirents = await readdir(projectsDir, { withFileTypes: true })
+  } catch {
+    return result // no projects dir yet — nothing to migrate
+  }
+  for (const dirent of dirents) {
+    if (!dirent.isDirectory()) continue
+    const name = dirent.name
+    // v1 names are [a-zA-Z0-9-] only; every v2 name contains a `~`
+    // (absolute paths have at least one separator). Skip dot-dirs too.
+    if (name.startsWith('.') || name.includes('~') || name.includes('%')) {
+      continue
+    }
+    const src = join(projectsDir, name)
+    try {
+      const cwd = await recoverProjectCwdFromDir(src)
+      if (!cwd) {
+        result.skipped++
+        continue
+      }
+      const target = join(projectsDir, sanitizePath(cwd))
+      if (target === src) continue // already encoded (v1 === v2 form)
+      let targetExists = false
+      try {
+        await readdir(target)
+        targetExists = true
+      } catch {
+        // target absent — rename path below
+      }
+      if (!targetExists) {
+        try {
+          await rename(src, target)
+          result.renamed++
+          continue
+        } catch (err) {
+          if (!isRacedOrTargetAppeared(err)) throw err
+          // raced: another concurrent CLI migrated (ENOENT) or created the
+          // target between our check and rename — fall through to merge
+        }
+      }
+      await mergeProjectDirInto(src, target)
+      result.merged++
+    } catch {
+      // locked by a live session / permission error — retry next startup
+      result.skipped++
+    }
+  }
+  return result
+}
+
+function isRacedOrTargetAppeared(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return code === 'ENOENT' || code === 'EEXIST' || code === 'ENOTEMPTY'
+}
+
+/** Newest-first scan for a `cwd` field in the dir's session jsonls. */
+async function recoverProjectCwdFromDir(
+  pdir: string,
+): Promise<string | undefined> {
+  const candidates: { path: string; mtime: number }[] = []
+  for (const base of [pdir, join(pdir, 'archived')]) {
+    try {
+      const files = await readdir(base)
+      for (const f of files) {
+        if (!f.endsWith('.jsonl')) continue
+        try {
+          const st = await stat(join(base, f))
+          candidates.push({ path: join(base, f), mtime: st.mtimeMs })
+        } catch {
+          // raced deletion
+        }
+      }
+    } catch {
+      // no such subdir (e.g. archived/)
+    }
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime)
+  for (const c of candidates) {
+    const lite = await readSessionLite(c.path)
+    if (!lite) continue
+    const cwd = extractJsonStringField(lite.head, 'cwd')
+    if (cwd) return cwd
+  }
+  return undefined
+}
+
+/** Move every entry of `src` into `dest`; newest mtime wins on collision. */
+async function mergeProjectDirInto(src: string, dest: string): Promise<void> {
+  await mkdir(dest, { recursive: true })
+  const entries = await readdir(src, { withFileTypes: true })
+  for (const entry of entries) {
+    const from = join(src, entry.name)
+    const to = join(dest, entry.name)
+    if (entry.isDirectory()) {
+      let exists = false
+      try {
+        await readdir(to)
+        exists = true
+      } catch {
+        // dest subdir absent — plain rename below
+      }
+      if (exists) await mergeProjectDirInto(from, to)
+      else await rename(from, to)
+    } else {
+      let destNewerOrEqual = false
+      try {
+        const [fromStat, toStat] = await Promise.all([stat(from), stat(to)])
+        destNewerOrEqual = toStat.mtimeMs >= fromStat.mtimeMs
+      } catch {
+        // dest file absent — overwrite by rename below
+      }
+      if (destNewerOrEqual) {
+        // dest wins the collision — drop the superseded copy so the source
+        // dir can be removed and the migration converges
+        try {
+          await unlink(from)
+        } catch {
+          // raced away — nothing to clean
+        }
+        continue
+      }
+      try {
+        await rename(from, to)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') {
+          throw err
+        }
+      }
+    }
+  }
+  try {
+    await rmdir(src)
+  } catch {
+    // leftover entries (locked) — next migration run continues the merge
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,28 +632,39 @@ export async function canonicalizePath(dir: string): Promise<string> {
 }
 
 /**
- * Finds the project directory for a given path, tolerating hash mismatches
- * for long paths (>200 chars). The CLI uses Bun.hash while the SDK under
- * Node.js uses simpleHash — for paths that exceed MAX_SANITIZED_LENGTH,
- * these produce different directory suffixes. This function falls back to
- * prefix-based scanning when the exact match doesn't exist.
+ * Finds the project directory for a given path. Tries the v2 encoding
+ * first (current writes), then the v1 encoding for directories created
+ * before the 2026-09-06 switch. For each variant, tolerates hash-suffix
+ * mismatches on long paths (>200 chars): the CLI uses Bun.hash while the
+ * SDK under Node.js uses simpleHash, which produce different suffixes for
+ * paths exceeding MAX_SANITIZED_LENGTH — prefix-based scanning covers both.
  */
 export async function findProjectDir(
   projectPath: string,
 ): Promise<string | undefined> {
-  const exact = getProjectDir(projectPath)
+  const projectsDir = getProjectsDir()
+  for (const sanitized of sanitizePathCandidates(projectPath)) {
+    const found = await findProjectDirByEncodedName(projectsDir, sanitized)
+    if (found) return found
+  }
+  return undefined
+}
+
+async function findProjectDirByEncodedName(
+  projectsDir: string,
+  sanitized: string,
+): Promise<string | undefined> {
+  const exact = join(projectsDir, sanitized)
   try {
     await readdir(exact)
     return exact
   } catch {
-    // Exact match failed — for short paths this means no sessions exist.
-    // For long paths, try prefix matching to handle hash mismatches.
-    const sanitized = sanitizePath(projectPath)
+    // Exact match failed — for short names this means no sessions exist.
+    // For long names, try prefix matching to handle hash mismatches.
     if (sanitized.length <= MAX_SANITIZED_LENGTH) {
       return undefined
     }
     const prefix = sanitized.slice(0, MAX_SANITIZED_LENGTH)
-    const projectsDir = getProjectsDir()
     try {
       const dirents = await readdir(projectsDir, { withFileTypes: true })
       const match = dirents.find(

@@ -18,6 +18,7 @@ import { env } from '../utils/env.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from '../utils/envUtils.js'
 import { getErrnoCode } from '../utils/errors.js'
 import { normalizeMessagesForAPI } from '../utils/messages.js'
+import { sanitizePathCandidates } from '../utils/path.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 
 function shouldUseVCR(): boolean {
@@ -386,14 +387,19 @@ export async function withTokenCountVCR(
 ): Promise<number | null> {
   // Dehydrate before hashing so fixture keys survive cwd/config-home/tempdir
   // variation and message UUID/timestamp churn. System prompts embed the
-  // working directory (both raw and as a slash→dash project slug in the
+  // working directory (both raw and as an encoded project slug in the
   // auto-memory path) and messages carry fresh UUIDs per run; without this,
-  // every test run produces a new hash and fixtures never hit in CI.
-  const cwdSlug = getCwd().replace(/[^a-zA-Z0-9]/g, '-')
-  const dehydrated = (
-    dehydrateValue(jsonStringify({ messages, tools })) as string
-  )
-    .replaceAll(cwdSlug, '[CWD_SLUG]')
+  // every test run produces a new hash and fixtures never hit in CI. Both
+  // the v2 encoding and the v1 (slash→dash) encoding are replaced — the
+  // auto-memory path may resolve to either depending on which directory
+  // exists on disk.
+  let dehydrated = dehydrateValue(
+    jsonStringify({ messages, tools }),
+  ) as string
+  for (const cwdSlug of sanitizePathCandidates(getCwd())) {
+    dehydrated = dehydrated.replaceAll(cwdSlug, '[CWD_SLUG]')
+  }
+  dehydrated = dehydrated
     .replace(
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
       '[UUID]',

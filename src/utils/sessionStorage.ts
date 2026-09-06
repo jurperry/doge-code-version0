@@ -84,6 +84,8 @@ import { sanitizePath } from './path.js'
 import {
   extractJsonStringField,
   extractLastJsonStringField,
+  findProjectDir,
+  legacySanitizePath,
   LITE_READ_BUF_SIZE,
   readHeadAndTail,
   readTranscriptForLoad,
@@ -2603,8 +2605,11 @@ async function trackSessionBranchingAnalytics(
 }
 
 export async function fetchLogs(limit?: number): Promise<LogOption[]> {
-  const projectDir = getProjectDir(getOriginalCwd())
-  const logs = await getSessionFilesLite(projectDir, limit, getOriginalCwd())
+  const cwd = getOriginalCwd()
+  // Read path: fall back through findProjectDir so directories named with
+  // the v1 encoding (pre-2026-09-06) are still listed for resume.
+  const projectDir = (await findProjectDir(cwd)) ?? getProjectDir(cwd)
+  const logs = await getSessionFilesLite(projectDir, limit, cwd)
 
   await trackSessionBranchingAnalytics(logs)
 
@@ -4164,7 +4169,9 @@ async function getStatOnlyLogsForWorktrees(
 
   if (worktreePaths.length <= 1) {
     const cwd = getOriginalCwd()
-    const projectDir = getProjectDir(cwd)
+    // Read path: findProjectDir falls back to the v1 encoding for
+    // directories created before the 2026-09-06 switch.
+    const projectDir = (await findProjectDir(cwd)) ?? getProjectDir(cwd)
     return getSessionFilesLite(projectDir, undefined, cwd)
   }
 
@@ -4173,16 +4180,24 @@ async function getStatOnlyLogsForWorktrees(
   // directories (e.g. c:/Users/...). Use case-insensitive comparison.
   const caseInsensitive = process.platform === 'win32'
 
-  // Sort worktree paths by sanitized prefix length (longest first) so
+  // Sort worktree paths by encoded prefix length (longest first) so
   // more specific matches take priority over shorter ones. Without this,
-  // a short prefix like -code-myrepo could match -code-myrepo-worktree1
-  // before the longer, more specific prefix gets a chance.
-  const indexed = worktreePaths.map(wt => {
-    const sanitized = sanitizePath(wt)
-    return {
+  // a short prefix like ~code~myrepo could match ~code~myrepo-worktree1
+  // before the longer, more specific prefix gets a chance. Both v2
+  // (current) and v1 (legacy) encodings are matched; subdirSuffix is the
+  // character a deeper path's encoding continues with ('~' for v2
+  // separators, '-' for v1's collapsed separators).
+  const indexed = worktreePaths.flatMap(wt => {
+    const v2 = sanitizePath(wt)
+    const variants = [{ encoded: v2, subdirSuffix: '~' }]
+    const v1 = legacySanitizePath(wt)
+    if (v1 !== v2) variants.push({ encoded: v1, subdirSuffix: '-' })
+    return variants.map(({ encoded, subdirSuffix }) => ({
       path: wt,
-      prefix: caseInsensitive ? sanitized.toLowerCase() : sanitized,
-    }
+      prefix: caseInsensitive ? encoded.toLowerCase() : encoded,
+      truncated: encoded.length > MAX_SANITIZED_LENGTH,
+      subdirSuffix,
+    }))
   })
   indexed.sort((a, b) => b.prefix.length - a.prefix.length)
 
@@ -4206,8 +4221,14 @@ async function getStatOnlyLogsForWorktrees(
     const dirName = caseInsensitive ? dirent.name.toLowerCase() : dirent.name
     if (seenDirs.has(dirName)) continue
 
-    for (const { path: wtPath, prefix } of indexed) {
-      if (dirName === prefix || dirName.startsWith(prefix + '-')) {
+    for (const { path: wtPath, prefix, truncated, subdirSuffix } of indexed) {
+      // Exact match, deeper-path continuation (subdirSuffix), or prefix
+      // match for truncated names (>200 chars, hash suffix follows).
+      if (
+        dirName === prefix ||
+        dirName.startsWith(prefix + subdirSuffix) ||
+        (truncated && dirName.startsWith(prefix.slice(0, MAX_SANITIZED_LENGTH) + '-'))
+      ) {
         seenDirs.add(dirName)
         allLogs.push(
           ...(await getSessionFilesLite(

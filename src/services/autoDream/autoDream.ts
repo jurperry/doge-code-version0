@@ -27,6 +27,7 @@ import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
 import { isAutoMemoryEnabled, getAutoMemPath } from '../../memdir/paths.js'
 import { isAutoDreamEnabled } from './config.js'
 import { getProjectDir } from '../../utils/sessionStorage.js'
+import { findProjectDir } from '../../utils/sessionStoragePortable.js'
 import {
   getOriginalCwd,
   getKairosActive,
@@ -209,7 +210,11 @@ export function initAutoDream(): void {
 
     try {
       const memoryRoot = getAutoMemPath()
-      const transcriptDir = getProjectDir(getOriginalCwd())
+      // Read path: findProjectDir falls back to the v1 encoding for
+      // directories created before the 2026-09-06 switch.
+      const transcriptDir =
+        (await findProjectDir(getOriginalCwd())) ??
+        getProjectDir(getOriginalCwd())
       // Tool constraints note goes in `extra`, not the shared prompt body —
       // manual /dream runs in the main loop with normal permissions and this
       // would be misleading there.

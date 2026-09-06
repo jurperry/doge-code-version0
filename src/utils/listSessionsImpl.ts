@@ -21,7 +21,7 @@ import {
   getProjectsDir,
   MAX_SANITIZED_LENGTH,
   readSessionLite,
-  sanitizePath,
+  sanitizePathCandidates,
   validateUuid,
 } from './sessionStoragePortable.js'
 
@@ -335,15 +335,17 @@ async function gatherProjectCandidates(
   const projectsDir = getProjectsDir()
   const caseInsensitive = process.platform === 'win32'
 
-  // Sort worktree paths by sanitized prefix length (longest first) so
-  // more specific matches take priority over shorter ones
-  const indexed = worktreePaths.map(wt => {
-    const sanitized = sanitizePath(wt)
-    return {
+  // Sort worktree paths by encoded prefix length (longest first) so
+  // more specific matches take priority over shorter ones. Both v2 (current)
+  // and v1 (legacy) encodings are matched so sessions recorded before the
+  // encoding switch are still discovered.
+  const indexed = worktreePaths.flatMap(wt =>
+    sanitizePathCandidates(wt).map(encoded => ({
       path: wt,
-      prefix: caseInsensitive ? sanitized.toLowerCase() : sanitized,
-    }
-  })
+      prefix: caseInsensitive ? encoded.toLowerCase() : encoded,
+      truncated: encoded.length > MAX_SANITIZED_LENGTH,
+    })),
+  )
   indexed.sort((a, b) => b.prefix.length - a.prefix.length)
 
   let allDirents: Dirent[]
@@ -375,14 +377,14 @@ async function gatherProjectCandidates(
     const dirName = caseInsensitive ? dirent.name.toLowerCase() : dirent.name
     if (seenDirs.has(dirName)) continue
 
-    for (const { path: wtPath, prefix } of indexed) {
+    for (const { path: wtPath, prefix, truncated } of indexed) {
       // Only use startsWith for truncated paths (>MAX_SANITIZED_LENGTH) where
       // a hash suffix follows. For short paths, require exact match to avoid
       // /root/project matching /root/project-foo.
       const isMatch =
         dirName === prefix ||
-        (prefix.length >= MAX_SANITIZED_LENGTH &&
-          dirName.startsWith(prefix + '-'))
+        (truncated &&
+          dirName.startsWith(prefix.slice(0, MAX_SANITIZED_LENGTH) + '-'))
       if (isMatch) {
         seenDirs.add(dirName)
         all.push(
