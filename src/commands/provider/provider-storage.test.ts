@@ -2,7 +2,9 @@ import { test, expect, mock } from 'bun:test'
 import {
   buildModelProfile,
   dedupeSavedModels,
+  findProviderNameConflict,
   maskSecret,
+  normalizeProviderName,
   saveAndActivateProvider,
   upsertModelProfile,
   validateProviderForm,
@@ -13,41 +15,85 @@ import type { CustomApiStorageData, ModelProfile } from '../../utils/customApiSt
 
 // --- validateProviderForm ---
 
+const VALID_BASE: ProviderFormValues = {
+  providerName: 'deepseek官方',
+  provider: 'openai',
+  baseURL: 'https://api.x.com',
+  apiKey: 'sk-1',
+  model: 'm1',
+}
+
+test('validateProviderForm: missing provider name is rejected', () => {
+  expect(validateProviderForm({ ...VALID_BASE, providerName: '  ' })).toContain('Provider name is required')
+})
+
+test('validateProviderForm: duplicate provider name (different model) is rejected', () => {
+  const profiles: ModelProfile[] = [
+    { model: 'glm-5.3', providerName: 'glm官方' },
+    { model: 'kimi-k3', providerName: 'kimi官方' },
+  ]
+  const error = validateProviderForm({ ...VALID_BASE, providerName: ' GLM官方 ' }, profiles)
+  expect(error).toContain('already used')
+  expect(error).toContain('glm-5.3')
+})
+
+test('validateProviderForm: re-using the edited profile\'s own name is allowed', () => {
+  const profiles: ModelProfile[] = [
+    { model: 'glm-5.3', providerName: 'glm官方' },
+  ]
+  expect(
+    validateProviderForm({ ...VALID_BASE, providerName: 'glm官方' }, profiles, 'glm-5.3[1m]'),
+  ).toBeUndefined()
+})
+
 test('validateProviderForm: missing main model is rejected', () => {
-  const values: ProviderFormValues = { provider: 'openai', baseURL: 'https://api.x.com', apiKey: 'sk-1', model: '  ' }
-  expect(validateProviderForm(values)).toBe('Main model is required.')
+  expect(validateProviderForm({ ...VALID_BASE, model: '  ' })).toBe('Main model is required.')
 })
 
 test('validateProviderForm: missing API key is rejected', () => {
-  const values: ProviderFormValues = { provider: 'openai', baseURL: 'https://api.x.com', apiKey: '', model: 'm1' }
-  expect(validateProviderForm(values)).toBe('API key is required.')
+  expect(validateProviderForm({ ...VALID_BASE, apiKey: '' })).toBe('API key is required.')
 })
 
 test('validateProviderForm: openai/responses require a base URL', () => {
-  const values: ProviderFormValues = { provider: 'openai', baseURL: '', apiKey: 'sk-1', model: 'm1' }
-  expect(validateProviderForm(values)).toBe('Base URL is required for openai providers.')
-  expect(validateProviderForm({ ...values, provider: 'responses' })).toBe('Base URL is required for responses providers.')
+  expect(validateProviderForm({ ...VALID_BASE, baseURL: '' })).toBe('Base URL is required for openai providers.')
+  expect(validateProviderForm({ ...VALID_BASE, baseURL: '', provider: 'responses' })).toBe('Base URL is required for responses providers.')
 })
 
 test('validateProviderForm: anthropic without base URL is valid (official endpoint)', () => {
-  const values: ProviderFormValues = { provider: 'anthropic', baseURL: '', apiKey: 'sk-1', model: 'm1' }
-  expect(validateProviderForm(values)).toBeUndefined()
+  expect(validateProviderForm({ ...VALID_BASE, provider: 'anthropic', baseURL: '' })).toBeUndefined()
 })
 
 test('validateProviderForm: context window must be a positive integer when given', () => {
-  const base: ProviderFormValues = { provider: 'anthropic', baseURL: '', apiKey: 'sk-1', model: 'm1' }
-  expect(validateProviderForm({ ...base, contextWindow: '' })).toBeUndefined()
-  expect(validateProviderForm({ ...base, contextWindow: '  ' })).toBeUndefined()
-  expect(validateProviderForm({ ...base, contextWindow: '200000' })).toBeUndefined()
-  expect(validateProviderForm({ ...base, contextWindow: 'abc' })).toContain('positive integer')
-  expect(validateProviderForm({ ...base, contextWindow: '0' })).toContain('positive integer')
-  expect(validateProviderForm({ ...base, contextWindow: '1.5' })).toContain('positive integer')
+  expect(validateProviderForm({ ...VALID_BASE, contextWindow: '' })).toBeUndefined()
+  expect(validateProviderForm({ ...VALID_BASE, contextWindow: '  ' })).toBeUndefined()
+  expect(validateProviderForm({ ...VALID_BASE, contextWindow: '200000' })).toBeUndefined()
+  expect(validateProviderForm({ ...VALID_BASE, contextWindow: 'abc' })).toContain('positive integer')
+  expect(validateProviderForm({ ...VALID_BASE, contextWindow: '0' })).toContain('positive integer')
+  expect(validateProviderForm({ ...VALID_BASE, contextWindow: '1.5' })).toContain('positive integer')
+})
+
+// --- findProviderNameConflict / normalizeProviderName ---
+
+test('normalizeProviderName trims and lowercases for comparison', () => {
+  expect(normalizeProviderName('  GLM官方 ')).toBe('glm官方')
+})
+
+test('findProviderNameConflict matches case-insensitively, ignores unnamed profiles, excludes self', () => {
+  const profiles: ModelProfile[] = [
+    { model: 'glm-5.3', providerName: 'GLM官方' },
+    { model: 'unnamed-model' },
+  ]
+  expect(findProviderNameConflict('glm官方', profiles)?.model).toBe('glm-5.3')
+  expect(findProviderNameConflict('glm官方', profiles, 'glm-5.3')).toBeUndefined()
+  expect(findProviderNameConflict('deepseek官方', profiles)).toBeUndefined()
+  expect(findProviderNameConflict('', profiles)).toBeUndefined()
 })
 
 // --- buildModelProfile ---
 
 test('buildModelProfile trims values and drops empty optionals', () => {
   const values: ProviderFormValues = {
+    providerName: ' deepseek官方 ',
     provider: 'openai',
     baseURL: '  https://api.deepseek.com  ',
     apiKey: ' sk-test ',
@@ -58,6 +104,7 @@ test('buildModelProfile trims values and drops empty optionals', () => {
   }
   expect(buildModelProfile(values)).toEqual({
     model: 'deepseek-v4-pro',
+    providerName: 'deepseek官方',
     provider: 'openai',
     baseURL: 'https://api.deepseek.com',
     apiKey: 'sk-test',
@@ -70,6 +117,7 @@ test('buildModelProfile trims values and drops empty optionals', () => {
 
 test('buildModelProfile defaults to DOGE_API_KEY when no key type is chosen', () => {
   const values: ProviderFormValues = {
+    providerName: 'p1',
     provider: 'anthropic',
     baseURL: '',
     apiKey: 'sk-1',
@@ -79,14 +127,14 @@ test('buildModelProfile defaults to DOGE_API_KEY when no key type is chosen', ()
 })
 
 test('buildModelProfile parses contextWindow text to a number, empty stays undefined', () => {
-  const base: ProviderFormValues = { provider: 'anthropic', baseURL: '', apiKey: 'sk-1', model: 'm1' }
-  expect(buildModelProfile({ ...base, contextWindow: ' 200000 ' }).contextWindow).toBe(200000)
-  expect(buildModelProfile({ ...base, contextWindow: '' }).contextWindow).toBeUndefined()
-  expect(buildModelProfile(base).contextWindow).toBeUndefined()
+  expect(buildModelProfile({ ...VALID_BASE, contextWindow: ' 200000 ' }).contextWindow).toBe(200000)
+  expect(buildModelProfile({ ...VALID_BASE, contextWindow: '' }).contextWindow).toBeUndefined()
+  expect(buildModelProfile(VALID_BASE).contextWindow).toBeUndefined()
 })
 
 test('buildModelProfile persists the selected ANTHROPIC_AUTH_TOKEN key type', () => {
   const values: ProviderFormValues = {
+    providerName: 'gw',
     provider: 'anthropic',
     baseURL: 'https://gw.example.com',
     apiKey: 'sk-bearer',

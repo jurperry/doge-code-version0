@@ -164,12 +164,20 @@ export function RemoveProviderPicker({ onDone }: RemoveProviderPickerProps): Rea
   const currentModel = readCustomApiStorage().model ?? getGlobalConfig().customApiEndpoint?.model;
 
   const selectOptions = React.useMemo(() => {
+    const profiles = readCustomApiStorage().modelProfiles ?? [];
     const modelOptions = models.map(m => {
       const isCurrent = normalizeModelName(currentModel ?? '') === normalizeModelName(m);
+      const name = profiles.find(
+        p => normalizeModelName(p.model) === normalizeModelName(m),
+      )?.providerName;
+      const desc = [
+        ...(name ? [name] : []),
+        ...(isCurrent ? ['(currently active)'] : []),
+      ].join(' ');
       return {
         value: m,
         label: formatCustomModelLabel(m),
-        description: isCurrent ? '(currently active)' : undefined,
+        description: desc || undefined,
       };
     });
     return [

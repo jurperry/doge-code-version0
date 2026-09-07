@@ -51,7 +51,13 @@ export function ModelPicker(t0) {
   } = t0;
   const setAppState = useSetAppState();
   const exitState = useExitOnCtrlCDWithKeybindings();
-  const initialValue = initial === null ? NO_PREFERENCE : initial;
+  // The checkmark/initial focus follows the model actually in effect:
+  // a session override (mainLoopModelForSession) outranks the persisted
+  // global baseline — otherwise the ✔ sits on the disk-baseline provider
+  // row while a session-scoped switch is running, which reads as "I'm on
+  // the wrong model".
+  const effectiveInitial = sessionModel ?? initial;
+  const initialValue = effectiveInitial === null ? NO_PREFERENCE : effectiveInitial;
   const [focusedValue, setFocusedValue] = useState(initialValue);
   const isFastMode = useAppState(_temp);
   const [hasToggledEffort, setHasToggledEffort] = useState(false);
@@ -78,30 +84,30 @@ export function ModelPicker(t0) {
   let t4;
   bb0: {
     if (
-      initial !== null &&
+      effectiveInitial !== null &&
       !modelOptions.some(
         opt =>
-          opt.value === initial ||
+          opt.value === effectiveInitial ||
           (opt.value !== null &&
-            normalizeModelName(opt.value) === normalizeModelName(initial)),
+            normalizeModelName(opt.value) === normalizeModelName(effectiveInitial)),
       )
     ) {
       let t5;
-      if ($[4] !== initial) {
-        t5 = modelDisplayString(initial);
-        $[4] = initial;
+      if ($[4] !== effectiveInitial) {
+        t5 = modelDisplayString(effectiveInitial);
+        $[4] = effectiveInitial;
         $[5] = t5;
       } else {
         t5 = $[5];
       }
       let t6;
-      if ($[6] !== initial || $[7] !== t5) {
+      if ($[6] !== effectiveInitial || $[7] !== t5) {
         t6 = {
-          value: initial,
+          value: effectiveInitial,
           label: t5,
           description: "Current model"
         };
-        $[6] = initial;
+        $[6] = effectiveInitial;
         $[7] = t5;
         $[8] = t6;
       } else {
@@ -311,7 +317,7 @@ export function ModelPicker(t0) {
   }
   let t18;
   if ($[44] !== sessionModel) {
-    t18 = sessionModel && <Text dimColor={true}>Currently using {modelDisplayString(sessionModel)} for this session (set by plan mode). Selecting a model will undo this.</Text>;
+    t18 = sessionModel && <Text dimColor={true}>Currently using {modelDisplayString(sessionModel)} for this session (session override). Selecting a model will undo this.</Text>;
     $[44] = sessionModel;
     $[45] = t18;
   } else {

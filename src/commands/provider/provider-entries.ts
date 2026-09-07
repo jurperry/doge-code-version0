@@ -106,7 +106,8 @@ export function describeProviderEntry(entry: ProviderEntry): string {
   const p = entry.profile
   const format = p?.provider ?? 'anthropic'
   const endpoint = p?.baseURL || 'official API'
-  return `${format} · ${endpoint}`
+  const name = p?.providerName
+  return name ? `${name} · ${format} · ${endpoint}` : `${format} · ${endpoint}`
 }
 
 /** Multi-line summary block for /provider list (secrets masked). */
@@ -115,11 +116,14 @@ export function formatProviderEntry(entry: ProviderEntry): string {
   const authTokenType = p?.authTokenType ?? 'DOGE_API_KEY'
   const lines = [
     `${entry.model}${entry.isCurrent ? ' (current)' : ''}`,
+  ]
+  if (p?.providerName) lines.push(`  name:    ${p.providerName}`)
+  lines.push(
     `  format:  ${p?.provider ?? 'anthropic'}`,
     `  base:    ${p?.baseURL || '(official API)'}`,
     `  API key: ${maskSecret(p?.apiKey)}`,
     `  key type: ${authTokenType} (${authTokenType === 'ANTHROPIC_AUTH_TOKEN' ? 'Authorization: Bearer' : 'x-api-key'})`,
-  ]
+  )
   if (p?.defaultOpusModel) lines.push(`  opus:    ${p.defaultOpusModel}`)
   if (p?.defaultSonnetModel) lines.push(`  sonnet:  ${p.defaultSonnetModel}`)
   if (p?.defaultHaikuModel) lines.push(`  haiku:   ${p.defaultHaikuModel}`)

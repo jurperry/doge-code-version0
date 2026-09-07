@@ -17,6 +17,8 @@ export type AuthTokenType = 'DOGE_API_KEY' | 'ANTHROPIC_AUTH_TOKEN'
 
 /** Values collected by the /provider add form. */
 export type ProviderFormValues = {
+  /** User-facing provider name, e.g. "deepseek官方". Unique across profiles. */
+  providerName?: string
   provider: ProviderFormat
   baseURL?: string
   apiKey?: string
@@ -30,8 +32,46 @@ export type ProviderFormValues = {
   haikuModel?: string
 }
 
-/** Validate form values. Returns an error message, or undefined when valid. */
-export function validateProviderForm(values: ProviderFormValues): string | undefined {
+/** Case-insensitive comparison key for provider names. */
+export function normalizeProviderName(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+/**
+ * Find a DIFFERENT profile already using this provider name.
+ * `selfModel` (normalized comparison key of the model being edited) is
+ * excluded so re-saving an existing provider with its own name is allowed.
+ */
+export function findProviderNameConflict(
+  providerName: string,
+  profiles: ModelProfile[],
+  selfModel?: string,
+): ModelProfile | undefined {
+  const key = normalizeProviderName(providerName)
+  if (!key) return undefined
+  return profiles.find(
+    p =>
+      p.providerName !== undefined &&
+      normalizeProviderName(p.providerName) === key &&
+      normalizeModelName(p.model) !== normalizeModelName(selfModel ?? ''),
+  )
+}
+
+/**
+ * Validate form values. Returns an error message, or undefined when valid.
+ * `profiles`/`selfModel` power the provider-name uniqueness check — pass
+ * them wherever available; the form re-validates on save as the final gate.
+ */
+export function validateProviderForm(
+  values: ProviderFormValues,
+  profiles: ModelProfile[] = [],
+  selfModel?: string,
+): string | undefined {
+  if (!values.providerName?.trim()) return 'Provider name is required (e.g. deepseek官方).'
+  const conflict = findProviderNameConflict(values.providerName, profiles, selfModel)
+  if (conflict) {
+    return `Provider name '${values.providerName.trim()}' is already used by ${conflict.model}. Provider names must be unique.`
+  }
   if (!values.model?.trim()) return 'Main model is required.'
   if (!values.apiKey?.trim()) return 'API key is required.'
   if (values.provider !== 'anthropic' && !values.baseURL?.trim()) {
@@ -52,6 +92,7 @@ export function buildModelProfile(values: ProviderFormValues): ModelProfile {
   const cw = values.contextWindow?.trim()
   return {
     model: values.model.trim(),
+    providerName: values.providerName?.trim() || undefined,
     provider: values.provider,
     baseURL: values.baseURL?.trim() || undefined,
     apiKey: values.apiKey?.trim() || undefined,

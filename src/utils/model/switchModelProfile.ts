@@ -132,19 +132,26 @@ export interface SwitchTierDeps {
   ) => void
   commitAppState: (updater: (prev: AppStateSlice) => AppStateSlice) => void
   /** Resolve a tier alias ('opus'|'sonnet'|'haiku') to the real model ID
-   *  the active profile maps it to (e.g. 'haiku' → 'deepseek-v4-flash').
-   *  Real binding: parseUserSpecifiedModel(tier). */
+   *  the ACTIVE provider maps it to (e.g. 'haiku' → 'deepseek-v4-flash').
+   *  Real binding reads the tier env vars, then the active/stored profile. */
   resolveTierModel: (tier: 'opus' | 'sonnet' | 'haiku') => string
-  /** Persist the tier selection (activeTier + tier mapping snapshot) to disk.
-   *  Real binding: persistTierSelection. */
-  persistTier: (tier: TierAlias) => void
+  /** Resolve what "Default (recommended)" means RIGHT NOW: the active
+   *  provider's Sonnet-tier model, falling back to its main model when the
+   *  Sonnet tier is not configured. Returns null when neither is knowable
+   *  (first-party user with no custom API config) — the session override is
+   *  then simply cleared. */
+  resolveDefaultModel: () => string | null
+  /** Scrub deprecated global tier state (activeTier/tierModels) from disk.
+   *  Real binding: clearLegacyTierState. Called on the global-scope default
+   *  path as the migration hook. */
+  clearLegacyTier?: () => void
   /** Return the persisted main model id (custom API users), or undefined for
    *  first-party users with no custom API config.
    *  Real binding: () => readCustomApiStorage().model */
   getStoredMainModel: () => string | undefined
   /** Session-scoped switch: commit targets `mainLoopModelForSession` and a
-   *  `null` tier simply clears the session override (back to baseline).
-   *  Callers pass a no-op persistTier / syncToDisk alongside this flag. */
+   *  `null` tier resolves the provider default rather than persisting.
+   *  Callers pass a no-op syncToDisk alongside this flag. */
   sessionScoped?: boolean
 }
 
@@ -265,56 +272,54 @@ export async function switchModelProfileAtomic(
 /**
  * Switch to a tier alias (opus/sonnet/haiku) or back to default (null).
  *
- * Tier path (opus/sonnet/haiku) — resolves the tier's REAL model id from env
- * (start scripts / applied profile) and commits it as the session's
- * mainLoopModel, but does NOT write it into the main-model slot on disk.
- * The old implementation persisted the resolved tier model as the main model
- * (.claude.json customApiEndpoint.model / settings.json model / storage),
- * which polluted the main model identity: after a restart the stored tier
- * mapping no longer matched any profile (profiles are keyed by main model),
- * so Opus/Sonnet/Haiku ALL fell back to that one model in /model — the
- * "switched to haiku, now every tier shows haiku" bug.
+ * Since the 2026-09-07 provider refactor tier selections are ALWAYS
+ * session-scoped: Opus/Sonnet/Haiku are views over the ACTIVE provider's
+ * tier slots, and committing one only moves `mainLoopModelForSession` in
+ * this process. Nothing is persisted — the previous design (activeTier +
+ * tierModels snapshot, restored into env/ANTHROPIC_MODEL at every launch)
+ * leaked one terminal's tier choice into every other terminal and into the
+ * /model "custom model" list, breaking multi-terminal isolation.
  *
- * Instead the tier selection is persisted separately (activeTier + a tier→model
- * snapshot, via persistTierSelection) and restored at startup by
- * restoreTierState.ts, which injects the env vars a start script would have.
+ * Tier path (opus/sonnet/haiku) — resolves the tier's REAL model id (env
+ * first, then the active profile) and commits it as the session main loop
+ * model. Never touches the persisted main-model slot, env, or disk.
  *
  * Default path (tier = null) —
- *  - custom API users (stored main model exists): clear the tier selection
- *    and return to the stored main model. Credentials are untouched: tier
- *    switches run against the same provider, so clearing them would break
- *    the next launch.
- *  - first-party users: clear model + stored credentials (legacy semantics).
+ *  - session scope (the normal path): "Default (recommended)" means the
+ *    active provider's Sonnet-tier model, falling back to its main model
+ *    when no Sonnet tier is configured (resolveDefaultModel). Commits that
+ *    as the session override so the picker's Default row and the actually
+ *    used model stay identical even after a session-scoped provider switch.
+ *  - global scope (legacy / DOGE_MODEL_SCOPE=global):
+ *      · custom API users (stored main model exists): scrub deprecated
+ *        global tier state and return the persisted main model; credentials
+ *        untouched.
+ *      · first-party users: clear model + stored credentials (legacy
+ *        semantics).
  */
 export function switchTier(tier: TierAlias, deps: SwitchTierDeps): void {
-  // Session scope: tier switches and "default" only move the session
-  // override; disk (persistTier/syncToDisk) is expected to be no-oped by
-  // the caller, keeping other terminals on the global baseline.
-  if (deps.sessionScoped) {
-    if (tier === null) {
-      // Revert to baseline by clearing the session override.
-      deps.commitAppState(commitFields(null, true))
-      return
-    }
+  if (tier !== null) {
+    // Tier alias: always session-scoped — a persisted tier would decide the
+    // main model of every other terminal and every future launch.
     const realTierModel = deps.resolveTierModel(tier)
     deps.commitAppState(commitFields(realTierModel, true))
     return
   }
-  if (tier === null) {
-    const storedMainModel = deps.getStoredMainModel()
-    if (storedMainModel) {
-      // 自定义 API 用户：清层级选择，主循环模型回到持久化的主模型
-      deps.persistTier(null)
-      deps.commitAppState(commitFields(storedMainModel, false))
-      return
-    }
-    // 官方用户：清 model + 凭证（保持原有语义）
-    deps.syncToDisk('', true, undefined)
-    deps.commitAppState(commitFields(null, false))
+  // Default path.
+  if (deps.sessionScoped) {
+    const defaultModel = deps.resolveDefaultModel()
+    deps.commitAppState(commitFields(defaultModel, true))
     return
   }
-  // tier 路径：解析真实 tier 模型 ID，仅持久化层级选择，不改写主模型槽位
-  const realTierModel = deps.resolveTierModel(tier)
-  deps.persistTier(tier)
-  deps.commitAppState(commitFields(realTierModel, false))
+  const storedMainModel = deps.getStoredMainModel()
+  if (storedMainModel) {
+    // 自定义 API 用户：清掉废弃的全局层级状态，主循环模型回到持久化的主模型
+    deps.clearLegacyTier?.()
+    deps.commitAppState(commitFields(storedMainModel, false))
+    return
+  }
+  // 官方用户：清 model + 凭证（保持原有语义）
+  deps.clearLegacyTier?.()
+  deps.syncToDisk('', true, undefined)
+  deps.commitAppState(commitFields(null, false))
 }

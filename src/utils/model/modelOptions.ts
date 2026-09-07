@@ -321,28 +321,32 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   const savedModels = (getGlobalConfig().customApiEndpoint?.savedModels ?? [])
     .map(model => model.trim())
     .filter(Boolean)
+  // Every stored profile is one switchable provider ("有多少 provider 就显示
+  // 多少"). Profiles are the source of truth for the provider rows.
+  const providerProfiles = readCustomApiStorage().modelProfiles ?? []
 
-  if (customConfiguredModel || savedModels.length > 0) {
+  if (customConfiguredModel || savedModels.length > 0 || providerProfiles.length > 0) {
     // Build tier-aware model options for custom API configurations.
     // Resolve Opus/Sonnet/Haiku tiers with priority:
     // 1. Environment variables (set by start scripts or applyModelProfile)
-    // 2. Stored model profile (from .credentials.json modelProfiles)
-    // 3. Persisted tier mapping snapshot (captured at the last tier/profile
-    //    switch — also injected into env at startup by restoreTierState)
-    // 4. Main model (fallback when nothing is explicitly configured)
+    // 2. The ACTIVE model's profile (from .credentials.json modelProfiles)
+    // 3. Main model (fallback when nothing is explicitly configured)
+    // The deprecated global tierModels snapshot is deliberately NOT consulted:
+    // it was captured from whichever terminal last switched and could describe
+    // a DIFFERENT provider, leaking that provider's tier models into this
+    // terminal's picker (cross-terminal "custom model" pollution).
     const mainModel = customConfiguredModel || savedModels[0] || ''
     const activeProfile = customConfiguredModel ? getModelProfile(customConfiguredModel) : undefined
-    const tierSnapshot = readCustomApiStorage().tierModels
     // Explicitly-configured tier values (non-fallback). Used to decide
     // whether a tier equals the main model because it was CONFIGURED that
     // way (show "(current)") or merely because it INHERITS the main model
     // (no marker — every tier would otherwise show "(current)").
     const opusExplicit =
-      process.env.ANTHROPIC_DEFAULT_OPUS_MODEL || activeProfile?.defaultOpusModel || tierSnapshot?.opus
+      process.env.ANTHROPIC_DEFAULT_OPUS_MODEL || activeProfile?.defaultOpusModel
     const sonnetExplicit =
-      process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || activeProfile?.defaultSonnetModel || tierSnapshot?.sonnet
+      process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || activeProfile?.defaultSonnetModel
     const haikuExplicit =
-      process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || activeProfile?.defaultHaikuModel || tierSnapshot?.haiku
+      process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || activeProfile?.defaultHaikuModel
     const opusModel = opusExplicit || mainModel
     const sonnetModel = sonnetExplicit || mainModel
     const haikuModel = haikuExplicit || mainModel
@@ -357,7 +361,9 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       options.push({
         value: customConfiguredModel,
         label: formatCustomModelLabel(customConfiguredModel),
-        description: 'Current main model',
+        description: activeProfile?.providerName
+          ? `Custom model(${activeProfile.providerName}) · current main model`
+          : 'Current main model',
         descriptionForModel: `Main model — ${customConfiguredModel}`,
       })
     }
@@ -386,22 +392,46 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       },
     )
 
-    // Append remaining saved models, deduping against tier models
-    // and the main model
+    // Provider rows: every OTHER stored profile switches the whole provider
+    // (model + credentials + tiers + context window) when selected. Labeled
+    // with the user-chosen provider name so multiple third-party endpoints
+    // stay distinguishable.
+    const activeKey = customConfiguredModel
+      ? normalizeModelName(customConfiguredModel)
+      : undefined
+    const shownKeys = new Set(activeKey ? [activeKey] : [])
+    for (const profile of providerProfiles) {
+      const key = normalizeModelName(profile.model)
+      if (shownKeys.has(key)) continue
+      shownKeys.add(key)
+      options.push({
+        value: profile.model,
+        label: formatCustomModelLabel(profile.model),
+        description: profile.providerName
+          ? `Custom model(${profile.providerName})`
+          : 'Custom model',
+        descriptionForModel: profile.providerName
+          ? `${profile.providerName} — ${profile.model}`
+          : `Custom provider — ${profile.model}`,
+      })
+    }
+
+    // Legacy rows: savedModels entries without a stored profile (pre-profile
+    // era), deduped against the tier models and everything already shown.
     const tierValues = new Set([
       normalizeModelName(opusModel),
       normalizeModelName(sonnetModel),
       normalizeModelName(haikuModel),
-      ...(customConfiguredModel ? [normalizeModelName(customConfiguredModel)] : []),
     ])
     for (const model of savedModels) {
-      if (!tierValues.has(normalizeModelName(model))) {
-        options.push({
-          value: model,
-          label: formatCustomModelLabel(model),
-          description: 'Custom model',
-        })
-      }
+      const key = normalizeModelName(model)
+      if (tierValues.has(key) || shownKeys.has(key)) continue
+      shownKeys.add(key)
+      options.push({
+        value: model,
+        label: formatCustomModelLabel(model),
+        description: 'Custom model',
+      })
     }
 
     return options
@@ -653,19 +683,22 @@ export function getModelOptions(fastMode = false): ModelOption[] {
       ...options,
       getMergedOpus1MOption(fastMode),
     ])
-  } else {
-    // Try to show a human-readable label for known Anthropic models, with an
-    // upgrade hint if the alias now resolves to a newer version.
-    const knownOption = getKnownModelOption(customModel)
-    if (knownOption) {
-      options.push(knownOption)
     } else {
-      options.push({
-        value: customModel,
-        label: formatCustomModelLabel(customModel),
-        description: 'Custom model',
-      })
-    }
+      // Try to show a human-readable label for known Anthropic models, with an
+      // upgrade hint if the alias now resolves to a newer version.
+      const knownOption = getKnownModelOption(customModel)
+      if (knownOption) {
+        options.push(knownOption)
+      } else {
+        const providerName = getModelProfile(customModel)?.providerName
+        options.push({
+          value: customModel,
+          label: formatCustomModelLabel(customModel),
+          description: providerName
+            ? `Custom model(${providerName})`
+            : 'Custom model',
+        })
+      }
     return filterModelOptionsByAllowlist(options)
   }
 }

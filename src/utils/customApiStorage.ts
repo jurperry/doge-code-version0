@@ -21,6 +21,13 @@ export type TierModelsSnapshot = {
  */
 export type ModelProfile = {
   model: string
+  /**
+   * User-facing provider name (e.g. "deepseek官方", "glm官方"). Unique across
+   * profiles — /provider add enforces this and /model shows it as
+   * `Custom model(<providerName>)`. Optional for backward compatibility with
+   * profiles saved before the field existed.
+   */
+  providerName?: string
   /** API provider type */
   provider?: 'anthropic' | 'openai' | 'responses'
   /** API base URL */
@@ -65,9 +72,18 @@ export type CustomApiStorageData = {
   savedModels?: string[]
   /** Per-model profiles with full provider/credentials config */
   modelProfiles?: ModelProfile[]
-  /** Tier selected via /model (Opus/Sonnet/Haiku). Absent = main model. */
+  /**
+   * @deprecated Tier selections are session-scoped since the 2026-09-07
+   * provider refactor; nothing writes or restores this field anymore. Parsed
+   * only so old on-disk payloads stay readable; cleared by
+   * clearLegacyTierState().
+   */
   activeTier?: TierAliasName
-  /** Last known tier→model mapping, snapshotted from env when a switch happened. */
+  /**
+   * @deprecated Cross-provider global snapshot replaced by per-profile tier
+   * fields (defaultOpusModel etc.). Parsed only for backward compatibility;
+   * cleared by clearLegacyTierState().
+   */
   tierModels?: TierModelsSnapshot
 }
 
@@ -167,53 +183,34 @@ export function healStoredCredentials(): boolean {
 }
 
 /**
- * Persist the tier selection (and refresh the tier→model snapshot from the
- * current process env) to BOTH config stores (secure storage customApiEndpoint
- * and .claude.json customApiEndpoint), without touching the main model,
- * credentials, or saved models.
+ * Remove the deprecated global tier state (activeTier / tierModels) from BOTH
+ * config stores. Tier selections are session-scoped since the 2026-09-07
+ * provider refactor: persisting them globally forced every other terminal
+ * (and every new `doge` launch) onto one terminal's Opus/Sonnet/Haiku choice
+ * — the cross-terminal "custom model pollution" bug. Tier→model mappings now
+ * live exclusively on each ModelProfile's default{Opus,Sonnet,Haiku}Model
+ * fields and are injected into env at startup by restoreTierState.
  *
- * This is the tier-switch counterpart of syncModelConfigToDisk: selecting
- * Opus/Sonnet/Haiku must NOT rewrite the main model slot (the old behavior
- * polluted it with the tier's model id, so after a restart every tier fell
- * back to that model — the "/model shows the same model everywhere" bug).
- *
- * @param tier  'opus'|'sonnet'|'haiku' to select a tier, null to clear back
- *              to the main model.
- * @param tierModels  Optional snapshot; defaults to reading the tier env vars
- *              from the current process. Pass {} to keep stored snapshot.
+ * No-op when no legacy fields are present. Runtime-safe only (uses
+ * saveGlobalConfig — do NOT call before enableConfigs(); startup cleanup
+ * writes secure storage directly instead).
  */
-export function persistTierSelection(
-  tier: TierAliasName | null,
-  tierModels?: TierModelsSnapshot,
-): void {
-  const snapshot: TierModelsSnapshot =
-    tierModels ?? {
-      opus: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,
-      sonnet: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,
-      haiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
-    }
-  const hasSnapshotValue = !!(snapshot.opus || snapshot.sonnet || snapshot.haiku)
-
-  const applyFields = (current: CustomApiStorageData): CustomApiStorageData => ({
-    ...current,
-    activeTier: tier ?? undefined,
-    // Keep the previous snapshot when the new one is empty (clearing a tier
-    // selection should not erase the remembered tier mapping).
-    tierModels: hasSnapshotValue
-      ? snapshot
-      : current.tierModels
-        ? current.tierModels
-        : undefined,
-  })
-
+export function clearLegacyTierState(): void {
   const current = readCustomApiStorage()
-  writeCustomApiStorage(applyFields(current))
+  if (current.activeTier === undefined && current.tierModels === undefined) return
 
+  writeCustomApiStorage({
+    ...current,
+    activeTier: undefined,
+    tierModels: undefined,
+  })
   saveGlobalConfig(cfg => ({
     ...cfg,
-    customApiEndpoint: applyFields(
-      (cfg.customApiEndpoint ?? {}) as CustomApiStorageData,
-    ),
+    customApiEndpoint: {
+      ...(cfg.customApiEndpoint ?? {}),
+      activeTier: undefined,
+      tierModels: undefined,
+    },
   }))
 }
 
@@ -369,9 +366,9 @@ export function applyModelProfile(profile: ModelProfile, opts?: { persist?: bool
   // saved model's credentials, causing the wrong provider/key to leak across
   // start-script launches. The full profile (including credentials) is stored
   // in modelProfiles[] and applied to process.env for the current session.
-  // A profile switch also selects a NEW main model, so any tier selection is
-  // reset (activeTier cleared) and the tier snapshot refreshed from the env
-  // values this profile just applied.
+  // A profile switch selects a NEW main model, so any legacy global tier
+  // selection/snapshot is cleared as well (tiers are session-scoped; the
+  // tier mapping lives on the profile itself).
   // Session-scoped switches (multi-terminal isolation) skip this block:
   // disk stays at the global baseline so other terminals are unaffected.
   if (opts?.persist === false) return
@@ -380,10 +377,6 @@ export function applyModelProfile(profile: ModelProfile, opts?: { persist?: bool
     ...current,
     model: profile.model,
     activeTier: undefined,
-    tierModels: {
-      opus: profile.defaultOpusModel,
-      sonnet: profile.defaultSonnetModel,
-      haiku: profile.defaultHaikuModel,
-    },
+    tierModels: undefined,
   })
 }

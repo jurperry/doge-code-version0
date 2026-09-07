@@ -161,21 +161,27 @@ test('switchModelProfileAtomic — syncToDisk throws → env rolled back, throws
   expect(setAppStateMock).not.toHaveBeenCalled()
 })
 
-test('switchTier(haiku) — persists tier selection only, does NOT rewrite the main-model slot', async () => {
+// ── switchTier (2026-09-07 provider refactor: tiers are session-scoped) ──
+
+test('switchTier(haiku) — session commit only; never persists, never syncs disk', async () => {
   for (const key of PROFILE_MANAGED_ENV_KEYS) {
     process.env[key] = `preset-${key}`
   }
 
-  const setAppStateMock = mock(() => {})
+  let committed: any = null
+  const setAppStateMock = mock((updater: any) => {
+    committed = updater({ mainLoopModel: 'deepseek-v4-pro', mainLoopModelForSession: null })
+  })
   const syncMock = mock(() => {})
-  const persistTierMock = mock(() => {})
+  const clearLegacyMock = mock(() => {})
 
   const { switchTier } = await import('./switchModelProfile.js')
   switchTier('haiku', {
     syncToDisk: syncMock,
     commitAppState: setAppStateMock,
     resolveTierModel: () => 'deepseek-v4-flash',
-    persistTier: persistTierMock,
+    resolveDefaultModel: () => 'unused',
+    clearLegacyTier: clearLegacyMock,
     getStoredMainModel: () => 'deepseek-v4-pro[1m]',
   })
 
@@ -183,18 +189,76 @@ test('switchTier(haiku) — persists tier selection only, does NOT rewrite the m
   for (const key of PROFILE_MANAGED_ENV_KEYS) {
     expect(process.env[key]).toBe(`preset-${key}`)
   }
-  // 新语义：只持久化层级选择，绝不把 tier 模型写进主模型槽位
-  // （旧实现 syncToDisk(realTierModel) 污染主模型，导致重启后所有
-  //  tier fallback 到该模型 —— /model 全部显示同一模型的 bug）
+  // 档位选择一律会话级：只写 mainLoopModelForSession，绝不改主模型槽位、
+  // 绝不落盘（旧实现把 tier 选择持久化成 activeTier/tierModels，其他终端
+  // 启动时被强制进该档位 —— 跨终端 custom model 污染 bug 的根源）
+  expect(committed.mainLoopModel).toBe('deepseek-v4-pro')
+  expect(committed.mainLoopModelForSession).toBe('deepseek-v4-flash')
   expect(syncMock).not.toHaveBeenCalled()
-  expect(persistTierMock).toHaveBeenCalledWith('haiku')
-  expect(setAppStateMock).toHaveBeenCalledTimes(1)
+  expect(clearLegacyMock).not.toHaveBeenCalled()
 })
 
-test('switchTier(null) — custom API user: clears tier, returns to stored main model, keeps credentials', async () => {
+test('switchTier(haiku) global scope — STILL session commit (tiers never persist)', async () => {
   let committed: any = null
   const syncMock = mock(() => {})
-  const persistTierMock = mock(() => {})
+  const { switchTier } = await import('./switchModelProfile.js')
+  switchTier('haiku', {
+    syncToDisk: syncMock,
+    commitAppState: (updater) => {
+      committed = updater({ mainLoopModel: 'old', mainLoopModelForSession: null })
+    },
+    resolveTierModel: () => 'deepseek-v4-flash',
+    resolveDefaultModel: () => 'unused',
+    getStoredMainModel: () => 'deepseek-v4-pro[1m]',
+    sessionScoped: false,
+  })
+  // 即使 DOGE_MODEL_SCOPE=global / --save，档位别名也不持久化：
+  // 把 tier 模型写进主模型槽位是旧 bug（重启后所有档位 fallback 到它）
+  expect(committed.mainLoopModel).toBe('old')
+  expect(committed.mainLoopModelForSession).toBe('deepseek-v4-flash')
+  expect(syncMock).not.toHaveBeenCalled()
+})
+
+test('switchTier(null) session — commits the provider default (sonnet tier or main model)', async () => {
+  let committed: any = null
+  const { switchTier } = await import('./switchModelProfile.js')
+  switchTier(null, {
+    syncToDisk: mock(() => {}),
+    commitAppState: (updater) => {
+      committed = updater({ mainLoopModel: 'deepseek-v4-pro', mainLoopModelForSession: 'x' })
+    },
+    resolveTierModel: () => 'unused',
+    resolveDefaultModel: () => 'deepseek-v4-air',
+    getStoredMainModel: () => 'deepseek-v4-pro[1m]',
+    sessionScoped: true,
+  })
+  // Default = 当前 provider 的 sonnet 档（未配置则回落主模型），而非
+  // 清掉会话覆盖回到启动基线 —— 否则会话内切换 provider 后选 Default
+  // 会错误回到旧 provider 的模型
+  expect(committed.mainLoopModelForSession).toBe('deepseek-v4-air')
+  expect(committed.mainLoopModel).toBe('deepseek-v4-pro')
+})
+
+test('switchTier(null) session — unresolvable default (first-party) clears the session override', async () => {
+  let committed: any = null
+  const { switchTier } = await import('./switchModelProfile.js')
+  switchTier(null, {
+    syncToDisk: mock(() => {}),
+    commitAppState: (updater) => {
+      committed = updater({ mainLoopModel: 'claude-sonnet-5', mainLoopModelForSession: 'x' })
+    },
+    resolveTierModel: () => 'unused',
+    resolveDefaultModel: () => null,
+    getStoredMainModel: () => undefined,
+    sessionScoped: true,
+  })
+  expect(committed.mainLoopModelForSession).toBeNull()
+})
+
+test('switchTier(null) global custom user — scrubs legacy tier state, returns to stored main model', async () => {
+  let committed: any = null
+  const syncMock = mock(() => {})
+  const clearLegacyMock = mock(() => {})
   const { switchTier } = await import('./switchModelProfile.js')
   switchTier(null, {
     syncToDisk: syncMock,
@@ -202,17 +266,19 @@ test('switchTier(null) — custom API user: clears tier, returns to stored main 
       committed = updater({ mainLoopModel: 'deepseek-v4-flash', mainLoopModelForSession: 'x' })
     },
     resolveTierModel: () => 'unused',
-    persistTier: persistTierMock,
+    resolveDefaultModel: () => 'unused',
+    clearLegacyTier: clearLegacyMock,
     getStoredMainModel: () => 'deepseek-v4-pro[1m]',
+    sessionScoped: false,
   })
   expect(committed.mainLoopModel).toBe('deepseek-v4-pro[1m]')
   expect(committed.mainLoopModelForSession).toBeNull()
-  // 清层级选择；凭证与主模型槽位不动（不调 syncToDisk）
-  expect(persistTierMock).toHaveBeenCalledWith(null)
+  expect(clearLegacyMock).toHaveBeenCalledTimes(1)
+  // 凭证与主模型槽位不动（不调 syncToDisk）
   expect(syncMock).not.toHaveBeenCalled()
 })
 
-test('switchTier(null) — first-party user: commits mainLoopModel as null, clears credentials (legacy default path)', async () => {
+test('switchTier(null) global first-party — commits mainLoopModel as null, clears credentials (legacy default path)', async () => {
   let committed: any = null
   let synced: any = null
   const { switchTier } = await import('./switchModelProfile.js')
@@ -222,8 +288,10 @@ test('switchTier(null) — first-party user: commits mainLoopModel as null, clea
       committed = updater({ mainLoopModel: 'haiku', mainLoopModelForSession: 'x' })
     },
     resolveTierModel: () => 'unused',
-    persistTier: () => {},
+    resolveDefaultModel: () => null,
+    clearLegacyTier: mock(() => {}),
     getStoredMainModel: () => undefined,
+    sessionScoped: false,
   })
   expect(committed.mainLoopModel).toBeNull()
   expect(committed.mainLoopModelForSession).toBeNull()
@@ -325,73 +393,49 @@ test('switchModelProfileAtomic — commit failure reverts disk via syncToDisk(ol
   expect(syncMock).toHaveBeenCalledWith('qwen3.7-max', true)
 })
 
-test('switchTier(opus) — resolves real opus model ID with [1m] suffix preserved, main-model slot untouched', async () => {
-  const setAppStateMock = mock(() => {})
-  const syncMock = mock(() => {})
-  const persistTierMock = mock(() => {})
-
-  const { switchTier } = await import('./switchModelProfile.js')
-  switchTier('opus', {
-    syncToDisk: syncMock,
-    commitAppState: setAppStateMock,
-    resolveTierModel: () => 'deepseek-v4-pro[1m]',
-    persistTier: persistTierMock,
-    getStoredMainModel: () => 'deepseek-v4-flash',
-  })
-
-  expect(syncMock).not.toHaveBeenCalled()
-  expect(persistTierMock).toHaveBeenCalledWith('opus')
-})
-
-test('switchTier(haiku) — no stored main model still persists tier without crashing', async () => {
-  const setAppStateMock = mock(() => {})
-  const persistTierMock = mock(() => {})
-
-  const { switchTier } = await import('./switchModelProfile.js')
-  switchTier('haiku', {
-    syncToDisk: () => {},
-    commitAppState: setAppStateMock,
-    resolveTierModel: () => 'deepseek-v4-flash',
-    persistTier: persistTierMock,
-    getStoredMainModel: () => undefined,
-  })
-
-  expect(persistTierMock).toHaveBeenCalledWith('haiku')
-  expect(setAppStateMock).toHaveBeenCalledTimes(1)
-})
-
-test('switchTier(haiku) — commitAppState mainLoopModel === resolved real tier model ID', async () => {
+test('switchTier(opus) — resolved model lands in the SESSION slot with [1m] suffix preserved', async () => {
   let committed: any = null
   const { switchTier } = await import('./switchModelProfile.js')
+  switchTier('opus', {
+    syncToDisk: mock(() => {}),
+    commitAppState: (updater) => {
+      committed = updater({ mainLoopModel: 'deepseek-v4-flash', mainLoopModelForSession: 'sess' })
+    },
+    resolveTierModel: () => 'deepseek-v4-pro[1m]',
+    resolveDefaultModel: () => 'unused',
+    getStoredMainModel: () => 'deepseek-v4-flash',
+  })
+  // 核心：会话槽位拿到的是真实 tier 模型 ID（含 [1m] 后缀），主模型槽不动
+  expect(committed.mainLoopModelForSession).toBe('deepseek-v4-pro[1m]')
+  expect(committed.mainLoopModel).toBe('deepseek-v4-flash')
+})
+
+test('switchTier(haiku) — no stored main model still commits without crashing', async () => {
+  const setAppStateMock = mock(() => {})
+  const { switchTier } = await import('./switchModelProfile.js')
   switchTier('haiku', {
     syncToDisk: () => {},
-    commitAppState: (updater) => {
-      committed = updater({ mainLoopModel: 'old-haiku', mainLoopModelForSession: 'sess' })
-    },
+    commitAppState: setAppStateMock,
     resolveTierModel: () => 'deepseek-v4-flash',
-    persistTier: () => {},
-    getStoredMainModel: () => 'deepseek-v4-pro[1m]',
+    resolveDefaultModel: () => null,
+    getStoredMainModel: () => undefined,
   })
-  // 核心：mainLoopModel 是真实 tier 模型 ID，不是字面 'haiku'
-  expect(committed.mainLoopModel).toBe('deepseek-v4-flash')
-  expect(committed.mainLoopModelForSession).toBeNull()
+  expect(setAppStateMock).toHaveBeenCalledTimes(1)
 })
 
 test('switchTier(haiku) — resolveTierModel returns main model when no tier env (graceful degradation)', async () => {
   // 模拟降级：resolveTierModel 解析不出真实 tier 模型，回落主模型 ID
-  const setAppStateMock = mock(() => {})
   let committed: any = null
   const { switchTier } = await import('./switchModelProfile.js')
   switchTier('haiku', {
     syncToDisk: () => {},
     commitAppState: (updater) => {
       committed = updater({ mainLoopModel: 'old', mainLoopModelForSession: null })
-      setAppStateMock()
     },
     resolveTierModel: () => 'main-model-id',
-    persistTier: () => {},
+    resolveDefaultModel: () => null,
     getStoredMainModel: () => 'main-model-id',
   })
   // 降级为真实主模型 ID 仍优于现状（不发出字面 'haiku'）
-  expect(committed.mainLoopModel).toBe('main-model-id')
+  expect(committed.mainLoopModelForSession).toBe('main-model-id')
 })

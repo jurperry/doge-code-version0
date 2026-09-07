@@ -12,7 +12,8 @@ import { doRemoveProvider, RemoveProviderPicker } from './provider-remove.js'
 const USAGE = [
   'Usage:',
   '  /provider                    Open the provider manager',
-  '  /provider add [model]        Add or edit a provider: API format, base URL, API key,',
+  '  /provider add [model]        Add or edit a provider: provider name (unique, e.g. glm官方),',
+  '                              API format, base URL, API key,',
   '                              key type (DOGE_API_KEY x-api-key / ANTHROPIC_AUTH_TOKEN Bearer),',
   '                              context window, and main / opus / sonnet / haiku models',
   '  /provider remove [model]     Remove a saved provider (by its main model)',
@@ -73,7 +74,7 @@ export function ProviderMenu({ onDone }: ProviderMenuProps): React.ReactNode {
     {
       value: '__ADD__',
       label: 'Add new provider…',
-      description: 'API format, base URL, API key + key type, main / opus / sonnet / haiku models',
+      description: 'Provider name (unique), API format, base URL, API key + key type, main / opus / sonnet / haiku models',
     },
     ...(entries.length > 0
       ? [{

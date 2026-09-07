@@ -2,10 +2,11 @@ import * as React from 'react'
 import { Box, Text } from '../../ink.js'
 import { Select } from '../../components/CustomSelect/index.js'
 import { useSetAppState } from '../../state/AppState.js'
-import type { ModelProfile } from '../../utils/customApiStorage.js'
+import { readCustomApiStorage, type ModelProfile } from '../../utils/customApiStorage.js'
 import {
   buildModelProfile,
   defaultProviderSaveDeps,
+  findProviderNameConflict,
   maskSecret,
   saveAndActivateProvider,
   validateProviderForm,
@@ -14,11 +15,15 @@ import {
   type AuthTokenType,
 } from './provider-storage.js'
 
-type FormStep = 'provider' | 'baseURL' | 'apiKey' | 'authTokenType' | 'model' | 'contextWindow' | 'opus' | 'sonnet' | 'haiku' | 'review'
+type FormStep = 'name' | 'provider' | 'baseURL' | 'apiKey' | 'authTokenType' | 'model' | 'contextWindow' | 'opus' | 'sonnet' | 'haiku' | 'review'
 
-const STEP_ORDER: FormStep[] = ['provider', 'baseURL', 'apiKey', 'authTokenType', 'model', 'contextWindow', 'opus', 'sonnet', 'haiku', 'review']
+const STEP_ORDER: FormStep[] = ['name', 'provider', 'baseURL', 'apiKey', 'authTokenType', 'model', 'contextWindow', 'opus', 'sonnet', 'haiku', 'review']
 
 const STEP_META: Record<Exclude<FormStep, 'review'>, { title: string; hint: string }> = {
+  name: {
+    title: 'Provider name',
+    hint: 'Display name for this API access, e.g. deepseek官方 / glm官方. Shown in /model as Custom model(name) and in /provider list. Must be unique across providers.',
+  },
   provider: {
     title: 'API format',
     hint: 'Protocol used at the API boundary. anthropic = /v1/messages, openai = /v1/chat/completions, responses = /v1/responses.',
@@ -70,6 +75,7 @@ const AUTH_TOKEN_TYPE_OPTIONS: { value: AuthTokenType; label: string; descriptio
 
 function initialValues(existing?: ModelProfile, initialModel?: string): ProviderFormValues {
   return {
+    providerName: existing?.providerName ?? '',
     provider: existing?.provider ?? 'anthropic',
     baseURL: existing?.baseURL ?? '',
     apiKey: existing?.apiKey ?? '',
@@ -84,6 +90,7 @@ function initialValues(existing?: ModelProfile, initialModel?: string): Provider
 
 function prefillForStep(step: FormStep, values: ProviderFormValues): string {
   switch (step) {
+    case 'name': return values.providerName ?? ''
     case 'baseURL': return values.baseURL ?? ''
     case 'apiKey': return values.apiKey ?? ''
     case 'model': return values.model ?? ''
@@ -122,7 +129,11 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
   }, [step])
 
   const handleSave = React.useCallback(async () => {
-    const validationError = validateProviderForm(values)
+    const validationError = validateProviderForm(
+      values,
+      readCustomApiStorage().modelProfiles ?? [],
+      existing?.model,
+    )
     if (validationError) {
       setError(validationError)
       return
@@ -137,6 +148,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
       ].filter(Boolean).join(', ')
       onDone(
         `Provider saved and activated: ${profile.model}` +
+        (profile.providerName ? ` (${profile.providerName})` : '') +
         (tiers ? ` (${tiers})` : ''),
       )
     } catch (err) {
@@ -145,7 +157,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         { display: 'system' },
       )
     }
-  }, [values, onDone, setAppState])
+  }, [values, onDone, setAppState, existing])
 
   const handleSelect = React.useCallback((value: string) => {
     setError(undefined)
@@ -171,6 +183,26 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
     }
     // Input steps: Enter submits whatever is in the typed buffer.
     const raw = typedRef.current.trim()
+    if (step === 'name') {
+      if (!raw) {
+        setError('Provider name is required (e.g. deepseek官方).')
+        return
+      }
+      const conflict = findProviderNameConflict(
+        raw,
+        readCustomApiStorage().modelProfiles ?? [],
+        existing?.model,
+      )
+      if (conflict) {
+        setError(
+          `Provider name '${raw}' is already used by ${conflict.model}. Provider names must be unique.`,
+        )
+        return
+      }
+      setValues(v => ({ ...v, providerName: raw }))
+      advance()
+      return
+    }
     if (step === 'baseURL') {
       if (!raw && values.provider !== 'anthropic') {
         setError(`Base URL is required for ${values.provider} providers.`)
@@ -258,6 +290,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
     )
   } else if (step === 'review') {
     const reviewOptions = [
+      { value: 'edit:name', label: `Provider name: ${values.providerName || '(not set)'}`, description: 'Change' },
       { value: 'edit:provider', label: `API format: ${values.provider}`, description: 'Change' },
       { value: 'edit:baseURL', label: `Base URL: ${values.baseURL || '(official API)'}`, description: 'Change' },
       { value: 'edit:apiKey', label: `API key: ${maskSecret(values.apiKey)}`, description: 'Change' },
@@ -274,7 +307,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         options={reviewOptions}
         onChange={handleSelect}
         onCancel={handleCancel}
-        visibleOptionCount={10}
+        visibleOptionCount={11}
       />
     )
   } else {

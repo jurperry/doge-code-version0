@@ -2,6 +2,7 @@ import {
   getModelProfile,
   healStoredCredentials,
   readCustomApiStorage,
+  writeCustomApiStorage,
   type TierAliasName,
 } from '../customApiStorage.js'
 
@@ -12,18 +13,22 @@ const TIER_ENV_KEYS: Record<TierAliasName, string> = {
 }
 
 /**
- * Resolve a tier's configured model from persisted state ONLY — snapshot
- * first, then the main model's profile. Deliberately does NOT fall back to
- * the main model: injecting the main model as a tier env var would make
- * every tier look "explicitly configured" with the same model, recreating
- * the all-tiers-show-one-model confusion this restore exists to fix.
- * Returns undefined when the tier has no explicit configuration.
+ * Resolve a tier's configured model from the MAIN MODEL'S OWN PROFILE only.
+ *
+ * Since the 2026-09-07 provider refactor the deprecated global tierModels
+ * snapshot is deliberately ignored: it was captured from whichever terminal
+ * last switched tiers/profiles and could describe a DIFFERENT provider,
+ * polluting every other terminal's tier env (and via the picker, their
+ * "custom model" list). Tier mappings are per-profile configuration.
+ * Deliberately does NOT fall back to the main model: injecting the main
+ * model as a tier env var would make every tier look "explicitly
+ * configured" with the same model, recreating the all-tiers-show-one-model
+ * confusion. Returns undefined when the tier has no explicit configuration.
  */
 function resolveTierModel(
   tier: TierAliasName,
   mainModel: string,
 ): string | undefined {
-  const snapshot = readCustomApiStorage().tierModels
   const profile = getModelProfile(mainModel)
   const profileField =
     tier === 'opus'
@@ -31,7 +36,7 @@ function resolveTierModel(
       : tier === 'sonnet'
         ? profile?.defaultSonnetModel
         : profile?.defaultHaikuModel
-  return snapshot?.[tier] ?? profileField
+  return profileField
 }
 
 /**
@@ -47,10 +52,18 @@ function resolveTierModel(
  * vars that are NOT already set, so a start script's explicit configuration
  * always wins.
  *
- * Restored state:
- *  - tier→model mapping (tierModels snapshot, falling back to the main
- *    model's profile) → ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL
- *  - tier selection (activeTier) → ANTHROPIC_MODEL = that tier's model
+ * Restored state (per-provider, session-isolated):
+ *  - tier→model mapping from the STORED MAIN MODEL'S OWN profile
+ *    (defaultOpusModel/defaultSonnetModel/defaultHaikuModel) →
+ *    ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL
+ *
+ * Deliberately NOT restored:
+ *  - the deprecated global activeTier → ANTHROPIC_MODEL injection. Tier
+ *    selections are session-scoped; a tier picked in another terminal (or a
+ *    previous run) must not decide this terminal's main model. Every launch
+ *    starts on the provider default (sonnet tier, falling back to the main
+ *    model). Legacy activeTier/tierModels fields are scrubbed from secure
+ *    storage here as a one-time migration.
  */
 export function restoreTierStateFromStorage(): void {
   const storage = readCustomApiStorage()
@@ -58,25 +71,28 @@ export function restoreTierStateFromStorage(): void {
   // First-party users have no custom API config to restore.
   if (!mainModel) return
 
+  // One-time migration: scrub deprecated global tier state (secure storage
+  // only — saveGlobalConfig is not safe before enableConfigs() at startup).
+  // Runs BEFORE the credential heal so the heal reads the post-scrub state.
+  if (storage.activeTier !== undefined || storage.tierModels !== undefined) {
+    writeCustomApiStorage({
+      ...storage,
+      activeTier: undefined,
+      tierModels: undefined,
+    })
+  }
+
   // Self-heal first: repair top-level credentials wiped by profile switches
   // (pre-clearCredentials behavior) from the intact modelProfiles entry, so a
   // bare `doge` launch can authenticate again without manual re-setup.
   healStoredCredentials()
 
-  // 1. Restore the tier→model mapping for all three tiers.
+  // Restore the tier→model mapping for all three tiers from the active
+  // profile's own tier slots.
   for (const tier of ['opus', 'sonnet', 'haiku'] as const) {
     const envKey = TIER_ENV_KEYS[tier]
     if (process.env[envKey]) continue
     const model = resolveTierModel(tier, mainModel)
     if (model) process.env[envKey] = model
-  }
-
-  // 2. If a tier was selected via /model, the main loop model follows it.
-  // Falls back to the main model only here (a persisted tier selection with
-  // a lost mapping must not degrade to the bare alias string).
-  const activeTier = storage.activeTier
-  if (activeTier && !process.env.ANTHROPIC_MODEL) {
-    const tierModel = resolveTierModel(activeTier, mainModel) ?? mainModel
-    if (tierModel) process.env.ANTHROPIC_MODEL = tierModel
   }
 }

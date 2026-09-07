@@ -189,9 +189,16 @@ export type GlobalConfig = {
     model?: string
     savedModels?: string[]
     modelProfiles?: unknown[]
-    /** Tier selected via /model (Opus/Sonnet/Haiku). Absent = main model. */
+    /**
+     * @deprecated Tier selections are session-scoped (2026-09-07 provider
+     * refactor). No longer written or restored; scrubbed by
+     * clearLegacyTierState().
+     */
     activeTier?: 'opus' | 'sonnet' | 'haiku'
-    /** Last known tier→model mapping snapshot for restart recovery. */
+    /**
+     * @deprecated Cross-provider global snapshot; tier mappings now live on
+     * each ModelProfile. No longer written or restored.
+     */
     tierModels?: {
       opus?: string
       sonnet?: string

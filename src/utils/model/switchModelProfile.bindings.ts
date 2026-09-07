@@ -13,11 +13,12 @@
  *
  * `sessionScoped` (default true) is the multi-terminal isolation switch:
  * when set, profile/tier switches mutate env + AppState only — applyModelProfile
- * skips its storage write, persistTierSelection / syncToDisk are replaced by
- * no-ops, and the commit targets `mainLoopModelForSession`. Pass false to
- * restore the legacy persist-to-disk behavior (e.g. /model <name> --save).
+ * skips its storage write, syncToDisk is replaced by a no-op, and the commit
+ * targets `mainLoopModelForSession`. Pass false to restore the legacy
+ * persist-to-disk behavior (e.g. /model <name> --save). Tier aliases are
+ * session-scoped in BOTH modes (they never persist — see switchTier).
  */
-import { applyModelProfile, persistTierSelection, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
+import { applyModelProfile, clearLegacyTierState, getModelProfile, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
 import {
   switchModelProfileAtomic as switchModelProfileAtomicCore,
   switchTier as switchTierCore,
@@ -65,6 +66,74 @@ export async function switchModelProfileAtomicBound(
   })
 }
 
+/**
+ * The profile persisted as the DISK baseline (storage.model's own profile).
+ * After a session-scoped provider switch env already carries the new
+ * provider's tiers, so this storage fallback only matters at launch when
+ * the session and the disk baseline coincide.
+ */
+function storedMainProfile() {
+  const storedMain = readCustomApiStorage().model?.trim()
+  return storedMain ? { storedMain, profile: getModelProfile(storedMain) } : { storedMain: undefined, profile: undefined }
+}
+
+function storedProfileTierField(
+  profile: ModelProfile | undefined,
+  tier: 'opus' | 'sonnet' | 'haiku',
+): string | undefined {
+  return tier === 'opus'
+    ? profile?.defaultOpusModel
+    : tier === 'sonnet'
+      ? profile?.defaultSonnetModel
+      : profile?.defaultHaikuModel
+}
+
+/** The profile the ACTIVE env describes: env.ANTHROPIC_MODEL is written by
+ *  applyModelProfile on every (session or global) provider switch, so when
+ *  it is set this is the provider actually in effect — which after a
+ *  session-scoped switch may differ from the disk baseline profile. */
+function activeEnvProfile() {
+  const activeMain = process.env.ANTHROPIC_MODEL?.trim()
+  return {
+    activeMain,
+    profile: activeMain ? getModelProfile(activeMain) : undefined,
+  }
+}
+
+/**
+ * Resolve what "Default (recommended)" maps to RIGHT NOW: the ACTIVE
+ * provider's Sonnet-tier model, falling back to its main model when the
+ * Sonnet tier is not configured. Returns null when neither is knowable
+ * (first-party user with no custom API config).
+ *
+ * Priority: env sonnet tier → ACTIVE provider's sonnet field / main model
+ * → disk-baseline profile's sonnet field → disk-baseline main model. The
+ * active provider (env) outranks the disk baseline: after a session-scoped
+ * switch the baseline's tier model id must NOT win, or Default would hand
+ * one provider's model name to another provider's endpoint. The baseline
+ * branch only runs at launch, when env and baseline coincide.
+ *
+ * Single source of truth for the Default semantics: switchTier(null)
+ * commits the result of this chain, and the /model command renders the
+ * same value in its "Set model to …" message. Reading the persisted disk
+ * model instead showed a STALE provider's model after a session-scoped
+ * switch (disk baseline ≠ active provider).
+ */
+export function resolveSessionDefaultModel(): string | null {
+  const { activeMain, profile: activeProfile } = activeEnvProfile()
+  if (activeMain || activeProfile) {
+    return process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+      || storedProfileTierField(activeProfile, 'sonnet')
+      || activeMain
+      || null
+  }
+  const { storedMain, profile: baselineProfile } = storedMainProfile()
+  return process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    || storedProfileTierField(baselineProfile, 'sonnet')
+    || storedMain
+    || null
+}
+
 export function switchTierBound(
   tier: TierAlias,
   deps: BoundSwitchDeps,
@@ -75,20 +144,36 @@ export function switchTierBound(
     commitAppState: bindCommit(deps.setAppState),
     sessionScoped,
     resolveTierModel: (t) => {
-      // Direct env lookup: bypass parseUserSpecifiedModel's fallback chain
-      // which consults getUserSpecifiedModelSetting() and can be polluted by
-      // a previous tier switch's mainLoopModelOverride (e.g. after switching
-      // to Haiku, getDefaultOpusModel would fallback to Haiku's real model).
+      // Direct env lookup first: env reflects the ACTIVE provider (start
+      // script or a just-applied profile) and bypasses
+      // parseUserSpecifiedModel's fallback chain, which consults
+      // getUserSpecifiedModelSetting() and can be polluted by a previous
+      // tier switch's mainLoopModelOverride (e.g. after switching to Haiku,
+      // getDefaultOpusModel would fallback to Haiku's real model).
+      // When env lacks the tier var (profile has none configured —
+      // applyModelProfile deletes it), fall back within the ACTIVE
+      // provider (its profile field, then its main model) before ever
+      // consulting the disk baseline: a baseline tier model id sent to the
+      // active provider's endpoint is a wrong-model request.
       const envKey =
         t === 'opus' ? 'ANTHROPIC_DEFAULT_OPUS_MODEL'
         : t === 'sonnet' ? 'ANTHROPIC_DEFAULT_SONNET_MODEL'
         : 'ANTHROPIC_DEFAULT_HAIKU_MODEL'
-      return process.env[envKey] || process.env.ANTHROPIC_MODEL || t
+      const { activeMain, profile: activeProfile } = activeEnvProfile()
+      if (activeMain || activeProfile) {
+        return process.env[envKey]
+          || storedProfileTierField(activeProfile, t)
+          || activeMain
+          || t
+      }
+      const { storedMain, profile } = storedMainProfile()
+      return process.env[envKey]
+        || storedProfileTierField(profile, t)
+        || storedMain
+        || t
     },
-    persistTier: (t) => {
-      if (sessionScoped) return
-      persistTierSelection(t)
-    },
+    resolveDefaultModel: resolveSessionDefaultModel,
+    clearLegacyTier: clearLegacyTierState,
     getStoredMainModel: () => {
       // Persisted main model from custom API storage; trimmed, may be ''.
       const stored = readCustomApiStorage().model?.trim()

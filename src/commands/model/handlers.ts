@@ -41,6 +41,9 @@ const TIER_ALIASES = new Set<ModelInput>(MODEL_FAMILY_ALIASES)
  * Scope: 'session' (default) keeps every switch in-process (no disk writes
  * — concurrent terminals are unaffected); 'global' restores the legacy
  * persist-everywhere behavior (also reachable via `/model <name> --save`).
+ * Tier aliases (opus/sonnet/haiku) are session-scoped in BOTH modes — see
+ * switchTier: a persisted tier would decide the main model of every other
+ * terminal and every future launch.
  *
  * This function is pure (effects only via injected ctx). model.tsx wires it
  * to the live bindings; tests pass mocks.
