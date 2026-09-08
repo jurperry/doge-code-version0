@@ -199,6 +199,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 - `debug_updates_3.md` — Chapter 26+（凭据覆盖/effort 一致性/模型切换）
 - `debug_updates_4.md` — 最新修改（effort 全链路修复/thinking 守卫）
 - `debug_updates_5.md` — TUI 卡顿修复（skills 跳过 node_modules / `/clear` 软清 fileIndex / 非 git 大目录限深扫描）+ 新增 xhigh 思考档位 + 原生模型 ID 升级 Opus 4.6→4.8、Sonnet 4.6→5
+- 多行输入被压成一行（2026-09-08）：`BaseTextInput` 多行模式由 `truncate-end` 改 `wrap`。Ink 的 `truncate*` 是对**整串**量宽度再切（`\n` 计 0 宽），所以多行文本只要总宽超过终端宽度就会被拦腰截断、尾部静默丢弃——首行超宽时更是只剩一行加一个 `…`。表现为「打了一屏多行字，发送后 Esc 打断回填，只剩一行，没法在后面增删」。`wrap` 由 render-node-to-output 按 `\n` 分行后逐行处理，不吞内容。决策抽成 `inputTextWrapMode()`，单行输入（搜索框等）保持 `truncate-end` 不变。见 `src/components/BaseTextInput.tsx` + `src/components/BaseTextInput.test.ts`
 
 ## 常见问题速查
 
@@ -214,6 +215,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 | Windows Computer Use | 管理员应用需要管理员终端；Electron/CEF 自动 SendInput |
 | 依赖/运行报错 | `bun install` + `bun link`，确认 Bun 1.3.5+ |
 | 首次运行报错 | 确保 `~/.doge/.claude.json` 中 `hasCompletedOnboarding: true` |
+| 多行输入只剩一行 + `…` | 已修（`BaseTextInput` 多行用 `wrap`）；若仍复现，检查是否被 `maxVisibleLines` 视口裁剪（仅全屏模式生效） |
 
 ## 其他参考文档
 

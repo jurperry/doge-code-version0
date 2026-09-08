@@ -110,7 +110,7 @@ export function BaseTextInput(t0) {
   }
   const T0 = Box;
   const T1 = Text;
-  const t4 = "truncate-end";
+  const t4 = inputTextWrapMode(props.multiline);
   const t5 = showPlaceholder && props.placeholderElement ? props.placeholderElement : showPlaceholder && renderedPlaceholder ? <Ansi>{renderedPlaceholder}</Ansi> : <Ansi>{renderedValue}</Ansi>;
   const t6 = showArgumentHint && <Text dimColor={true}>{props.value?.endsWith(" ") ? "" : " "}{props.argumentHint}</Text>;
   let t7;
@@ -136,6 +136,33 @@ export function BaseTextInput(t0) {
     t8 = $[13];
   }
   return t8;
+}
+
+/**
+ * Which Ink text-wrap mode the input should render with.
+ *
+ * Multi-line inputs must NOT use a `truncate*` mode. Ink's truncate modes
+ * measure the display width of the WHOLE string — an embedded "\n" counts as
+ * zero width — and then cut it to the terminal width in one pass. For a
+ * multi-line prompt that means the cut lands mid-way through the text and
+ * everything after it is dropped: a five-line prompt wider than the terminal
+ * renders as its first line plus a trailing "…", and a prompt whose first line
+ * alone exceeds the width collapses to exactly one line. The user's text is
+ * still in the buffer, but they can only see (and therefore only edit) the
+ * first screenful.
+ *
+ * `wrap` is line-aware: render-node-to-output splits on "\n" and wraps each
+ * line independently, so every typed line stays visible. Cursor already
+ * soft-wraps to the input's column budget, so this doesn't double-wrap — it
+ * only kicks in if Ink's available width ends up narrower than that budget.
+ *
+ * Single-line inputs keep `truncate-end`: they're meant to stay exactly one
+ * row tall, and their content is already clamped by the caller.
+ */
+export function inputTextWrapMode(
+  multiline: boolean | undefined,
+): 'wrap' | 'truncate-end' {
+  return multiline ? 'wrap' : 'truncate-end'
 }
 
 function eventSafeCanSubmitAfterPaste(input: string): boolean {
