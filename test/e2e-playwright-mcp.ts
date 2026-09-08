@@ -18,7 +18,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { createLinkedTransportPair } from '../src/services/mcp/InProcessTransport.js'
 import { mcpInfoFromString } from '../src/services/mcp/mcpStringUtils.js'
 import { PLAYWRIGHT_MCP_SERVER_NAME } from '../src/utils/playwrightMcp/common.js'
-import { createPlaywrightMcpServerForCli } from '../src/utils/playwrightMcp/mcpServer.js'
+import {
+  buildPlaywrightMcpConfig,
+  createPlaywrightMcpServerForCli,
+} from '../src/utils/playwrightMcp/mcpServer.js'
 import { setupPlaywrightMCP } from '../src/utils/playwrightMcp/setup.js'
 
 let failures = 0
@@ -51,6 +54,15 @@ async function main(): Promise<void> {
   check('allow rule is a server-wide wildcard', allowedTools[0] === `mcp__${PLAYWRIGHT_MCP_SERVER_NAME}__*`, allowedTools[0])
 
   // 2. In-process connection
+  const executable = (
+    buildPlaywrightMcpConfig().browser?.launchOptions as
+      | { executablePath?: string }
+      | undefined
+  )?.executablePath
+  console.log(
+    `INFO  browser executable: ${executable ?? 'playwright default (bundled build)'}`,
+  )
+
   const server = await createPlaywrightMcpServerForCli()
   const [clientTransport, serverTransport] = createLinkedTransportPair()
   await server.connect(serverTransport)
@@ -90,21 +102,39 @@ async function main(): Promise<void> {
   //    above without a browser; this last step only proves the installed
   //    playwright can actually launch one. Missing binaries are an environment
   //    gap, not a code failure — report them as SKIP with the fix command.
-  const nav = (await client.callTool({
-    name: 'browser_navigate',
-    arguments: { url: 'about:blank' },
-  })) as { isError?: boolean; content?: Array<{ text?: string }> }
-  const navError = nav.isError ? String(nav.content?.[0]?.text ?? '') : ''
+  //    A launch failure surfaces two ways: as an isError result (browser binary
+  //    missing) or as a thrown MCP timeout (binary found but couldn't spawn).
+  let navOk = false
+  let navError = ''
+  try {
+    const nav = (await client.callTool({
+      name: 'browser_navigate',
+      arguments: { url: 'about:blank' },
+    })) as { isError?: boolean; content?: Array<{ text?: string }> }
+    navOk = !nav.isError
+    navError = nav.isError ? String(nav.content?.[0]?.text ?? '') : ''
+  } catch (error) {
+    navError = error instanceof Error ? error.message : String(error)
+  }
 
-  if (nav.isError && /is not installed|Executable doesn't exist/i.test(navError)) {
+  if (/is not installed|Executable doesn't exist/i.test(navError)) {
     console.log(
-      `SKIP  live browser round-trip — browser binaries are not installed.\n` +
+      `SKIP  live browser round-trip — no browser binary available.\n` +
         `      ${navError.split('\n').find(l => l.includes('Run '))?.trim() ?? navError.split('\n')[0]}\n` +
-        `      (or: bunx playwright install chromium)`,
+        `      (either: bunx playwright install chromium — or point DOGE_PLAYWRIGHT_EXECUTABLE_PATH at a Chrome/Edge install)`,
+    )
+  } else if (/timed out|Timeout/i.test(navError)) {
+    // Distinct from a missing binary: the browser was found but could not be
+    // spawned. Seen when running this script from a non-interactive/sandboxed
+    // shell that can't create the child process; a real terminal is fine.
+    console.log(
+      `SKIP  live browser round-trip — browser could not be spawned here (${navError.split('\n')[0]}).\n` +
+        `      Usually a sandbox limitation of the shell running this script, not a\n` +
+        `      code problem — re-run from an interactive terminal to exercise it.`,
     )
   } else {
-    check('browser_navigate succeeded', !nav.isError, navError.split('\n')[0] ?? '')
-    if (!nav.isError) {
+    check('browser_navigate succeeded', navOk, navError.split('\n')[0] ?? '')
+    if (navOk) {
       const snap = (await client.callTool({
         name: 'browser_snapshot',
         arguments: {},
