@@ -17,6 +17,7 @@ const MANAGED_ENV = [
   'DOGE_PLAYWRIGHT_EXECUTABLE_PATH',
   'DOGE_PLAYWRIGHT_USE_SYSTEM_BROWSER',
   'DOGE_PLAYWRIGHT_OUTPUT_DIR',
+  'DOGE_PLAYWRIGHT_NODE_PATH',
 ] as const
 
 const saved: Record<string, string | undefined> = {}
@@ -47,6 +48,18 @@ test('finds a Node executable and the CLI entrypoint', () => {
   expect(existsSync(node!)).toBe(true)
   expect(cli).toBeTruthy()
   expect(existsSync(cli!)).toBe(true)
+})
+
+test('DOGE_PLAYWRIGHT_NODE_PATH overrides the Node lookup', () => {
+  // The desktop shell uses this to hand the server the Node runtime it ships
+  // (Electron with ELECTRON_RUN_AS_NODE) when the machine has no Node on PATH.
+  const real = findNodeExecutable()!
+  process.env.DOGE_PLAYWRIGHT_NODE_PATH = real
+  expect(findNodeExecutable()).toBe(real)
+  expect(buildPlaywrightMcpCommand()!.command).toBe(real)
+
+  process.env.DOGE_PLAYWRIGHT_NODE_PATH = 'C:\\nope\\node.exe'
+  expect(findNodeExecutable()).toBe(real)
 })
 
 test('spawns the CLI under Node with chromium + isolated + output dir', () => {

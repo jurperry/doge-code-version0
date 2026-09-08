@@ -36,7 +36,7 @@
    | `--remote-debugging-pipe`（fd 3/4） | ✅ | ❌ 超时 |
    | `--remote-debugging-port` + WebSocket | ✅ | ❌ 超时 |
 
-   Bun 能 `fetch()` 通 CDP 的 HTTP 端点，挂的是管道/WebSocket 传输层。doge 跑在 Bun 上，所以**必须**用 Node 子进程；改回 in-process 会直接复现「navigate 超时 180s」。**坑 2**：`allowedTools` 必须手工拼 `mcp__<server>__*` —— `buildMcpToolName()` 会把通配符 `*` 规范化成 `_`，生成匹配不到任何工具的死规则。**浏览器来源**：默认**复用系统已装的 Chrome / Edge**（`detectSystemBrowser()` 按平台探测常见路径 → `--executable-path`），零下载开箱即用。别指望"以前装过 @playwright/mcp 就能用"：旧版会自动下载一批 `mcp-chrome-<hash>`（本机已攒 8 个、几百 MB），但那是按它自己的版本 hash 命名的，跟 playwright-core 绑定的 chromium 修订版（当前 **1243**）互不相认，换版本就得重下。机器上一个浏览器都没有、或没有 Node 时才需要 `bunx playwright install chromium`（没 Node 则整个 server 不注册）；`DOGE_PLAYWRIGHT_EXECUTABLE_PATH` 可强制指定、`DOGE_PLAYWRIGHT_USE_SYSTEM_BROWSER=0` 关探测改用自带版本。浏览器仍是**首次工具调用时懒启动**；产物写 `os.tmpdir()/doge-playwright-mcp`（上游默认 `<cwd>/.playwright-mcp`，污染用户项目）。可用 `/mcp` 禁用或 `DOGE_PLAYWRIGHT_MCP=0` 关闭。**有头 / 无头**：默认无头（传 `--headless`）；`DOGE_PLAYWRIGHT_HEADLESS=0` 则拉起真实窗口，配 `--isolated` 用独立临时 profile，不碰用户现有 Chrome 的窗口与登录态，手动关掉后下次工具调用会重开。**坑**：`.doge/settings.json` 里的 `env` 对 Playwright **无效** —— `applyConfigEnvironmentVariables()` 在 `main.tsx` 的 2020/2628/2650 行，晚于 `setupPlaywrightMCP()`（1671 行），注入时机在读取之后；只能用进程环境变量，而且 MCP server 在启动时 spawn，**改完必须重启 doge**（会话内 `/mcp` 重连会用同一份 argv，不起作用）。测试：`src/utils/playwrightMcp/{command,setup}.test.ts`（单测 15 例）+ `test/e2e-playwright-mcp.ts`（真实 spawn + 24 工具 + 权限通配覆盖 + 真开 example.com 取快照）
+   Bun 能 `fetch()` 通 CDP 的 HTTP 端点，挂的是管道/WebSocket 传输层。doge 跑在 Bun 上，所以**必须**用 Node 子进程；改回 in-process 会直接复现「navigate 超时 180s」。**坑 2**：`allowedTools` 必须手工拼 `mcp__<server>__*` —— `buildMcpToolName()` 会把通配符 `*` 规范化成 `_`，生成匹配不到任何工具的死规则。**浏览器来源**：默认**复用系统已装的 Chrome / Edge**（`detectSystemBrowser()` 按平台探测常见路径 → `--executable-path`），零下载开箱即用。别指望"以前装过 @playwright/mcp 就能用"：旧版会自动下载一批 `mcp-chrome-<hash>`（本机已攒 8 个、几百 MB），但那是按它自己的版本 hash 命名的，跟 playwright-core 绑定的 chromium 修订版（当前 **1243**）互不相认，换版本就得重下。机器上一个浏览器都没有、或没有 Node 时才需要 `bunx playwright install chromium`（没 Node 则整个 server 不注册）；`DOGE_PLAYWRIGHT_EXECUTABLE_PATH` 可强制指定、`DOGE_PLAYWRIGHT_USE_SYSTEM_BROWSER=0` 关探测改用自带版本。浏览器仍是**首次工具调用时懒启动**；产物写 `os.tmpdir()/doge-playwright-mcp`（上游默认 `<cwd>/.playwright-mcp`，污染用户项目）。可用 `/mcp` 禁用或 `DOGE_PLAYWRIGHT_MCP=0` 关闭。**有头 / 无头**：默认无头（传 `--headless`）；`DOGE_PLAYWRIGHT_HEADLESS=0` 则拉起真实窗口，配 `--isolated` 用独立临时 profile，不碰用户现有 Chrome 的窗口与登录态，手动关掉后下次工具调用会重开。**坑**：`.doge/settings.json` 里的 `env` 对 Playwright **无效** —— `applyConfigEnvironmentVariables()` 在 `main.tsx` 的 2020/2628/2650 行，晚于 `setupPlaywrightMCP()`（1671 行），注入时机在读取之后；只能用进程环境变量，而且 MCP server 在启动时 spawn，**改完必须重启 doge**（会话内 `/mcp` 重连会用同一份 argv，不起作用）。测试：`src/utils/playwrightMcp/{command,setup}.test.ts`（单测 16 例）+ `test/e2e-playwright-mcp.ts`（真实 spawn + 24 工具 + 权限通配覆盖 + 真开 example.com 取快照）
 
 ## 技术栈与运行时
 
@@ -147,6 +147,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 | `DOGE_PLAYWRIGHT_OUTPUT_DIR` | Playwright 产物目录（默认 `os.tmpdir()/doge-playwright-mcp`） |
 | `DOGE_PLAYWRIGHT_EXECUTABLE_PATH` | 直接指定浏览器可执行文件（优先级最高） |
 | `DOGE_PLAYWRIGHT_USE_SYSTEM_BROWSER` | 设为 `0` 关闭系统 Chrome/Edge 自动探测，改用 playwright 自带版本 |
+| `DOGE_PLAYWRIGHT_NODE_PATH` | 直接指定跑 MCP server 的 Node 可执行文件（桌面壳用它指向自带运行时；路径不存在则回退 PATH 查找） |
 
 ### 特殊模型行为
 
