@@ -26,7 +26,7 @@
         "@opentelemetry/sdk-metrics": "*",
         "@opentelemetry/sdk-trace-base": "*",
         "@opentelemetry/semantic-conventions": "*",
-        "@playwright/mcp": "^0.0.80",
+        "@playwright/mcp": "*",
         "ajv": "*",
         "asciichart": "*",
         "auto-bind": "*",

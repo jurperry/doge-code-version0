@@ -49,15 +49,19 @@ test('playwright can still be opted out via setMcpServerEnabled(false)', () => {
   expect(isMcpServerDisabled(PLAYWRIGHT_MCP_SERVER_NAME)).toBe(false)
 })
 
-test('setupPlaywrightMCP registers the in-process server', () => {
+test('setupPlaywrightMCP registers a real stdio server', () => {
   const { mcpConfig } = setupPlaywrightMCP()
-  const entry = mcpConfig[PLAYWRIGHT_MCP_SERVER_NAME]
+  const entry = mcpConfig[PLAYWRIGHT_MCP_SERVER_NAME] as
+    | { type?: string; scope?: string; command?: string; args?: string[] }
+    | undefined
 
   expect(entry).toBeDefined()
-  // 'stdio' + scope 'dynamic' is what routes connectToServer into the
-  // in-process branch; the command is never spawned.
   expect(entry?.type).toBe('stdio')
   expect((entry as { scope?: string }).scope).toBe('dynamic')
+  // A real command, not a placeholder: Node running @playwright/mcp's CLI.
+  // Playwright can't launch a browser under Bun, so it must be a subprocess.
+  expect(entry?.command).toBeTruthy()
+  expect(entry?.args?.[0]).toContain('playwright')
 })
 
 test('setupPlaywrightMCP allow rule covers every tool from the server', () => {

@@ -1,27 +1,22 @@
 /**
  * E2E check for the built-in Playwright MCP server.
  *
- * Exercises the same path the CLI uses at runtime:
+ * Exercises the real runtime path:
  *   1. setupPlaywrightMCP() → dynamic MCP config + allowedTools
- *   2. createPlaywrightMcpServerForCli() + createLinkedTransportPair()
- *      (exactly what client.ts does for the in-process branch)
- *   3. tools/list over a real MCP client
+ *   2. spawn `@playwright/mcp`'s CLI under Node over stdio (exactly what
+ *      client.ts does — Playwright can't drive a browser from Bun)
+ *   3. tools/list
  *   4. the server-wide allow rule must match every advertised tool
- *   5. optional: launch the browser, navigate, snapshot, close
- *      (skipped with a clear message when no browser binary is installed)
+ *   5. live round-trip: navigate to a real page, snapshot it, close
  *
  * Usage: bun test/e2e-playwright-mcp.ts
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
-import { createLinkedTransportPair } from '../src/services/mcp/InProcessTransport.js'
 import { mcpInfoFromString } from '../src/services/mcp/mcpStringUtils.js'
 import { PLAYWRIGHT_MCP_SERVER_NAME } from '../src/utils/playwrightMcp/common.js'
-import {
-  buildPlaywrightMcpConfig,
-  createPlaywrightMcpServerForCli,
-} from '../src/utils/playwrightMcp/mcpServer.js'
 import { setupPlaywrightMCP } from '../src/utils/playwrightMcp/setup.js'
 
 let failures = 0
@@ -46,44 +41,53 @@ async function main(): Promise<void> {
   // 1. Config shape
   const { mcpConfig, allowedTools } = setupPlaywrightMCP()
   const entry = mcpConfig[PLAYWRIGHT_MCP_SERVER_NAME] as
-    | { type?: string; scope?: string }
+    | { type?: string; scope?: string; command?: string; args?: string[] }
     | undefined
+
   check('config registers the server', entry !== undefined)
   check('config type is stdio', entry?.type === 'stdio')
   check('config scope is dynamic', entry?.scope === 'dynamic')
-  check('allow rule is a server-wide wildcard', allowedTools[0] === `mcp__${PLAYWRIGHT_MCP_SERVER_NAME}__*`, allowedTools[0])
-
-  // 2. In-process connection
-  const executable = (
-    buildPlaywrightMcpConfig().browser?.launchOptions as
-      | { executablePath?: string }
-      | undefined
-  )?.executablePath
-  console.log(
-    `INFO  browser executable: ${executable ?? 'playwright default (bundled build)'}`,
+  check(
+    'allow rule is a server-wide wildcard',
+    allowedTools[0] === `mcp__${PLAYWRIGHT_MCP_SERVER_NAME}__*`,
+    allowedTools[0],
   )
+  if (!entry) {
+    console.log(
+      '\nNo server registered (DOGE_PLAYWRIGHT_MCP=0, or no Node on this machine).',
+    )
+    process.exit(1)
+  }
 
-  const server = await createPlaywrightMcpServerForCli()
-  const [clientTransport, serverTransport] = createLinkedTransportPair()
-  await server.connect(serverTransport)
+  console.log(`INFO  command: ${entry.command}`)
+  console.log(`INFO  args   : ${entry.args?.join(' ')}`)
 
+  // 2. Real stdio spawn
+  const transport = new StdioClientTransport({
+    command: entry.command!,
+    args: entry.args!,
+    stderr: 'pipe',
+  })
   const client = new Client({ name: 'doge-e2e', version: '0.0.0' })
-  await client.connect(clientTransport)
-  check('in-process transport connected', true)
+  await client.connect(transport)
+  check('stdio MCP server connected', true)
 
   // 3. Tool list
   const { tools } = await client.listTools()
-  check('tools/list returns a non-empty toolset', tools.length > 0, `${tools.length} tools`)
-  const expected = [
+  check(
+    'tools/list returns a non-empty toolset',
+    tools.length > 0,
+    `${tools.length} tools`,
+  )
+  const names = tools.map(t => t.name)
+  for (const name of [
     'browser_navigate',
     'browser_snapshot',
     'browser_click',
     'browser_type',
     'browser_take_screenshot',
     'browser_close',
-  ]
-  const names = tools.map(t => t.name)
-  for (const name of expected) {
+  ]) {
     check(`tool present: ${name}`, names.includes(name))
   }
 
@@ -97,19 +101,13 @@ async function main(): Promise<void> {
     unmatched.slice(0, 3).join(', '),
   )
 
-  // 5. Optional live browser round-trip.
-  //    The toolset, the transport and the permission rule are all verified
-  //    above without a browser; this last step only proves the installed
-  //    playwright can actually launch one. Missing binaries are an environment
-  //    gap, not a code failure — report them as SKIP with the fix command.
-  //    A launch failure surfaces two ways: as an isError result (browser binary
-  //    missing) or as a thrown MCP timeout (binary found but couldn't spawn).
+  // 5. Live round-trip against a real page
   let navOk = false
   let navError = ''
   try {
     const nav = (await client.callTool({
       name: 'browser_navigate',
-      arguments: { url: 'about:blank' },
+      arguments: { url: 'https://example.com' },
     })) as { isError?: boolean; content?: Array<{ text?: string }> }
     navOk = !nav.isError
     navError = nav.isError ? String(nav.content?.[0]?.text ?? '') : ''
@@ -120,40 +118,32 @@ async function main(): Promise<void> {
   if (/is not installed|Executable doesn't exist/i.test(navError)) {
     console.log(
       `SKIP  live browser round-trip — no browser binary available.\n` +
-        `      ${navError.split('\n').find(l => l.includes('Run '))?.trim() ?? navError.split('\n')[0]}\n` +
-        `      (either: bunx playwright install chromium — or point DOGE_PLAYWRIGHT_EXECUTABLE_PATH at a Chrome/Edge install)`,
+        `      ${navError.split('\n').find(l => l.includes('Run '))?.trim() ?? navError.split('\n')[0]}`,
     )
-  } else if (/timed out|Timeout/i.test(navError)) {
-    // Distinct from a missing binary: the browser was found but could not be
-    // spawned. Seen when running this script from a non-interactive/sandboxed
-    // shell that can't create the child process; a real terminal is fine.
-    console.log(
-      `SKIP  live browser round-trip — browser could not be spawned here (${navError.split('\n')[0]}).\n` +
-        `      Usually a sandbox limitation of the shell running this script, not a\n` +
-        `      code problem — re-run from an interactive terminal to exercise it.`,
-    )
+  } else if (navError) {
+    check('browser_navigate succeeded', false, navError.split('\n')[0])
   } else {
-    check('browser_navigate succeeded', navOk, navError.split('\n')[0] ?? '')
-    if (navOk) {
-      const snap = (await client.callTool({
-        name: 'browser_snapshot',
-        arguments: {},
-      })) as { isError?: boolean; content?: Array<{ text?: string }> }
-      check(
-        'browser_snapshot returned content',
-        !snap.isError && (snap.content?.length ?? 0) > 0,
-        snap.isError ? String(snap.content?.[0]?.text ?? '').split('\n')[0] ?? '' : '',
-      )
-      await client.callTool({ name: 'browser_close', arguments: {} })
-      check('browser_close succeeded', true)
-    }
+    check('browser_navigate succeeded', navOk)
+    const snap = (await client.callTool({
+      name: 'browser_snapshot',
+      arguments: {},
+    })) as { isError?: boolean; content?: Array<{ text?: string }> }
+    const snapText = String(snap.content?.[0]?.text ?? '')
+    check(
+      'browser_snapshot returned the page content',
+      !snap.isError && snapText.includes('Example Domain'),
+      snapText.slice(0, 80).replace(/\n/g, ' | '),
+    )
+    await client.callTool({ name: 'browser_close', arguments: {} })
+    check('browser_close succeeded', true)
   }
 
   await client.close()
-  await server.close()
   check('closed cleanly', true)
 
-  console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) failed.`)
+  console.log(
+    failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) failed.`,
+  )
   process.exit(failures === 0 ? 0 : 1)
 }
 
