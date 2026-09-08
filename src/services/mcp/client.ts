@@ -243,6 +243,12 @@ const computerUseWrapper = (): typeof import('../../utils/computerUse/wrapper.js
 const isComputerUseMCPServer = (
   require('../../utils/computerUse/common.js') as typeof import('../../utils/computerUse/common.js')
 ).isComputerUseMCPServer
+// Lazy for symmetry with the two above: keeps the (large) @playwright/mcp module
+// graph out of the CLI's startup path — it is only pulled in when the server
+// actually connects.
+const isPlaywrightMCPServer = (
+  require('../../utils/playwrightMcp/common.js') as typeof import('../../utils/playwrightMcp/common.js')
+).isPlaywrightMCPServer
 
 import { mkdir, readFile, unlink, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
@@ -936,6 +942,26 @@ export const connectToServer = memoize(
         await inProcessServer.connect(serverTransport)
         transport = clientTransport
         logMCPDebug(name, `In-process Computer Use MCP server started`)
+      } else if (
+        (serverRef.type === 'stdio' || !serverRef.type) &&
+        isPlaywrightMCPServer(name)
+      ) {
+        // Run the Playwright MCP server in-process. Launching it as a stdio
+        // subprocess would mean shipping/executing a second copy of the
+        // browser stack; in-process it reuses this process's playwright-core
+        // and skips the ~100 MB node subprocess. Browser launch itself is
+        // deferred to the first tool call.
+        const { createPlaywrightMcpServerForCli } = await import(
+          '../../utils/playwrightMcp/mcpServer.js'
+        )
+        const { createLinkedTransportPair } = await import(
+          './InProcessTransport.js'
+        )
+        inProcessServer = await createPlaywrightMcpServerForCli()
+        const [clientTransport, serverTransport] = createLinkedTransportPair()
+        await inProcessServer.connect(serverTransport)
+        transport = clientTransport
+        logMCPDebug(name, `In-process Playwright MCP server started`)
       } else if (serverRef.type === 'stdio' || !serverRef.type) {
         const finalCommand =
           process.env.CLAUDE_CODE_SHELL_PREFIX || serverRef.command

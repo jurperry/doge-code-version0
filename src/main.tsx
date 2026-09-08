@@ -1487,6 +1487,14 @@ async function run(): Promise<CommanderCommand> {
           } = await import('src/utils/computerUse/common.js');
           if (nonSdkConfigNames.some(isComputerUseMCPServer)) {
             reservedNameError = `Invalid MCP configuration: "${COMPUTER_USE_MCP_SERVER_NAME}" is a reserved MCP name.`;
+          } else {
+            const {
+              isPlaywrightMCPServer,
+              PLAYWRIGHT_MCP_SERVER_NAME
+            } = await import('src/utils/playwrightMcp/common.js');
+            if (nonSdkConfigNames.some(isPlaywrightMCPServer)) {
+              reservedNameError = `Invalid MCP configuration: "${PLAYWRIGHT_MCP_SERVER_NAME}" is a reserved MCP name.`;
+            }
           }
         }
         if (reservedNameError) {
@@ -1639,6 +1647,40 @@ async function run(): Promise<CommanderCommand> {
         }
       } catch (error) {
         logForDebugging(`[Computer Use MCP] Setup failed: ${errorMessage(error)}`);
+      }
+    }
+
+    // Playwright MCP: built-in browser automation (doge fork). Upstream's
+    // WebFetch/WebSearch can only do plain HTTP GETs — no JS rendering, no
+    // clicks, no authenticated sessions — which makes a large slice of the web
+    // unreachable. Running @playwright/mcp in-process gives the model a real
+    // browser through the normal MCP tool surface.
+    //
+    // Interactive sessions only: -p/print runs are one-shot and shouldn't be
+    // able to leave a browser behind. Set DOGE_PLAYWRIGHT_MCP=0 to opt out
+    // (setupPlaywrightMCP then returns an empty config).
+    if (!getIsNonInteractiveSession()) {
+      try {
+        const {
+          setupPlaywrightMCP,
+          PLAYWRIGHT_MCP_PROMPT_HINT
+        } = await import('src/utils/playwrightMcp/setup.js');
+        const {
+          mcpConfig,
+          allowedTools: pwTools
+        } = setupPlaywrightMCP();
+        if (Object.keys(mcpConfig).length > 0) {
+          dynamicMcpConfig = {
+            ...dynamicMcpConfig,
+            ...mcpConfig
+          };
+          allowedTools.push(...pwTools);
+          // Same rationale as the Computer Use hint above: custom/translated
+          // endpoints don't get the server-side availability hint.
+          appendSystemPrompt = appendSystemPrompt ? `${appendSystemPrompt}\n\n${PLAYWRIGHT_MCP_PROMPT_HINT}` : PLAYWRIGHT_MCP_PROMPT_HINT;
+        }
+      } catch (error) {
+        logForDebugging(`[Playwright MCP] Setup failed: ${errorMessage(error)}`);
       }
     }
 
