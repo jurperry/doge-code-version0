@@ -27,6 +27,9 @@ config.env
 # Doge 项目级本地设置（运行时生成，不入库）
 .doge/
 
+# WorkBuddy 本地状态（运行时生成，不入库）
+.workbuddy/
+
 # Playwright MCP 运行时缓存（console 日志 / page 快照）
 .playwright-mcp/
 
