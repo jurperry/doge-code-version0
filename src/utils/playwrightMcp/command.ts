@@ -29,6 +29,15 @@ function parseBrowserName(raw: string | undefined): BrowserName {
 
 /** Absolute path of a Node executable, or undefined if there is none. */
 export function findNodeExecutable(): string | undefined {
+  // Explicit override. The Doge Code desktop shell uses this to point at the
+  // Node runtime it can guarantee (its own Electron binary, driven with
+  // ELECTRON_RUN_AS_NODE) when the machine has no Node on PATH — otherwise
+  // every desktop install would silently get no browser tools at all.
+  const override = process.env.DOGE_PLAYWRIGHT_NODE_PATH?.trim()
+  if (override && existsSync(override)) {
+    return override
+  }
+
   // Doge itself may be running under Node.
   const exec = process.execPath
   if (exec && /node(\.exe)?$/i.test(exec) && existsSync(exec)) {
