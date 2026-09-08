@@ -647,6 +647,15 @@ export async function addMcpConfig(
     }
   }
 
+  {
+    const { isPlaywrightMCPServer } = await import(
+      '../../utils/playwrightMcp/common.js'
+    )
+    if (isPlaywrightMCPServer(name)) {
+      throw new Error(`Cannot add MCP server "${name}": this name is reserved.`)
+    }
+  }
+
   // Block adding servers when enterprise MCP config exists (it has exclusive control)
   if (doesEnterpriseMcpConfigExist()) {
     throw new Error(

@@ -29,6 +29,14 @@
 9. **agent-teams TUI（多代理面板）**：TUI 底部常驻 `main-<模型>` 行，每个子代理一行 `sub-agent-<模型>-<任务描述>`（`CoordinatorTaskPanel`，原 ant-only 面板解闸）；`Ctrl+Shift+A` 聚焦/取消 agent 列表，↑↓ 导航、Enter 切换到对应 agent 的执行视图（transcript）、`x` 停止/清除、Esc 返回，鼠标点击行同样可切换。子代理模型名在 spawn 时由 `getAgentModel` 解析并写入 `LocalAgentTaskState.model`。内置 Explore/Plan 子代理已在 `src/tools/AgentTool/builtInAgents.ts` 强制启用（源码运行下 `feature()` 恒 false 的兜底）。teammate 群聊模式（队长/成员直连通信）保持运行时开关：`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 或 `--agent-teams` 启动。见 `src/components/CoordinatorAgentStatus.tsx`、`src/hooks/useGlobalKeybindings.tsx`
 10. **双密钥类型严格区分（DOGE_API_KEY / ANTHROPIC_AUTH_TOKEN）**：两者是仅有的两种密钥接入方式，差异在发送语义——`DOGE_API_KEY` → SDK `apiKey` → `x-api-key` header；`ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer` header（`client.ts configureApiKeyHeaders`）。`ModelProfile.authTokenType` 记录每个 provider 用哪种，`/provider` 表单有 "Key type" 选择步骤，`/provider list` 展示；`applyModelProfile` 按类型互斥写 env（写一个删另一个）。两者同时泄漏进 `process.env`（shell 残留 / settings env 块）曾导致双 header 矛盾 401：现在 `enforceApiKeyExclusivity`（`src/utils/apiKeyExclusivity.ts`）在 `managedEnv.ts` 两个 apply 入口末尾收敛为互斥（激活 profile 声明 Bearer 且 key 匹配则保留 AUTH_TOKEN，否则 DOGE 优先），`configureApiKeyHeaders` 在 DOGE 存在时跳过 Bearer 作为最后防线；`ApiKeySource` 区分 `'ANTHROPIC_AUTH_TOKEN'` 来源（errors/statusNotice/auth status 相应适配）。多终端场景下卫兵只改本进程 env，不影响并行终端。
 11. **项目目录命名 v2 编码（2026-09-06，消除歧义）**：`~/.doge/projects/<encoded-cwd>` 的目录名由 v1（所有非字母数字→`-`，`E:\a-b` 与 `E:\a\b` 同为 `E--a-b`，外部软件无法反解真实路径）改为**可逆编码**：路径分隔符 `\`/`/` → `~`；`~` 本身 → `%7e`；其余非字母数字按 UTF-8 字节转 `%xx`；`[a-zA-Z0-9-]` 字面保留。例：`E:\ClaudeCode\doge-code` → `E%3a~ClaudeCode~doge-code`（名字里的连字符不再与分隔符混淆）。>200 字符截断 + `-<hash>` 后缀逻辑与 v1 相同（Bun.hash/simpleHash 双实现，读取端前缀扫描兜底）。实现集中在 `src/utils/sessionStoragePortable.ts`（`sanitizePath`/`legacySanitizePath`/`sanitizePathCandidates`/`decodeProjectDirName`/`findProjectDir`）。**兼容策略：写永远用 v2，读同时认 v1**——`findProjectDir` 先试 v2 再试 v1；resume 续写绑定的 `sessionProjectDir` 来自实际文件路径，所以旧会话恢复后继续留在 v1 目录、新会话落 v2 目录（同一项目两个目录并存是预期过渡态，Doge Code 桌面壳按 jsonl 内 cwd 合并显示）；auto-memory（memdir）优先复用已存在的 v1 memory 目录以免记忆"重置"；bridgePointer 读取/清理遍历两种候选名；`vcr.ts` 的 cwdSlug 脱水替换两种编码。测试：`src/utils/sessionStoragePortable.test.ts`（单测 25 例，含迁移）+ `test/e2e-project-dirs.ts`（编码/兼容沙箱 E2E 6 项）+ `test/e2e-migrate-projects.ts`（启动迁移 E2E 4 项，`--help` 走完整启动链）。**存量数据自动迁移**：`migrateLegacyProjectDirs()`（同文件）在 `src/entrypoints/cli.tsx` 通用路径（main import 之前）每次启动执行——v1 目录按「最新 jsonl 头部 cwd」恢复真实路径后原子 rename 成 v2 名；目标已存在则逐文件合并（同名冲突 newest-mtime 胜、输家删除、源目录收尾 rmdir）；无 jsonl 可恢复 cwd 或目录被活会话锁定（Windows EPERM）→ 跳过下次重试；幂等（v2 名含 `~` 直接跳过）。并发安全靠 rename 原子性 + ENOENT 容忍。2026-09-06 已对本机真实 ~/.doge 执行：2 改名 1 跳过（memory-only 目录）。`cachePaths.ts` 的缓存目录命名是**刻意独立**的 djb2 副本，未随之改动
+12. **内置 Playwright MCP（默认激活，2026-09-08 新增）**：上游只有 WebFetch/WebSearch 这类纯 HTTP 调用，拿不到 JS 渲染后的页面、无法点击/登录/填表，大片网页因此不可达。fork 内置了 `@playwright/mcp`，但**它不是进程内 server，而是 spawn 一个 Node 子进程走 stdio** —— 原因见下面的「Bun 坑」，这是本条最要紧的知识。实现：① `setupPlaywrightMCP()` 往 `dynamicMcpConfig` 塞一条 `type:'stdio'` + `scope:'dynamic'` 的真实配置（`command` = 找到的 Node，`args` = `@playwright/mcp` 的 `cli.js` + `--browser/--headless/--isolated/--output-dir/--executable-path`）；② 把 `mcp__playwright__*` 加入 `allowedTools` 免权限弹窗。实现在 `src/utils/playwrightMcp/{common,command,setup}.ts`，注入点 `main.tsx`（CU 块之后，仅交互式会话），保留名拦截见 `config.ts` 的 `addMCPServer` 与 `main.tsx` 的 `--mcp-config` 校验，埋点白名单见 `services/analytics/metadata.ts` 的 `BUILTIN_MCP_SERVER_NAMES`。**坑 1（Bun，最关键）**：Playwright 在 Bun 下**根本连不上浏览器**，两条传输路径都超时，而同样的代码在 Node 下都正常（本机实测矩阵）：
+
+   | 传输 | Node | Bun |
+   |---|---|---|
+   | `--remote-debugging-pipe`（fd 3/4） | ✅ | ❌ 超时 |
+   | `--remote-debugging-port` + WebSocket | ✅ | ❌ 超时 |
+
+   Bun 能 `fetch()` 通 CDP 的 HTTP 端点，挂的是管道/WebSocket 传输层。doge 跑在 Bun 上，所以**必须**用 Node 子进程；改回 in-process 会直接复现「navigate 超时 180s」。**坑 2**：`allowedTools` 必须手工拼 `mcp__<server>__*` —— `buildMcpToolName()` 会把通配符 `*` 规范化成 `_`，生成匹配不到任何工具的死规则。**浏览器来源**：默认**复用系统已装的 Chrome / Edge**（`detectSystemBrowser()` 按平台探测常见路径 → `--executable-path`），零下载开箱即用。别指望"以前装过 @playwright/mcp 就能用"：旧版会自动下载一批 `mcp-chrome-<hash>`（本机已攒 8 个、几百 MB），但那是按它自己的版本 hash 命名的，跟 playwright-core 绑定的 chromium 修订版（当前 **1243**）互不相认，换版本就得重下。机器上一个浏览器都没有、或没有 Node 时才需要 `bunx playwright install chromium`（没 Node 则整个 server 不注册）；`DOGE_PLAYWRIGHT_EXECUTABLE_PATH` 可强制指定、`DOGE_PLAYWRIGHT_USE_SYSTEM_BROWSER=0` 关探测改用自带版本。浏览器仍是**首次工具调用时懒启动**；产物写 `os.tmpdir()/doge-playwright-mcp`（上游默认 `<cwd>/.playwright-mcp`，污染用户项目）。可用 `/mcp` 禁用或 `DOGE_PLAYWRIGHT_MCP=0` 关闭。**有头 / 无头**：默认无头（传 `--headless`）；`DOGE_PLAYWRIGHT_HEADLESS=0` 则拉起真实窗口，配 `--isolated` 用独立临时 profile，不碰用户现有 Chrome 的窗口与登录态，手动关掉后下次工具调用会重开。**坑**：`.doge/settings.json` 里的 `env` 对 Playwright **无效** —— `applyConfigEnvironmentVariables()` 在 `main.tsx` 的 2020/2628/2650 行，晚于 `setupPlaywrightMCP()`（1671 行），注入时机在读取之后；只能用进程环境变量，而且 MCP server 在启动时 spawn，**改完必须重启 doge**（会话内 `/mcp` 重连会用同一份 argv，不起作用）。测试：`src/utils/playwrightMcp/{command,setup}.test.ts`（单测 15 例）+ `test/e2e-playwright-mcp.ts`（真实 spawn + 24 工具 + 权限通配覆盖 + 真开 example.com 取快照）
 
 ## 技术栈与运行时
 
@@ -56,7 +64,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 ## 测试策略
 
 - 测试框架：`bun:test`（`import { test, expect } from 'bun:test'`），运行 `bun test`
-- 项目自身测试与代码同目录放置（`*.test.ts`），目前位于 `src/services/api/`、`src/services/mcp/`、`src/commands/model/`、`src/commands/provider/`、`src/utils/model/`、`src/hooks/`、`src/utils/`（sessionStoragePortable.test.ts）下；另有实机 e2e 脚本 `test/computer-use-e2e.ts`（Computer Use 只读链路验证）、`test/e2e-project-dirs.ts`（项目目录 v2 编码 + v1 兼容读取，可重复运行、自带沙箱清理）、`test/e2e-model-picker.ts`（/model 列表 provider 命名 + 档位隔离渲染）、`test/e2e-tier-session-switch.ts`（档位会话级切换 + Default 语义 + 遗留状态清理，均可重复运行、自带沙箱清理）
+- 项目自身测试与代码同目录放置（`*.test.ts`），目前位于 `src/services/api/`、`src/services/mcp/`、`src/commands/model/`、`src/commands/provider/`、`src/utils/model/`、`src/utils/playwrightMcp/`、`src/hooks/`、`src/utils/`（sessionStoragePortable.test.ts）下；另有实机 e2e 脚本 `test/computer-use-e2e.ts`（Computer Use 只读链路验证）、`test/e2e-playwright-mcp.ts`（内置 Playwright MCP 进程内连接 + 工具集 + 权限通配覆盖）、`test/e2e-project-dirs.ts`（项目目录 v2 编码 + v1 兼容读取，可重复运行、自带沙箱清理）、`test/e2e-model-picker.ts`（/model 列表 provider 命名 + 档位隔离渲染）、`test/e2e-tier-session-switch.ts`（档位会话级切换 + Default 语义 + 遗留状态清理，均可重复运行、自带沙箱清理）
 - 注意：裸跑 `bun test` 会连带执行 `needs/skills/claude-to-im/node_modules/` 里 vendored zod 的测试（实测共 22 个文件、约 250 个用例）；只跑项目测试时用路径过滤，如 `bun test src/services/api/`
 - 已知既有失败（截至当前提交，非本次改动引入）：`src/hooks/useMainLoopModel.test.ts` 中 `does not fall through to customApiStorage when AppState fields are null` 用例失败
 - 新增测试应放在被测模块旁边，以模块或被测行为命名
@@ -99,6 +107,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 - **认证与配置**（`src/utils/`）：`auth.ts` 认证逻辑（含自定义 API 绕过密钥审批）；`customApiStorage.ts` ModelProfile 持久化；`dogeConfigDir.ts` 配置目录入口（`CLAUDE_CONFIG_DIR ?? ~/.doge`）；`effort.ts` / `thinking.ts` Effort/Thinking 能力检测与模型兼容
 - **模型选择**（`src/utils/model/`）：`model.ts` Agent 模型选择与 fallback；`providers.ts` API 提供商检测（firstParty/bedrock/vertex/foundry）；`modelSupportOverrides.ts` 第三方模型能力覆盖
 - **Computer Use**（`src/utils/computerUse/`）：`platforms/win32.ts` Windows 后端（HWND SendMessage + SendInput fallback），`win32/` 子模块（窗口管理/截图/OCR/输入/UI Automation），`platforms/darwin.ts` macOS 后端
+- **Playwright MCP**（`src/utils/playwrightMcp/`）：`common.ts` server 名常量与判定谓词 + 提示词 hint，`command.ts` 定位 Node / `@playwright/mcp` CLI 并拼 argv（含系统 Chrome/Edge 探测），`setup.ts` 产出 dynamic MCP config 与 `allowedTools`
 
 ## API 兼容架构
 
@@ -132,6 +141,12 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 | `DOGE_MODEL_SCOPE` | 模型切换作用域：`session`（默认，仅当前终端） / `global`（切换即写全局配置） |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | 设为 `1` 启用 teammate 群聊模式（亦可改用 `--agent-teams` 旗标） |
 | `CLAUDE_CONFIG_DIR` | 覆盖配置目录（默认 `~/.doge`） |
+| `DOGE_PLAYWRIGHT_MCP` | 设为 `0` / `false` / `off` 关闭内置 Playwright MCP（默认开启） |
+| `DOGE_PLAYWRIGHT_BROWSER` | 浏览器内核：`chromium`（默认）/ `firefox` / `webkit` |
+| `DOGE_PLAYWRIGHT_HEADLESS` | 设为 `0` 拉起真实浏览器窗口（默认无头）；**需重启 doge**，且 settings.json 的 `env` 对此无效 |
+| `DOGE_PLAYWRIGHT_OUTPUT_DIR` | Playwright 产物目录（默认 `os.tmpdir()/doge-playwright-mcp`） |
+| `DOGE_PLAYWRIGHT_EXECUTABLE_PATH` | 直接指定浏览器可执行文件（优先级最高） |
+| `DOGE_PLAYWRIGHT_USE_SYSTEM_BROWSER` | 设为 `0` 关闭系统 Chrome/Edge 自动探测，改用 playwright 自带版本 |
 
 ### 特殊模型行为
 
@@ -216,6 +231,7 @@ bun link                   # 注册全局 doge 命令（包名 @doge-code/cli）
 | 依赖/运行报错 | `bun install` + `bun link`，确认 Bun 1.3.5+ |
 | 首次运行报错 | 确保 `~/.doge/.claude.json` 中 `hasCompletedOnboarding: true` |
 | 多行输入只剩一行 + `…` | 已修（`BaseTextInput` 多行用 `wrap`）；若仍复现，检查是否被 `maxVisibleLines` 视口裁剪（仅全屏模式生效） |
+| 想看到 Playwright 的浏览器窗口 | 启动前设 `DOGE_PLAYWRIGHT_HEADLESS=0` 并**重启 doge**（settings.json 的 `env` 无效） |
 
 ## 其他参考文档
 
