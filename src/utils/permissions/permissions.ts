@@ -22,6 +22,7 @@ import {
   SETTING_SOURCES,
 } from '../settings/constants.js'
 import { plural } from '../stringUtils.js'
+import { isAutoBypassActive } from './autoBypass.js'
 import { permissionModeTitle } from './PermissionMode.js'
 import type {
   PermissionAskDecision,
@@ -1263,12 +1264,14 @@ async function hasPermissionsToUseToolInner(
   // IMPORTANT: Call getAppState() to get the latest value
   appState = context.getAppState()
   // Check if permissions should be bypassed:
-  // - Direct bypassPermissions mode
+  // - Direct bypassPermissions mode (/auto included)
   // - Plan mode when the user originally started with bypass mode (isBypassPermissionsModeAvailable)
-  const shouldBypassPermissions =
-    appState.toolPermissionContext.mode === 'bypassPermissions' ||
-    (appState.toolPermissionContext.mode === 'plan' &&
-      appState.toolPermissionContext.isBypassPermissionsModeAvailable)
+  // - doge fork: plan mode entered FROM bypassPermissions — the model switching
+  //   to plan inside an /auto session keeps auto's release semantics
+  //   (prePlanMode stash from prepareContextForPlanMode)
+  const shouldBypassPermissions = isAutoBypassActive(
+    appState.toolPermissionContext,
+  )
   if (shouldBypassPermissions) {
     return {
       behavior: 'allow',

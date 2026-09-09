@@ -27,7 +27,7 @@ import { getMainLoopModel, getRuntimeMainLoopModel } from '../../../utils/model/
 import { createPromptRuleContent, isClassifierPermissionsEnabled, PROMPT_PREFIX } from '../../../utils/permissions/bashClassifier.js';
 import { type PermissionMode, toExternalPermissionMode } from '../../../utils/permissions/PermissionMode.js';
 import type { PermissionUpdate } from '../../../utils/permissions/PermissionUpdateSchema.js';
-import { isAutoModeGateEnabled, restoreDangerousPermissions, stripDangerousPermissionsForAutoMode } from '../../../utils/permissions/permissionSetup.js';
+import { isAutoModeGateEnabled, isBypassPermissionsModeDisabled, restoreDangerousPermissions, stripDangerousPermissionsForAutoMode } from '../../../utils/permissions/permissionSetup.js';
 import { getPewterLedgerVariant, isPlanModeInterviewPhaseEnabled } from '../../../utils/planModeV2.js';
 import { getPlan, getPlanFilePath } from '../../../utils/plans.js';
 import { editFileInEditor, editPromptInEditor } from '../../../utils/promptEditor.js';
@@ -47,7 +47,34 @@ import type { PastedContent } from '../../../utils/config.js';
 import type { ImageDimensions } from '../../../utils/imageResizer.js';
 import { maybeResizeAndDownsampleImageBlock } from '../../../utils/imageResizer.js';
 import { cacheImagePath, storeImage } from '../../../utils/imageStore.js';
-type ResponseValue = 'yes-bypass-permissions' | 'yes-accept-edits' | 'yes-accept-edits-keep-context' | 'yes-default-keep-context' | 'yes-resume-auto-mode' | 'yes-auto-clear-context' | 'ultraplan' | 'no';
+type ResponseValue = 'yes-bypass-permissions' | 'yes-accept-edits' | 'yes-accept-edits-keep-context' | 'yes-auto-mode-keep-context' | 'yes-default-keep-context' | 'yes-resume-auto-mode' | 'yes-auto-clear-context' | 'ultraplan' | 'no';
+
+/**
+ * doge fork: mode a keep-context approval option lands in. The user's choice
+ * is authoritative — 'yes-auto-mode-keep-context' is the explicit "execute
+ * with auto" option (offered to auto sessions as "stay in auto mode" and to
+ * normal sessions as "use auto mode"), 'yes-accept-edits-keep-context' is
+ * always acceptEdits except in flag-launched sessions (upstream maps their
+ * "bypass permissions" option through this value). Auto sessions are NOT
+ * silently kept in or dropped out of auto: the dialog lists every mode and
+ * the user picks.
+ * Returns undefined for values that aren't keep-context approvals.
+ * @internal Exported for testing.
+ */
+export function resolvePlanApprovalMode(value: ResponseValue, toolPermissionContext: {
+  isBypassPermissionsModeAvailable?: boolean;
+}, bypassDisabled = false): PermissionMode | undefined {
+  switch (value) {
+    case 'yes-accept-edits-keep-context':
+      return !bypassDisabled && toolPermissionContext.isBypassPermissionsModeAvailable ? 'bypassPermissions' : 'acceptEdits';
+    case 'yes-auto-mode-keep-context':
+      return 'bypassPermissions';
+    case 'yes-default-keep-context':
+      return 'default';
+    default:
+      return undefined;
+  }
+}
 
 /**
  * Build permission updates for plan approval, including prompt-based rules if provided.
@@ -145,17 +172,29 @@ export function ExitPlanModePermissionRequest({
   const usage = toolUseConfirm.assistantMessage.message.usage;
   const {
     mode,
+    prePlanMode,
     isAutoModeAvailable,
     isBypassPermissionsModeAvailable
   } = toolPermissionContext;
+  // doge fork: an /auto session that entered plan mode (model-initiated
+  // EnterPlanMode stashes prePlanMode='bypassPermissions'). The approval
+  // dialog still lists EVERY execution mode (stay-in-auto first, then
+  // auto-accept edits, manual) — the user's pick is final, auto mode must
+  // not pre-choose or release the choice itself. Empty-plan approval (no
+  // mode list exists there) restores auto so the session isn't downgraded.
+  // Respect a mid-session disableBypassPermissionsMode setting.
+  const autoSession = prePlanMode === 'bypassPermissions' && !isBypassPermissionsModeDisabled();
+  const canBypass = !isBypassPermissionsModeDisabled();
   const options = useMemo(() => buildPlanApprovalOptions({
     showClearContext,
     showUltraplan,
     usedPercent: showClearContext ? getContextUsedPercent(usage, mode) : null,
     isAutoModeAvailable,
     isBypassPermissionsModeAvailable,
+    autoSession,
+    canBypass,
     onFeedbackChange: setPlanFeedback
-  }), [showClearContext, showUltraplan, usage, mode, isAutoModeAvailable, isBypassPermissionsModeAvailable]);
+  }), [showClearContext, showUltraplan, usage, mode, isAutoModeAvailable, isBypassPermissionsModeAvailable, autoSession, canBypass]);
   function onImagePaste(base64Image: string, mediaType?: string, filename?: string, dimensions?: ImageDimensions, _sourcePath?: string) {
     const pasteId = nextPasteIdRef.current++;
     const newContent: PastedContent = {
@@ -264,10 +303,13 @@ export function ExitPlanModePermissionRequest({
       return;
     }
 
-    // Shift+Tab immediately selects "auto-accept edits"
+    // Shift+Tab immediately selects the top "yes" option — in an auto session
+    // that is the auto-preserving option, elsewhere it matches the previous
+    // hardcoded choice (clear-context "yes-accept-edits" / keep-context
+    // "yes-accept-edits-keep-context").
     if (e.shift && e.key === 'tab') {
       e.preventDefault();
-      void handleResponse(showClearContext ? 'yes-accept-edits' : 'yes-accept-edits-keep-context');
+      void handleResponse(options[0]?.value ?? (showClearContext ? 'yes-accept-edits' : 'yes-accept-edits-keep-context'));
       return;
     }
   };
@@ -333,7 +375,7 @@ export function ExitPlanModePermissionRequest({
     // The REPL will handle context clear and trigger a fresh query
     // Keep-context options skip this block and go through the normal flow below
     const isResumeAutoOption = feature('TRANSCRIPT_CLASSIFIER') ? value === 'yes-resume-auto-mode' : false;
-    const isKeepContextOption = value === 'yes-accept-edits-keep-context' || value === 'yes-default-keep-context' || isResumeAutoOption;
+    const isKeepContextOption = value === 'yes-accept-edits-keep-context' || value === 'yes-auto-mode-keep-context' || value === 'yes-default-keep-context' || isResumeAutoOption;
     if (value !== 'no') {
       autoNameSessionFromPlan(currentPlan, setAppState, !isKeepContextOption);
     }
@@ -428,13 +470,11 @@ export function ExitPlanModePermissionRequest({
     // Without this fallback the function would return without resolving the
     // dialog, leaving the query loop blocked and safety state corrupted.
     const keepContextModes: Record<string, PermissionMode> = {
-      'yes-accept-edits-keep-context': toolPermissionContext.isBypassPermissionsModeAvailable ? 'bypassPermissions' : 'acceptEdits',
-      'yes-default-keep-context': 'default',
       ...(feature('TRANSCRIPT_CLASSIFIER') ? {
         'yes-resume-auto-mode': 'default' as const
       } : {})
     };
-    const keepContextMode = keepContextModes[value];
+    const keepContextMode = resolvePlanApprovalMode(value, toolPermissionContext, isBypassPermissionsModeDisabled()) ?? keepContextModes[value];
     if (keepContextMode) {
       logEvent('tengu_plan_exit', {
         planLengthChars: currentPlan.length,
@@ -583,7 +623,8 @@ export function ExitPlanModePermissionRequest({
         onDone();
         toolUseConfirm.onAllow({}, [{
           type: 'setMode',
-          mode: 'default',
+          // doge fork: auto sessions keep auto (prePlanMode stash)
+          mode: autoSession ? 'bypassPermissions' : 'default',
           destination: 'session'
         }]);
       } else {
@@ -677,6 +718,8 @@ export function buildPlanApprovalOptions({
   usedPercent,
   isAutoModeAvailable,
   isBypassPermissionsModeAvailable,
+  autoSession,
+  canBypass,
   onFeedbackChange
 }: {
   showClearContext: boolean;
@@ -684,10 +727,14 @@ export function buildPlanApprovalOptions({
   usedPercent: number | null;
   isAutoModeAvailable: boolean | undefined;
   isBypassPermissionsModeAvailable: boolean | undefined;
+  /** doge fork: plan entered from /auto (bypassPermissions) — "stay in auto mode" is offered first, all other modes stay listed. */
+  autoSession: boolean;
+  /** doge fork: bypassPermissions not disabled by settings — normal sessions get an auto option. */
+  canBypass: boolean;
   onFeedbackChange: (v: string) => void;
 }): OptionWithDescription<ResponseValue>[] {
   const options: OptionWithDescription<ResponseValue>[] = [];
-  const usedLabel = usedPercent !== null ? ` (${usedPercent}% used)` : '';
+  const usedLabel = usedPercent !== null ? ` (${usedPercent}%)` : '';
   if (showClearContext) {
     if (feature('TRANSCRIPT_CLASSIFIER') && isAutoModeAvailable) {
       options.push({
@@ -700,14 +747,30 @@ export function buildPlanApprovalOptions({
         value: 'yes-bypass-permissions'
       });
     } else {
+      // doge fork: list every execution mode — auto sessions keep "stay in
+      // auto" first as the natural continuation, but auto-accept edits stays
+      // selectable; normal sessions keep auto-accept edits as the default and
+      // gain an explicit auto option. The user picks; nothing is pre-chosen.
+      if (autoSession) {
+        options.push({
+          label: `Yes, clear context${usedLabel} and stay in auto mode`,
+          value: 'yes-bypass-permissions'
+        });
+      }
       options.push({
         label: `Yes, clear context${usedLabel} and auto-accept edits`,
         value: 'yes-accept-edits'
       });
+      if (!autoSession && canBypass) {
+        options.push({
+          label: `Yes, clear context${usedLabel} and use auto mode`,
+          value: 'yes-bypass-permissions'
+        });
+      }
     }
   }
 
-  // Slot 2: keep-context with elevated mode (same priority: auto > bypass > edits).
+  // Slot 2: keep-context options — the full mode list, user's choice is final.
   if (feature('TRANSCRIPT_CLASSIFIER') && isAutoModeAvailable) {
     options.push({
       label: 'Yes, and use auto mode',
@@ -719,10 +782,25 @@ export function buildPlanApprovalOptions({
       value: 'yes-accept-edits-keep-context'
     });
   } else {
+    // doge fork: auto sessions list "stay in auto mode" first (continuation
+    // of the session's mode) but never hide auto-accept edits; normal sessions
+    // keep auto-accept edits as the default and gain an explicit auto option.
+    if (autoSession) {
+      options.push({
+        label: 'Yes, and stay in auto mode',
+        value: 'yes-auto-mode-keep-context'
+      });
+    }
     options.push({
-      label: 'Yes, auto-accept edits',
+      label: 'Yes, and auto-accept edits',
       value: 'yes-accept-edits-keep-context'
     });
+    if (!autoSession && canBypass) {
+      options.push({
+        label: 'Yes, and use auto mode',
+        value: 'yes-auto-mode-keep-context'
+      });
+    }
   }
   options.push({
     label: 'Yes, manually approve edits',
