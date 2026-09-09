@@ -39,6 +39,9 @@ export interface InstalledApp {
   id: string          // macOS: bundleId, Windows: exe path or package family, Linux: .desktop name
   displayName: string
   path: string
+  /** Additional match tokens for name resolution (Windows: registry install
+   *  locations, shortcut targets, live window titles of running apps). */
+  extraPaths?: string[]
 }
 
 export interface FrontmostAppInfo {
@@ -70,6 +73,15 @@ export interface InputPlatform {
   keys(combo: string[]): Promise<void>
   scroll(amount: number, direction: 'vertical' | 'horizontal'): Promise<void>
   mouseLocation(): Promise<{ x: number; y: number }>
+
+  // --- Drag primitives (optional; Windows implements both transports) ---
+  /** Press-only (no release) — phase primitive for drag composition. */
+  mouseDown?(x: number, y: number): Promise<void>
+  /** Release-only. */
+  mouseUp?(x: number, y: number): Promise<void>
+  /** Whole drag gesture (press → eased move → release) in one call —
+   *  single-process on Windows, far cheaper than per-frame composition. */
+  drag?(from: { x: number; y: number }, to: { x: number; y: number }, durationMs: number): Promise<void>
 
   // --- Mode B: Window-bound input (Windows only, optional) ---
   sendChar?(hwnd: string, char: string): Promise<void>

@@ -55,6 +55,9 @@ const NAME_PATTERN_BLOCKLIST: readonly RegExp[] = [
  * bypassing path check + count cap — the model needs these exact names even
  * when the machine has 200+ apps. Bundle IDs (locale-invariant), not display
  * names. Keep <30 — each entry is a guaranteed token in the description.
+ *
+ * Windows: ids are exe paths, so the win32 branch below additionally matches
+ * by executable base name (chrome.exe → "chrome").
  */
 const ALWAYS_KEEP_BUNDLE_IDS: ReadonlySet<string> = new Set([
   // Browsers
@@ -96,6 +99,22 @@ const ALWAYS_KEEP_BUNDLE_IDS: ReadonlySet<string> = new Set([
   'com.apple.systempreferences',
 ])
 
+/** Windows executables always kept in the description (matched by base name). */
+const ALWAYS_KEEP_WIN32_EXE_BASES: ReadonlySet<string> = new Set([
+  // Browsers
+  'chrome', 'msedge', 'firefox', 'brave',
+  // Editors / terminals
+  'notepad', 'code', 'windowsterminal', 'wt', 'conhost', 'powershell', 'pwsh',
+  'obsidian', 'notepad++',
+  // Dev tools the model is routinely asked to drive
+  'studio64', 'idea64', 'devenv', 'rider64', 'pycharm64',
+  // Communication
+  'slack', 'teams', 'zoom', 'wechat', 'qq', 'dingtalk', 'feishu', 'lark',
+  // Emulators / Android tooling
+  'dnplayer', 'nox', 'mumu', 'mumuplayer', 'ldplayer', 'bluestacks',
+  'hd-player', 'emulator', 'qemu-system-x86_64',
+])
+
 // ── Prompt-injection hardening ───────────────────────────────────────────
 
 /**
@@ -110,12 +129,41 @@ const APP_NAME_MAX_LEN = 40
 const APP_NAME_MAX_COUNT = 50
 
 function isUserFacingPath(path: string, homeDir: string | undefined): boolean {
+  if (process.platform === 'win32') {
+    // Windows has no /Applications equivalent — instead of an allowlist,
+    // exclude OS plumbing directories and keep everything else. Noise below
+    // that (helper exes etc.) is handled by NAME_PATTERN_BLOCKLIST.
+    const p = path.toLowerCase().replace(/\//g, '\\')
+    const SYSTEM_PREFIXES = [
+      'c:\\windows\\',
+      'c:\\program files\\common files\\',
+      'c:\\program files (x86)\\common files\\',
+      'c:\\programdata\\microsoft\\',
+      'c:\\users\\public\\',
+    ]
+    if (!path) return false
+    return !SYSTEM_PREFIXES.some(prefix => p.startsWith(prefix))
+  }
   if (PATH_ALLOWLIST.some(root => path.startsWith(root))) return true
   if (homeDir) {
     const userApps = homeDir.endsWith('/')
       ? `${homeDir}Applications/`
       : `${homeDir}/Applications/`
     if (path.startsWith(userApps)) return true
+  }
+  return false
+}
+
+/** Windows ids are exe paths — match ALWAYS_KEEP by executable base name. */
+function isAlwaysKept(app: InstalledAppLike): boolean {
+  if (ALWAYS_KEEP_BUNDLE_IDS.has(app.bundleId)) return true
+  if (process.platform === 'win32') {
+    const base = app.bundleId
+      .toLowerCase()
+      .split(/[\\/]/)
+      .pop()
+      ?.replace(/\.exe$/, '')
+    if (base && ALWAYS_KEEP_WIN32_EXE_BASES.has(base)) return true
   }
   return false
 }
@@ -174,7 +222,7 @@ export function filterAppsForDescription(
     rest: string[]
   }>(
     (acc, app) => {
-      if (ALWAYS_KEEP_BUNDLE_IDS.has(app.bundleId)) {
+      if (isAlwaysKept(app)) {
         acc.alwaysKept.push(app.displayName)
       } else if (
         isUserFacingPath(app.path, homeDir) &&

@@ -376,8 +376,17 @@ export function createCliExecutor(opts: {
       // Return the saved logical coordinates so cursor_position reports
       // the position the model expects, not the physical cursor location.
       mouseLocation: () => Promise.resolve({ x: lastMouseX, y: lastMouseY }),
-      mouseButton: (btn: 'left' | 'right' | 'middle', a: 'click' | 'press' | 'release', count?: number) =>
-        p.click(lastMouseX, lastMouseY, btn),
+      // press/release map to the platform's phase primitives when available —
+      // the old blanket click() mapping turned executor drag() into three
+      // independent full clicks on Windows.
+      mouseButton: (btn: 'left' | 'right' | 'middle', a: 'click' | 'press' | 'release', _count?: number) => {
+        if (a === 'press' && p.mouseDown) return p.mouseDown(lastMouseX, lastMouseY)
+        if (a === 'release') {
+          if (p.mouseUp) return p.mouseUp(lastMouseX, lastMouseY)
+          return Promise.resolve()
+        }
+        return p.click(lastMouseX, lastMouseY, btn)
+      },
       mouseScroll: (amount: number, dir: 'vertical' | 'horizontal') => p.scroll(amount, dir),
       typeText: (text: string) => p.typeText(text),
       getFrontmostAppInfo: () => {
@@ -704,11 +713,25 @@ export function createCliExecutor(opts: {
      * 50ms sleep after press: enigo's move_mouse reads NSEvent.pressedMouseButtons
      * to decide .leftMouseDragged vs .mouseMoved; the synthetic leftMouseDown
      * needs a HID-tap round-trip to show up there.
+     *
+     * Windows delegates to the platform's whole-gesture drag() when available
+     * (single PowerShell for press → eased frames → release; the per-frame
+     * composition below costs one process per animation frame).
      */
     async drag(
       from: { x: number; y: number } | undefined,
       to: { x: number; y: number },
     ): Promise<void> {
+      if (!isDarwin && platform?.input.drag) {
+        const start = from ?? { x: lastMouseX, y: lastMouseY }
+        const distance = Math.hypot(to.x - start.x, to.y - start.y)
+        // Same curve as animatedMove: 2000 px/sec, capped at 0.5s.
+        const durationMs = Math.max(80, Math.min((distance / 2000) * 1000, 500))
+        await platform.input.drag(start, to, durationMs)
+        lastMouseX = to.x
+        lastMouseY = to.y
+        return
+      }
       const input = getInput()
       if (from !== undefined) {
         await moveAndSettle(input, from.x, from.y)

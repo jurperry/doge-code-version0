@@ -305,6 +305,76 @@ $lp = [WinMsg]::MakeLParam($cx, $cy)
 }
 
 /**
+ * Send ONLY a button press or release (no move, no full click) — the phase
+ * primitive for drag composition on windows where SendMessage input works.
+ */
+export function sendMouseButton(
+  hwnd: number,
+  x: number,
+  y: number,
+  button: 'left' | 'right',
+  phase: 'down' | 'up',
+): boolean {
+  const msg = phase === 'down'
+    ? (button === 'left' ? '0x0201' : '0x0204')
+    : (button === 'left' ? '0x0202' : '0x0205')
+  const script = `${WINMSG_TYPE}
+$offset = [WinMsg]::GetClientOffset([IntPtr]${hwnd})
+$parts = $offset.Split(',')
+$cx = ${Math.round(x)} - [int]$parts[0]
+$cy = ${Math.round(y)} - [int]$parts[1]
+$lp = [WinMsg]::MakeLParam($cx, $cy)
+[WinMsg]::SendMessage([IntPtr]${hwnd}, ${msg}, [IntPtr]0, $lp)
+`
+  return runPs(script) !== null
+}
+
+/**
+ * Full drag gesture via SendMessage in ONE PowerShell invocation:
+ * move to `from` → WM_LBUTTONDOWN → eased WM_MOUSEMOVE frames →
+ * WM_LBUTTONUP. Client-area adjusted like sendClick. One process for the
+ * whole gesture — the old executor-composed path spawned a PowerShell per
+ * animation frame.
+ */
+export function sendDrag(
+  hwnd: number,
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number,
+  durationMs: number,
+): boolean {
+  const frames = Math.max(2, Math.min(40, Math.round(durationMs / 25)))
+  const frameMs = Math.max(10, Math.round(durationMs / frames))
+  const script = `${WINMSG_TYPE}
+$offset = [WinMsg]::GetClientOffset([IntPtr]${hwnd})
+$parts = $offset.Split(',')
+$ox = [int]$parts[0]
+$oy = [int]$parts[1]
+$fx = ${Math.round(fromX)} - $ox
+$fy = ${Math.round(fromY)} - $oy
+$lpDown = [WinMsg]::MakeLParam($fx, $fy)
+[WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]0, $lpDown)
+Start-Sleep -Milliseconds 20
+[WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0201, [IntPtr]0, $lpDown)
+Start-Sleep -Milliseconds 40
+$frames = ${frames}
+for ($i = 1; $i -le $frames; $i++) {
+    $t = $i / $frames
+    $eased = 1 - [math]::Pow(1 - $t, 3)
+    $x = [math]::Round(${Math.round(fromX)} + (${Math.round(toX)} - ${Math.round(fromX)}) * $eased) - $ox
+    $y = [math]::Round(${Math.round(fromY)} + (${Math.round(toY)} - ${Math.round(fromY)}) * $eased) - $oy
+    $lp = [WinMsg]::MakeLParam($x, $y)
+    [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]0, $lp)
+    Start-Sleep -Milliseconds ${frameMs}
+}
+$lpUp = [WinMsg]::MakeLParam((${Math.round(toX)} - $ox), (${Math.round(toY)} - $oy))
+[WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0202, [IntPtr]0, $lpUp)
+`
+  return runPs(script) !== null
+}
+
+/**
  * Send an Enter key (carriage return) via WM_CHAR.
  */
 export function sendEnter(hwnd: number): boolean {

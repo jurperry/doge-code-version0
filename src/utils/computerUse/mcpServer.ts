@@ -15,7 +15,12 @@ import { filterAppsForDescription } from './appNames.js'
 import { getChicagoCoordinateMode } from './gates.js'
 import { getComputerUseHostAdapter } from './hostAdapter.js'
 
-const APP_ENUM_TIMEOUT_MS = 1000
+// macOS enumeration is Spotlight-backed (<1s). Windows enumerates via
+// PowerShell stages (registry/App Paths/shortcuts/StartApps/running windows)
+// — several seconds even after the parallel split. The fail-soft timeout
+// follows the platform so Windows actually gets the app-name hints in the
+// request_access description (with 1s it always timed out → empty hint list).
+const APP_ENUM_TIMEOUT_MS = process.platform === 'win32' ? 8000 : 1000
 
 /**
  * Enumerate installed apps, timed. Fails soft — if Spotlight is slow or
