@@ -1619,7 +1619,11 @@ async function run(): Promise<CommanderCommand> {
     // `type: 'stdio'`. An enterprise-config ant with the GB gate on would
     // otherwise process.exit(1). Chrome has the same latent issue but has
     // shipped without incident; chicago places itself correctly.
-    if ((getPlatform() === 'macos' || getPlatform() === 'windows') && !getIsNonInteractiveSession()) {
+    //
+    // doge fork: headless opt-in for the builtin MCP servers (see the
+    // Playwright block below for the rationale).
+    const isHeadlessBuiltinMcpEnabled = () => isEnvTruthy(process.env.DOGE_HEADLESS_BUILTIN_MCP);
+    if ((getPlatform() === 'macos' || getPlatform() === 'windows') && (!getIsNonInteractiveSession() || isHeadlessBuiltinMcpEnabled())) {
       try {
         const {
           getChicagoEnabled
@@ -1657,9 +1661,13 @@ async function run(): Promise<CommanderCommand> {
     // browser through the normal MCP tool surface.
     //
     // Interactive sessions only: -p/print runs are one-shot and shouldn't be
-    // able to leave a browser behind. Set DOGE_PLAYWRIGHT_MCP=0 to opt out
-    // (setupPlaywrightMCP then returns an empty config).
-    if (!getIsNonInteractiveSession()) {
+    // able to leave a browser behind. Exception: the desktop shell's chat
+    // pane runs the CLI headless but LONG-LIVED (stream-json over stdio) and
+    // opts in via DOGE_HEADLESS_BUILTIN_MCP=1 — the builtin servers are
+    // exactly as useful there as in a terminal, and the shell tears the
+    // process down when the tab closes. Set DOGE_PLAYWRIGHT_MCP=0 to opt
+    // out (setupPlaywrightMCP then returns an empty config).
+    if (!getIsNonInteractiveSession() || isHeadlessBuiltinMcpEnabled()) {
       try {
         const {
           setupPlaywrightMCP,
