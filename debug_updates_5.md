@@ -489,3 +489,24 @@ Zod schema（`settings/types.ts`）、`toPersistableEffort`、`configureEffortPa
 - 新增 `src/services/mcp/config.test.ts` 6 用例：默认启用（always-on 核心断言）、显式禁用/恢复、普通 server 语义不变、遗留 `enabledMcpServers` 兼容、`setupComputerUseMCP` 输出完整工具集（stdio/dynamic + 全部 `mcp__computer-use__` 前缀 + 核心工具在列）、本地 hint 覆盖工作流要点。
 - 新增 `test/computer-use-e2e.ts`（可复用实机验证脚本，只读操作）：MCP 协议层 ListTools（in-process server + linked transport，24 个工具）、`bindSessionContext` 真实 dispatch 链的 screenshot（1389×868 JPEG 落盘验证）/ zoom（修复前 0 字符，修复后有图）/ cursor_position / 跨会话锁获取与释放。锁与临时产物隔离在 `test/tmp-cu-e2e-config`，结束即清。
 - `bun test src/services/api/ src/utils/model/ src/commands/model/ src/hooks/ src/services/mcp/` 103 pass / 0 fail；`bun run version` 冒烟通过。
+
+## 2026-09-09 auto 会话全放行：plan 模式放行 + CU 自动授权 + plan 审批恢复 auto
+
+用户四点需求：① auto 会话 CU request_access 仍弹授权框；② auto 会话模型切到 plan 模式后 list/grep/bash 等又逐个问权限；③ plan 审批框（用户审核计划）必须保留，auto 也不许放行；④ auto 会话 plan 审批后应直接以 auto 权限继续（旧版静默降级 acceptEdits），普通会话则缺一个"以 auto 权限执行"的选项。
+
+### 修复（单一共享判定 + 三个接缝）
+
+- **共享判定** `src/utils/permissions/autoBypass.ts`（新增）：`isAutoBypassActive(ctx)` = mode==='bypassPermissions'，或 mode==='plan' 且（prePlanMode==='bypassPermissions' || isBypassPermissionsModeAvailable）。信号选 `prePlanMode`（EnterPlanModeTool/`prepareContextForPlanMode` 在 auto 会话进入 plan 时 stash 为 'bypassPermissions'），不设 `isBypassPermissionsModeAvailable`（避免旗标会话的 bypass 继承等副作用泄漏进 /auto）。退出 plan 后残留的 prePlanMode 无害：判定仅在 mode==='plan' 时读它。
+- **②中央管道**（`permissions.ts` 2a 步）：内联的 shouldBypassPermissions 换成 isAutoBypassActive —— auto 会话进 plan 后工具全放行。管道顺序天然保住 ③：deny 规则（1a）、显式 ask 规则（1b/1f）、safetyCheck（1g）与 requiresUserInteraction（1e，ExitPlanMode 审批框）都先于 2a 返回。
+- **①CU 接缝**（`wrapper.tsx` runPermissionDialog 入口）：auto 会话短路掉 ComputerUseApproval 对话框，`src/utils/computerUse/autoGrant.ts`（新增）按对话框 "Allow for this session" 的精确语义构造响应（resolved 应用全授权、不带 tier 由包内 getDefaultTierForApp 回填、未安装 → not_installed、truthy requestedFlags 授予、sentinel 只警告所以照授）；`req.tccState`（macOS OS 级权限缺失）仍弹窗——auto 授不了 OS 权限。授权合并/持久化仍由包侧 wrappedPermissionHandler 完成。
+- **④plan 审批框**（`ExitPlanModePermissionRequest.tsx`）：新增 `autoSession`（prePlanMode==='bypassPermissions' 且未禁用）与 `canBypass`（!isBypassPermissionsModeDisabled）参数进 `buildPlanApprovalOptions`。**最终语义（用户实测后修订：审批框必须罗列全部执行模式供用户选择，auto 不代选不放行）**——auto 会话选项依次为 "Yes, and stay in auto mode"（值 yes-auto-mode-keep-context → bypassPermissions）、"Yes, and auto-accept edits"（值 yes-accept-edits-keep-context → acceptEdits，**用户选了就落 acceptEdits，不因 prePlanMode 自动改映射**）、"Yes, manually approve edits"；普通会话默认首选项保持 auto-accept edits，canBypass 且非旗标会话时追加 "Yes, and use auto mode"（同值 yes-auto-mode-keep-context）与 clear-context 变体（yes-bypass-permissions）。clear-context 的 yes-accept-edits 恒落 acceptEdits；空计划路径（无模式列表）审批后按 autoSession 恢复 bypass 防降级；Shift+Tab 选 options[0]（auto 会话首项即"保持 auto"，仍是用户主动按键）。onAllow 的 setMode 更新先于 tool.call() 应用（PermissionContext.handleUserAllow→persistPermissions），对话框映射即最终模式，ExitPlanModeV2Tool.call() 的 prePlanMode 恢复退居 hook 直通时的兜底（两者语义一致）。模式解析集中导出 `resolvePlanApprovalMode`（旗标会话的 bypass 选项沿用上游 yes-accept-edits-keep-context 映射，受 isBypassPermissionsModeDisabled() 约束）。
+
+### 不改的（有意）
+
+- 桥接/SDK 的 set_permission_mode('bypassPermissions') 仍要求旗标会话（useReplBridge/print.ts）——远程端可用 /auto 命令达成同样效果。
+- Shift+Tab 轮播从 auto 进 plan 需经过 acceptEdits（prePlanMode='acceptEdits'，plan 内照常问权限）：那是用户显式离开 auto 后再进 plan，与"模型在 auto 会话里自动进 plan"（prePlanMode='bypassPermissions'）刻意区分。
+
+### 测试
+
+- 新增 22 用例：`autoBypass.test.ts`（判定矩阵 5）、`permissions.autoBypass.test.ts`（管道集成 4：plan+prePlanMode 放行 / 纯 plan 仍 ask / 直接 bypass 放行 / requiresUserInteraction 工具在 auto+plan 仍 ask）、`autoGrant.test.ts`（授权构造 5）、`ExitPlanModePermissionRequest.test.tsx`（选项罗列与模式解析 8：auto 会话 stay-auto 首选且 accept-edits 并列可选、clear-context 同、普通会话追加 auto 选项、禁用时不出现、旗标会话保持上游、keep-planning 常在、解析矩阵含「auto 会话选 accept-edits 不被改映射」）
+- `bun test src/` 412+ pass / 0 fail；改动模块 import 检查通过；`bun run version` 冒烟通过

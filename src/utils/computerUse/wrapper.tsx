@@ -22,6 +22,8 @@ import { getSessionId } from '../../bootstrap/state.js';
 import { ComputerUseApproval } from '../../components/permissions/ComputerUseApproval/ComputerUseApproval.js';
 import type { Tool, ToolUseContext } from '../../Tool.js';
 import { logForDebugging } from '../debug.js';
+import { isAutoBypassActive } from '../permissions/autoBypass.js';
+import { buildAutoGrantResponse } from './autoGrant.js';
 import { checkComputerUseLock, tryAcquireComputerUseLock } from './computerUseLock.js';
 import { registerEscHotkey } from './escHotkey.js';
 import { getChicagoCoordinateMode } from './gates.js';
@@ -295,6 +297,15 @@ export function getComputerUseMCPToolOverrides(toolName: string): ComputerUseMCP
  */
 async function runPermissionDialog(req: CuPermissionRequest): Promise<CuPermissionResponse> {
   const context = tuc();
+  // doge fork: auto mode (/auto → bypassPermissions, including plan entered
+  // from it) skips the consent dialog — the session is already fully
+  // released. tccState (macOS OS-level permissions missing) must still show:
+  // auto-granting the app list is meaningless while the OS gate is closed.
+  if (isAutoBypassActive(context.getAppState().toolPermissionContext) && !req.tccState) {
+    const response = buildAutoGrantResponse(req);
+    logForDebugging(`[Computer Use MCP] auto mode auto-granted request_access: ${response.granted.map(g => g.displayName).join(', ') || '(none)'}`);
+    return response;
+  }
   const setToolJSX = context.setToolJSX;
   if (!setToolJSX) {
     // Shouldn't happen — main.tsx gate excludes non-interactive. Fail safe.
