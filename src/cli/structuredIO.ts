@@ -350,9 +350,25 @@ export class StructuredIO {
         // Used by bridge session runner for auth token refresh
         // (CLAUDE_CODE_SESSION_ACCESS_TOKEN) which must be readable
         // by the REPL process itself, not just child Bash commands.
+        //
+        // The protocol can only carry string values, so an empty string is
+        // the "clear this variable" encoding — delete instead of assigning
+        // ''. Assigning '' is NOT equivalent: downstream consumers that
+        // merely truthy-check tolerate '', but anything reading the raw
+        // value does not. Concrete case (2026-09-09 GUI chat shell):
+        // profile switches push ANTHROPIC_AUTH_TOKEN='' when the target
+        // profile authenticates via DOGE_API_KEY; with '' assigned, the
+        // Anthropic SDK's own env pickup sends `Authorization: Bearer`
+        // (empty token) alongside the correct x-api-key, and real gateways
+        // (bigmodel.cn) reject the request with 401. Deleting matches the
+        // interactive applyModelProfile semantics exactly.
         const keys = Object.keys(message.variables)
         for (const [key, value] of Object.entries(message.variables)) {
-          process.env[key] = value
+          if (value === '') {
+            delete process.env[key]
+          } else {
+            process.env[key] = value
+          }
         }
         logForDebugging(
           `[structuredIO] applied update_environment_variables: ${keys.join(', ')}`,

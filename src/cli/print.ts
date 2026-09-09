@@ -4586,18 +4586,15 @@ function handleSetPermissionMode(
       })
       return toolPermissionContext
     }
-    if (!toolPermissionContext.isBypassPermissionsModeAvailable) {
-      output.enqueue({
-        type: 'control_response',
-        response: {
-          subtype: 'error',
-          request_id: requestId,
-          error:
-            'Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions',
-        },
-      })
-      return toolPermissionContext
-    }
+    // doge fork: drop the upstream isBypassPermissionsModeAvailable
+    // (--dangerously-skip-permissions launch flag) rejection. The interactive
+    // side already made the same call — getNextPermissionMode offers
+    // bypassPermissions "whenever it is not explicitly disabled", so /auto and
+    // Shift+Tab work without the flag. The GUI chat shell drives this handler
+    // as its /auto equivalent; forcing the flag would make the shell spawn
+    // with --allow-dangerously-skip-permissions, and that flag's other
+    // semantics (isAutoBypassActive treating plan mode as bypass) would break
+    // plan-mode tool gating. The settings killswitch above still applies.
   }
 
   // Check if trying to switch to auto mode without the classifier gate
