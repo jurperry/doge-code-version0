@@ -17,7 +17,13 @@ import {
 
 type FormStep = 'name' | 'provider' | 'baseURL' | 'apiKey' | 'authTokenType' | 'model' | 'contextWindow' | 'opus' | 'sonnet' | 'haiku' | 'review'
 
-const STEP_ORDER: FormStep[] = ['name', 'provider', 'baseURL', 'apiKey', 'authTokenType', 'model', 'contextWindow', 'opus', 'sonnet', 'haiku', 'review']
+export const STEP_ORDER: FormStep[] = ['name', 'provider', 'baseURL', 'apiKey', 'authTokenType', 'model', 'contextWindow', 'opus', 'sonnet', 'haiku', 'review']
+
+// The form must open on the first step of STEP_ORDER. Exported so a test can
+// pin this — the flow once regressed into opening on 'provider' (API format)
+// after 'name' was inserted at the head of STEP_ORDER but the initial state
+// kept the old value.
+export const FIRST_FORM_STEP: FormStep = 'name'
 
 const STEP_META: Record<Exclude<FormStep, 'review'>, { title: string; hint: string }> = {
   name: {
@@ -110,7 +116,7 @@ type ProviderFormProps = {
 
 export function ProviderForm({ existing, initialModel, onDone }: ProviderFormProps): React.ReactNode {
   const [values, setValues] = React.useState<ProviderFormValues>(() => initialValues(existing, initialModel))
-  const [step, setStep] = React.useState<FormStep>('provider')
+  const [step, setStep] = React.useState<FormStep>(FIRST_FORM_STEP)
   const [error, setError] = React.useState<string | undefined>()
   const typedRef = React.useRef('')
   const setAppState = useSetAppState()
@@ -127,6 +133,38 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
     const idx = STEP_ORDER.indexOf(step)
     setStep(STEP_ORDER[Math.min(idx + 1, STEP_ORDER.length - 1)])
   }, [step])
+
+  // ↑/↓ past the edge of a step's option list moves to the previous/next
+  // step instead of wrapping. Draft typing is saved back into values without
+  // validation so arrowing away and back doesn't lose what was entered.
+  const goToStep = React.useCallback((next: FormStep) => {
+    const draft = typedRef.current
+    setValues(v => {
+      switch (step) {
+        case 'name': return { ...v, providerName: draft }
+        case 'baseURL': return { ...v, baseURL: draft }
+        case 'apiKey': return { ...v, apiKey: draft }
+        case 'model': return { ...v, model: draft }
+        case 'contextWindow': return { ...v, contextWindow: draft }
+        case 'opus': return { ...v, opusModel: draft }
+        case 'sonnet': return { ...v, sonnetModel: draft }
+        case 'haiku': return { ...v, haikuModel: draft }
+        default: return v
+      }
+    })
+    setError(undefined)
+    setStep(next)
+  }, [step])
+
+  const goPrevStep = React.useCallback(() => {
+    const idx = STEP_ORDER.indexOf(step)
+    if (idx > 0) goToStep(STEP_ORDER[idx - 1])
+  }, [step, goToStep])
+
+  const goNextStep = React.useCallback(() => {
+    const idx = STEP_ORDER.indexOf(step)
+    if (idx >= 0 && idx < STEP_ORDER.length - 1) goToStep(STEP_ORDER[idx + 1])
+  }, [step, goToStep])
 
   const handleSave = React.useCallback(async () => {
     const validationError = validateProviderForm(
@@ -274,6 +312,8 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         defaultFocusValue={values.provider}
         onChange={handleSelect}
         onCancel={handleCancel}
+        onUpFromFirstItem={goPrevStep}
+        onDownFromLastItem={goNextStep}
         visibleOptionCount={3}
       />
     )
@@ -285,6 +325,8 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         defaultFocusValue={values.authTokenType ?? 'DOGE_API_KEY'}
         onChange={handleSelect}
         onCancel={handleCancel}
+        onUpFromFirstItem={goPrevStep}
+        onDownFromLastItem={goNextStep}
         visibleOptionCount={2}
       />
     )
@@ -307,6 +349,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         options={reviewOptions}
         onChange={handleSelect}
         onCancel={handleCancel}
+        onUpFromFirstItem={goPrevStep}
         visibleOptionCount={11}
       />
     )
@@ -327,6 +370,11 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         options={[inputOption]}
         onChange={handleSelect}
         onCancel={handleCancel}
+        onUpFromFirstItem={goPrevStep}
+        onDownFromLastItem={goNextStep}
+        // Show the step's global position (1–11) instead of the local list
+        // index, which would always be 1 for a single-option select.
+        indexOffset={stepIndex}
         visibleOptionCount={1}
       />
     )
@@ -337,7 +385,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
       <Text bold>{isEdit ? `Edit Provider — ${existing?.model}` : 'Add Provider'}</Text>
       <Text dimColor>
         Step {stepIndex + 1}/{STEP_ORDER.length}: {step === 'review' ? 'Review' : STEP_META[step].title}
-        {'  '}(esc to cancel)
+        {'  '}(↑/↓ to switch steps, esc to cancel)
       </Text>
       <Box flexDirection="column" marginY={1}>
         {body}

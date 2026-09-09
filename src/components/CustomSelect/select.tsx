@@ -90,6 +90,15 @@ export type SelectProps<T> = {
   readonly hideIndexes?: boolean;
 
   /**
+   * Offset added to the displayed 1-based option indexes. Use when a Select
+   * renders a single input option standing for one step of a longer flow, so
+   * the index shows the step's position (e.g. "3.") instead of always "1.".
+   *
+   * @default 0
+   */
+  readonly indexOffset?: number;
+
+  /**
    * Number of visible options.
    *
    * @default 5
@@ -190,7 +199,7 @@ export type SelectProps<T> = {
   readonly onRemoveImage?: (id: number) => void;
 };
 export function Select(t0) {
-  const $ = _c(72);
+  const $ = _c(76);
   const {
     isDisabled: t1,
     hideIndexes: t2,
@@ -205,6 +214,7 @@ export function Select(t0) {
     layout: t4,
     disableSelection: t5,
     inlineDescriptions: t6,
+    indexOffset: tIndexOffset,
     onUpFromFirstItem,
     onDownFromLastItem,
     onInputModeToggle,
@@ -219,6 +229,7 @@ export function Select(t0) {
   const layout = t4 === undefined ? "compact" : t4;
   const disableSelection = t5 === undefined ? false : t5;
   const inlineDescriptions = t6 === undefined ? false : t6;
+  const indexOffset = tIndexOffset === undefined ? 0 : tIndexOffset;
   const [imagesSelected, setImagesSelected] = useState(false);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   let t7;
@@ -350,7 +361,7 @@ export function Select(t0) {
   let t15;
   let t16;
   let t17;
-  if ($[28] !== hideIndexes || $[29] !== highlightText || $[30] !== imagesSelected || $[31] !== inlineDescriptions || $[32] !== inputValues || $[33] !== isDisabled || $[34] !== layout || $[35] !== onCancel || $[36] !== onChange || $[37] !== onImagePaste || $[38] !== onOpenEditor || $[39] !== onRemoveImage || $[40] !== options.length || $[41] !== pastedContents || $[42] !== selectedImageIndex || $[43] !== state.focusedValue || $[44] !== state.options || $[45] !== state.value || $[46] !== state.visibleFromIndex || $[47] !== state.visibleOptions || $[48] !== state.visibleToIndex) {
+  if ($[28] !== hideIndexes || $[29] !== highlightText || $[30] !== imagesSelected || $[31] !== inlineDescriptions || $[32] !== inputValues || $[33] !== isDisabled || $[34] !== layout || $[35] !== onCancel || $[36] !== onChange || $[37] !== onImagePaste || $[38] !== onOpenEditor || $[39] !== onRemoveImage || $[40] !== options.length || $[41] !== pastedContents || $[42] !== selectedImageIndex || $[43] !== state.focusedValue || $[44] !== state.options || $[45] !== state.value || $[46] !== state.visibleFromIndex || $[47] !== state.visibleOptions || $[48] !== state.visibleToIndex || $[75] !== indexOffset) {
     t17 = Symbol.for("react.early_return_sentinel");
     bb0: {
       const styles = {
@@ -359,9 +370,10 @@ export function Select(t0) {
       };
       if (layout === "expanded") {
         let t18;
-        if ($[53] !== state.options.length) {
-          t18 = state.options.length.toString();
+        if ($[53] !== state.options.length || $[72] !== indexOffset) {
+          t18 = (indexOffset + state.options.length).toString();
           $[53] = state.options.length;
+          $[72] = indexOffset;
           $[54] = t18;
         } else {
           t18 = $[54];
@@ -372,7 +384,7 @@ export function Select(t0) {
             const isLastVisibleOption = option_1.index === state.visibleToIndex - 1;
             const areMoreOptionsBelow = state.visibleToIndex < options.length;
             const areMoreOptionsAbove = state.visibleFromIndex > 0;
-            const i = state.visibleFromIndex + index + 1;
+            const i = indexOffset + state.visibleFromIndex + index + 1;
             const isFocused = !isDisabled && state.focusedValue === option_1.value;
             const isSelected = state.value === option_1.value;
             if (option_1.type === "input") {
@@ -406,10 +418,11 @@ export function Select(t0) {
       }
       if (layout === "compact-vertical") {
         let t18;
-        if ($[55] !== hideIndexes || $[56] !== state.options) {
-          t18 = hideIndexes ? 0 : state.options.length.toString().length;
+        if ($[55] !== hideIndexes || $[56] !== state.options || $[73] !== indexOffset) {
+          t18 = hideIndexes ? 0 : (indexOffset + state.options.length).toString().length;
           $[55] = hideIndexes;
           $[56] = state.options;
+          $[73] = indexOffset;
           $[57] = t18;
         } else {
           t18 = $[57];
@@ -420,7 +433,7 @@ export function Select(t0) {
             const isLastVisibleOption_0 = option_2.index === state.visibleToIndex - 1;
             const areMoreOptionsBelow_0 = state.visibleToIndex < options.length;
             const areMoreOptionsAbove_0 = state.visibleFromIndex > 0;
-            const i_0 = state.visibleFromIndex + index_1 + 1;
+            const i_0 = indexOffset + state.visibleFromIndex + index_1 + 1;
             const isFocused_0 = !isDisabled && state.focusedValue === option_2.value;
             const isSelected_0 = state.value === option_2.value;
             if (option_2.type === "input") {
@@ -452,10 +465,11 @@ export function Select(t0) {
         break bb0;
       }
       let t18;
-      if ($[58] !== hideIndexes || $[59] !== state.options) {
-        t18 = hideIndexes ? 0 : state.options.length.toString().length;
+      if ($[58] !== hideIndexes || $[59] !== state.options || $[74] !== indexOffset) {
+        t18 = hideIndexes ? 0 : (indexOffset + state.options.length).toString().length;
         $[58] = hideIndexes;
         $[59] = state.options;
+        $[74] = indexOffset;
         $[60] = t18;
       } else {
         t18 = $[60];
@@ -468,7 +482,7 @@ export function Select(t0) {
         const isLastVisibleOption_1 = option_3.index === state.visibleToIndex - 1;
         const areMoreOptionsBelow_1 = state.visibleToIndex < options.length;
         const areMoreOptionsAbove_1 = state.visibleFromIndex > 0;
-        const i_1 = state.visibleFromIndex + index_3 + 1;
+        const i_1 = indexOffset + state.visibleFromIndex + index_3 + 1;
         const isFocused_1 = !isDisabled && state.focusedValue === option_3.value;
         const isSelected_1 = state.value === option_3.value;
         const isOptionDisabled_1 = option_3.disabled === true;
@@ -540,7 +554,7 @@ export function Select(t0) {
           const isLastVisibleOption_2 = option_4.index === state.visibleToIndex - 1;
           const areMoreOptionsBelow_2 = state.visibleToIndex < options.length;
           const areMoreOptionsAbove_2 = state.visibleFromIndex > 0;
-          const i_2 = state.visibleFromIndex + index_4 + 1;
+          const i_2 = indexOffset + state.visibleFromIndex + index_4 + 1;
           const isFocused_2 = !isDisabled && state.focusedValue === option_4.value;
           const isSelected_2 = state.value === option_4.value;
           return <SelectInputOption key={String(option_4.value)} option={option_4} isFocused={isFocused_2} isSelected={isSelected_2} shouldShowDownArrow={areMoreOptionsBelow_2 && isLastVisibleOption_2} shouldShowUpArrow={areMoreOptionsAbove_2 && isFirstVisibleOption_2} maxIndexWidth={maxIndexWidth_1} index={i_2} inputValue={inputValue_1} onInputChange={value_3 => {
@@ -568,7 +582,7 @@ export function Select(t0) {
         const isLastVisibleOption_3 = option_4.index === state.visibleToIndex - 1;
         const areMoreOptionsBelow_3 = state.visibleToIndex < options.length;
         const areMoreOptionsAbove_3 = state.visibleFromIndex > 0;
-        const i_3 = state.visibleFromIndex + index_4 + 1;
+        const i_3 = indexOffset + state.visibleFromIndex + index_4 + 1;
         const isFocused_3 = !isDisabled && state.focusedValue === option_4.value;
         const isSelected_3 = state.value === option_4.value;
         const isOptionDisabled_2 = option_4.disabled === true;
@@ -596,6 +610,7 @@ export function Select(t0) {
     $[46] = state.visibleFromIndex;
     $[47] = state.visibleOptions;
     $[48] = state.visibleToIndex;
+    $[75] = indexOffset;
     $[49] = T0;
     $[50] = t15;
     $[51] = t16;
