@@ -5,6 +5,7 @@ import { homedir } from 'os'
 import * as path from 'path'
 import { logEvent } from 'src/services/analytics/index.js'
 import { fileURLToPath } from 'url'
+import { existsSync } from 'fs'
 import { isInBundledMode } from './bundledMode.js'
 import { logForDebugging } from './debug.js'
 import { isEnvDefinedFalsy } from './envUtils.js'
@@ -12,6 +13,7 @@ import { execFileNoThrow } from './execFileNoThrow.js'
 import { findExecutable } from './findExecutable.js'
 import { logError } from './log.js'
 import { getPlatform } from './platform.js'
+import { builtinRipgrepCandidates } from './ripgrepPaths.js'
 import { countCharInString } from './stringUtils.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -55,13 +57,31 @@ const getRipgrepConfig = memoize((): RipgrepConfig => {
     }
   }
 
-  const rgRoot = path.resolve(__dirname, 'vendor', 'ripgrep')
-  const command =
-    process.platform === 'win32'
-      ? path.resolve(rgRoot, `${process.arch}-win32`, 'rg.exe')
-      : path.resolve(rgRoot, `${process.arch}-${process.platform}`, 'rg')
+  // In a `bun build --compile` executable, __dirname is Bun's virtual mount
+  // (B:\~BUN\root\) — the legacy module-relative vendor path can't be spawned
+  // from there. builtinRipgrepCandidates() checks real-disk locations first
+  // (env override, then vendor/ripgrep staged next to the executable).
+  const candidates = builtinRipgrepCandidates({ moduleDir: __dirname })
+  const found = candidates.find(p => existsSync(p))
+  if (found) {
+    logForDebugging(`ripgrep: using builtin binary at ${found}`)
+    return { mode: 'builtin', command: found, args: [] }
+  }
 
-  return { mode: 'builtin', command, args: [] }
+  // No vendored binary on disk (e.g. the exe was copied without its vendor/
+  // dir). Fall back to system rg so Glob/Grep degrade gracefully instead of
+  // ENOENT-ing on a virtual path. Bare 'rg' per the PATH-hijack note above.
+  const { cmd: fallbackPath } = findExecutable('rg', [])
+  if (fallbackPath !== 'rg') {
+    logForDebugging('ripgrep: builtin binary not found, using system rg')
+    return { mode: 'system', command: 'rg', args: [] }
+  }
+
+  return {
+    mode: 'builtin',
+    command: candidates[candidates.length - 1]!,
+    args: [],
+  }
 })
 
 export function ripgrepCommand(): {
