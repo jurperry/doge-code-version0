@@ -1,6 +1,8 @@
 import { saveGlobalConfig } from '../../utils/config.js'
 import {
+  isSameProviderEntry,
   normalizeModelName,
+  normalizeProviderName,
   readCustomApiStorage,
   writeCustomApiStorage,
   type CustomApiStorageData,
@@ -33,19 +35,18 @@ export type ProviderFormValues = {
 }
 
 /** Case-insensitive comparison key for provider names. */
-export function normalizeProviderName(name: string): string {
-  return name.trim().toLowerCase()
-}
+export { normalizeProviderName }
 
 /**
  * Find a DIFFERENT profile already using this provider name.
- * `selfModel` (normalized comparison key of the model being edited) is
- * excluded so re-saving an existing provider with its own name is allowed.
+ * `self` (the stored entry being edited, identified by its ORIGINAL name /
+ * model so renames still match) is excluded so re-saving or renaming an
+ * existing provider with its own name is allowed.
  */
 export function findProviderNameConflict(
   providerName: string,
   profiles: ModelProfile[],
-  selfModel?: string,
+  self?: ModelProfile,
 ): ModelProfile | undefined {
   const key = normalizeProviderName(providerName)
   if (!key) return undefined
@@ -53,22 +54,22 @@ export function findProviderNameConflict(
     p =>
       p.providerName !== undefined &&
       normalizeProviderName(p.providerName) === key &&
-      normalizeModelName(p.model) !== normalizeModelName(selfModel ?? ''),
+      !(self && isSameProviderEntry(p, self)),
   )
 }
 
 /**
  * Validate form values. Returns an error message, or undefined when valid.
- * `profiles`/`selfModel` power the provider-name uniqueness check — pass
+ * `profiles`/`self` power the provider-name uniqueness check — pass
  * them wherever available; the form re-validates on save as the final gate.
  */
 export function validateProviderForm(
   values: ProviderFormValues,
   profiles: ModelProfile[] = [],
-  selfModel?: string,
+  self?: ModelProfile,
 ): string | undefined {
   if (!values.providerName?.trim()) return 'Provider name is required (e.g. deepseek官方).'
-  const conflict = findProviderNameConflict(values.providerName, profiles, selfModel)
+  const conflict = findProviderNameConflict(values.providerName, profiles, self)
   if (conflict) {
     return `Provider name '${values.providerName.trim()}' is already used by ${conflict.model}. Provider names must be unique.`
   }
@@ -119,13 +120,22 @@ export function dedupeSavedModels(existing: string[], next: string): string[] {
   return [...existing.filter(m => normalizeModelName(m) !== normalized), next]
 }
 
-/** Upsert a profile into the profiles list using normalized-name matching. */
+/**
+ * Upsert a profile into the profiles list.
+ *
+ * providerName is the identity (legacy unnamed profiles fall back to
+ * normalized-model matching via isSameProviderEntry). `self` is the stored
+ * entry being edited, identified by its ORIGINAL providerName/model — when
+ * the user renames the provider and/or its main model, the upsert replaces
+ * the old entry in place instead of appending a same-name duplicate.
+ */
 export function upsertModelProfile(
   profiles: ModelProfile[],
   profile: ModelProfile,
+  self?: ModelProfile,
 ): ModelProfile[] {
-  const normalized = normalizeModelName(profile.model)
-  const idx = profiles.findIndex(p => normalizeModelName(p.model) === normalized)
+  const selfIdx = self ? profiles.findIndex(p => isSameProviderEntry(p, self)) : -1
+  const idx = selfIdx >= 0 ? selfIdx : profiles.findIndex(p => isSameProviderEntry(p, profile))
   if (idx < 0) return [...profiles, profile]
   const next = [...profiles]
   next[idx] = profile
@@ -175,10 +185,27 @@ export async function saveAndActivateProvider(
   profile: ModelProfile,
   deps: ProviderSaveDeps,
   setAppState: (updater: (prev: any) => any) => void,
+  self?: ModelProfile,
 ): Promise<void> {
   const stored = deps.readStorage()
-  const savedModels = dedupeSavedModels(stored.savedModels ?? [], profile.model)
-  const modelProfiles = upsertModelProfile(stored.modelProfiles ?? [], profile)
+  const modelProfiles = upsertModelProfile(stored.modelProfiles ?? [], profile, self)
+  // The replaced entry's OLD main model must leave savedModels (the
+  // /provider menu is driven by savedModels) unless a remaining profile
+  // still uses it — otherwise the rename leaves an orphan duplicate row.
+  const priorProfiles = stored.modelProfiles ?? []
+  const replaced =
+    self !== undefined
+      ? priorProfiles.find(p => isSameProviderEntry(p, self))
+      : priorProfiles.find(p => isSameProviderEntry(p, profile))
+  let savedModels = stored.savedModels ?? []
+  if (replaced && normalizeModelName(replaced.model) !== normalizeModelName(profile.model)) {
+    const oldKey = normalizeModelName(replaced.model)
+    const stillUsed = modelProfiles.some(p => normalizeModelName(p.model) === oldKey)
+    if (!stillUsed) {
+      savedModels = savedModels.filter(m => normalizeModelName(m) !== oldKey)
+    }
+  }
+  savedModels = dedupeSavedModels(savedModels, profile.model)
   const credentials = {
     provider: profile.provider,
     baseURL: profile.baseURL,
@@ -192,6 +219,10 @@ export async function saveAndActivateProvider(
       ...current.customApiEndpoint,
       model: profile.model,
       savedModels,
+      // Keep the .claude.json mirror's profile list in sync too — it used to
+      // stay stale (the credentials store is the source of truth, but the
+      // startup dedupe migration then has to repair the mirror every boot).
+      modelProfiles,
       ...credentials,
     },
   }))

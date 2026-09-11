@@ -1,4 +1,6 @@
+import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { saveGlobalConfig } from './config.js'
+import { getGlobalClaudeFile } from './env.js'
 import { getSecureStorage } from './secureStorage/index.js'
 
 export type TierAliasName = 'opus' | 'sonnet' | 'haiku'
@@ -97,6 +99,10 @@ export function readCustomApiStorage(): CustomApiStorageData {
   const data = storage.read?.() ?? {}
   const raw = data[CUSTOM_API_STORAGE_KEY]
   if (!raw || typeof raw !== 'object') return {}
+  return normalizeCustomApiStorageData(parseCustomApiStorage(raw))
+}
+
+function parseCustomApiStorage(raw: object): CustomApiStorageData {
   const value = raw as Record<string, unknown>
   return {
     provider:
@@ -133,6 +139,168 @@ export function readCustomApiStorage(): CustomApiStorageData {
           }
         : undefined,
   }
+}
+
+// --- Provider identity (providerName is THE unique key) ---
+
+/** Case-insensitive comparison key for provider names (trim + lowercase). */
+export function normalizeProviderName(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+/**
+ * Whether two profile objects describe the SAME stored provider entry.
+ *
+ * Identity is the normalized providerName when both sides have one; profiles
+ * saved before the field existed fall back to normalized-model matching.
+ *
+ * The stored side (`a`) is typically an entry from disk while `b` is the
+ * entry being edited — when the user renames the provider AND/OR its main
+ * model, the old values on `b` still identify the entry to replace, so
+ * edits land in place instead of appending a same-name duplicate.
+ */
+export function isSameProviderEntry(a: ModelProfile, b: ModelProfile): boolean {
+  const an = a.providerName?.trim()
+  const bn = b.providerName?.trim()
+  if (an && bn) return normalizeProviderName(an) === normalizeProviderName(bn)
+  return normalizeModelName(a.model) === normalizeModelName(b.model)
+}
+
+/**
+ * Collapse duplicate profiles that share a providerName (legacy unnamed
+ * profiles group by normalized model instead). Winner per group: the entry
+ * whose main model is the active model, else the LAST entry (the most recent
+ * edit — the historic duplicate bug appended newer entries after older ones).
+ * Order of first occurrences is preserved.
+ */
+export function dedupeModelProfiles(
+  profiles: ModelProfile[],
+  activeModel?: string,
+): ModelProfile[] {
+  if (profiles.length <= 1) return profiles
+  const activeKey = activeModel?.trim() ? normalizeModelName(activeModel) : undefined
+  type Entry = { winner: ModelProfile; active: boolean }
+  const groups: Entry[] = []
+  const byKey = new Map<string, Entry>()
+  for (const p of profiles) {
+    const nameKey = p.providerName?.trim() ? normalizeProviderName(p.providerName) : undefined
+    const key = nameKey ? `name:${nameKey}` : `model:${normalizeModelName(p.model)}`
+    const isActive = activeKey !== undefined && normalizeModelName(p.model) === activeKey
+    const existing = byKey.get(key)
+    if (!existing) {
+      const entry: Entry = { winner: p, active: isActive }
+      byKey.set(key, entry)
+      groups.push(entry)
+      continue
+    }
+    // Later occurrence wins unless the kept one is the active entry.
+    if (!existing.active) existing.winner = p
+    if (isActive) existing.active = true
+  }
+  if (groups.length === profiles.length) return profiles
+  return groups.map(g => g.winner)
+}
+
+/**
+ * Normalize a parsed storage payload: deduplicate same-providerName profiles
+ * and prune savedModels entries orphaned by that dedupe (the dropped
+ * duplicates' main models, unless a kept profile still uses them). Returns
+ * the input unchanged when there is nothing to repair. Pure — no I/O.
+ */
+export function normalizeCustomApiStorageData(data: CustomApiStorageData): CustomApiStorageData {
+  const profiles = data.modelProfiles ?? []
+  if (profiles.length <= 1) return data
+  const kept = dedupeModelProfiles(profiles, data.model)
+  if (kept.length === profiles.length) return data
+  const dropped = profiles.filter(p => !kept.includes(p))
+  const droppedKeys = new Set(dropped.map(p => normalizeModelName(p.model)))
+  const keptKeys = new Set(kept.map(p => normalizeModelName(p.model)))
+  const savedModels = (data.savedModels ?? []).filter(
+    m => !droppedKeys.has(normalizeModelName(m)) || keptKeys.has(normalizeModelName(m)),
+  )
+  return { ...data, modelProfiles: kept, savedModels }
+}
+
+/**
+ * One-time startup migration: physically repair stores corrupted by the
+ * historic duplicate-provider bug (editing a provider and renaming its main
+ * model appended a second profile with the same providerName instead of
+ * replacing the old one). Dedupes customApiEndpoint.modelProfiles/savedModels
+ * in BOTH secure storage (~/.doge/.credentials.json) and the ~/.doge/.claude.json
+ * mirror — the .claude.json copy is written directly via fs because the
+ * saveGlobalConfig guard is not unlocked this early in startup.
+ *
+ * Idempotent: no-op (and no write) when no duplicates exist. Must run before
+ * restoreTierStateFromStorage so the credential heal reads repaired data.
+ * Returns true when a repair write happened.
+ */
+export function migrateDuplicateProviderProfiles(): boolean {
+  let changed = false
+
+  const storage = getSecureStorage() as {
+    read?: () => Record<string, unknown> | null
+    update?: (data: Record<string, unknown>) => { success: boolean }
+  }
+  const data = storage.read?.() ?? {}
+  const raw = data[CUSTOM_API_STORAGE_KEY]
+  let normalized: CustomApiStorageData | undefined
+  if (raw && typeof raw === 'object') {
+    const parsed = parseCustomApiStorage(raw)
+    normalized = normalizeCustomApiStorageData(parsed)
+    if (normalized !== parsed) {
+      storage.update?.({ ...data, [CUSTOM_API_STORAGE_KEY]: normalized })
+      changed = true
+    }
+  }
+
+  try {
+    const claudeFile = getGlobalClaudeFile()
+    const config = JSON.parse(readFileSync(claudeFile, 'utf8')) as Record<string, unknown>
+    const ep = config[CUSTOM_API_STORAGE_KEY]
+    if (ep && typeof ep === 'object') {
+      if (normalized) {
+        // The .claude.json copy is a MIRROR of secure storage: align its
+        // profiles/savedModels with the normalized source of truth. Deduping
+        // only the credentials side leaves the mirror's copy of a dropped
+        // duplicate's model as a phantom /provider menu row (the mirror may
+        // legitimately have fewer profiles than the pre-migration store, so
+        // its own "no duplicates" fast path never prunes it).
+        if (
+          JSON.stringify(ep.modelProfiles) !== JSON.stringify(normalized.modelProfiles) ||
+          JSON.stringify(ep.savedModels) !== JSON.stringify(normalized.savedModels)
+        ) {
+          config[CUSTOM_API_STORAGE_KEY] = {
+            ...ep,
+            modelProfiles: normalized.modelProfiles ?? [],
+            savedModels: normalized.savedModels ?? [],
+          }
+          writeAtomicJson(claudeFile, config)
+          changed = true
+        }
+      } else {
+        // No secure-storage payload to align with — normalize the mirror
+        // standalone (it may predate the credentials store).
+        const parsed = parseCustomApiStorage(ep)
+        const mirrorNormalized = normalizeCustomApiStorageData(parsed)
+        if (mirrorNormalized !== parsed) {
+          config[CUSTOM_API_STORAGE_KEY] = mirrorNormalized
+          writeAtomicJson(claudeFile, config)
+          changed = true
+        }
+      }
+    }
+  } catch {
+    // Missing/unreadable .claude.json — secure storage is the source of truth.
+  }
+
+  return changed
+}
+
+/** tmp + rename write, so a crash mid-migration can't truncate the config. */
+function writeAtomicJson(path: string, data: unknown): void {
+  const tmp = `${path}.doge-tmp`
+  writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8')
+  renameSync(tmp, path)
 }
 
 // --- Tier selection persistence ---
@@ -255,11 +423,15 @@ export function getModelProfile(modelName: string): ModelProfile | undefined {
   )
 }
 
-export function saveModelProfile(profile: ModelProfile): void {
+export function saveModelProfile(profile: ModelProfile, self?: ModelProfile): void {
   const current = readCustomApiStorage()
   const profiles = current.modelProfiles ?? []
-  const normalized = normalizeModelName(profile.model)
-  const idx = profiles.findIndex(p => normalizeModelName(p.model) === normalized)
+  // providerName is the identity: an edit that renamed the provider and/or
+  // its main model replaces the stored entry in place instead of appending a
+  // same-name duplicate. `self` (the entry being edited) takes precedence so
+  // a provider RENAME still finds the old entry to replace.
+  let idx = self ? profiles.findIndex(p => isSameProviderEntry(p, self)) : -1
+  if (idx < 0) idx = profiles.findIndex(p => isSameProviderEntry(p, profile))
   if (idx >= 0) {
     profiles[idx] = profile
   } else {

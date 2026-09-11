@@ -42,8 +42,38 @@ test('validateProviderForm: re-using the edited profile\'s own name is allowed',
     { model: 'glm-5.3', providerName: 'glm官方' },
   ]
   expect(
-    validateProviderForm({ ...VALID_BASE, providerName: 'glm官方' }, profiles, 'glm-5.3[1m]'),
+    validateProviderForm({ ...VALID_BASE, providerName: 'glm官方' }, profiles, { model: 'glm-5.3' }),
   ).toBeUndefined()
+})
+
+test('validateProviderForm: editing a provider may rename its main model (identity = providerName)', () => {
+  const profiles: ModelProfile[] = [
+    { model: 'glm-5.3', providerName: 'glm官方' },
+  ]
+  // The user renames the MAIN MODEL but keeps the provider name: the old
+  // entry (identified by the original providerName/model) is still "self",
+  // so no duplicate-name error and no second profile may be created.
+  expect(
+    validateProviderForm(
+      { ...VALID_BASE, providerName: 'glm官方', model: 'glm-5.5' },
+      profiles,
+      { model: 'glm-5.3', providerName: 'glm官方' },
+    ),
+  ).toBeUndefined()
+})
+
+test('validateProviderForm: renaming a provider onto another provider\'s name is rejected', () => {
+  const profiles: ModelProfile[] = [
+    { model: 'glm-5.3', providerName: 'glm官方' },
+    { model: 'kimi-k3', providerName: 'kimi官方' },
+  ]
+  const error = validateProviderForm(
+    { ...VALID_BASE, providerName: 'kimi官方', model: 'glm-5.5' },
+    profiles,
+    { model: 'glm-5.3', providerName: 'glm官方' },
+  )
+  expect(error).toContain('already used')
+  expect(error).toContain('kimi-k3')
 })
 
 test('validateProviderForm: missing main model is rejected', () => {
@@ -84,7 +114,7 @@ test('findProviderNameConflict matches case-insensitively, ignores unnamed profi
     { model: 'unnamed-model' },
   ]
   expect(findProviderNameConflict('glm官方', profiles)?.model).toBe('glm-5.3')
-  expect(findProviderNameConflict('glm官方', profiles, 'glm-5.3')).toBeUndefined()
+  expect(findProviderNameConflict('glm官方', profiles, { model: 'glm-5.3', providerName: 'GLM官方' })).toBeUndefined()
   expect(findProviderNameConflict('deepseek官方', profiles)).toBeUndefined()
   expect(findProviderNameConflict('', profiles)).toBeUndefined()
 })
@@ -174,6 +204,43 @@ test('upsertModelProfile inserts when absent and replaces by normalized name', (
   const withReplaced = upsertModelProfile(existing, { model: 'DeepSeek-V4-Pro[1m]', apiKey: 'new' })
   expect(withReplaced).toHaveLength(2)
   expect(withReplaced[1].apiKey).toBe('new')
+})
+
+test('upsertModelProfile replaces in place when the main model is renamed (same providerName)', () => {
+  // The exact user-reported bug: edit a provider, change its main model,
+  // save — the old same-name entry must be REPLACED, not kept alongside.
+  const stored: ModelProfile[] = [
+    { model: 'glm-5.3', providerName: 'glm官方', apiKey: 'k1' },
+    { model: 'kimi-k3', providerName: 'kimi官方', apiKey: 'k2' },
+  ]
+  const self = stored[0]
+  const next = upsertModelProfile(stored, { model: 'glm-5.5', providerName: 'glm官方', apiKey: 'k1b' }, self)
+  expect(next).toHaveLength(2)
+  expect(next[0]).toEqual({ model: 'glm-5.5', providerName: 'glm官方', apiKey: 'k1b' })
+  expect(next[1].model).toBe('kimi-k3')
+})
+
+test('upsertModelProfile replaces in place when the provider itself is renamed', () => {
+  const stored: ModelProfile[] = [
+    { model: 'glm-5.3', providerName: 'glm官方' },
+    { model: 'kimi-k3', providerName: 'kimi官方' },
+  ]
+  const next = upsertModelProfile(
+    stored,
+    { model: 'glm-5.3', providerName: '智谱官方' },
+    stored[0],
+  )
+  expect(next).toHaveLength(2)
+  expect(next[0].providerName).toBe('智谱官方')
+})
+
+test('upsertModelProfile without self still collapses a same-providerName entry (defense in depth)', () => {
+  const stored: ModelProfile[] = [
+    { model: 'deepseek-old', providerName: 'deepseek官方' },
+  ]
+  const next = upsertModelProfile(stored, { model: 'deepseek-new', providerName: 'DeepSeek官方 ' })
+  expect(next).toHaveLength(1)
+  expect(next[0].model).toBe('deepseek-new')
 })
 
 // --- saveAndActivateProvider ---
@@ -273,4 +340,54 @@ test('saveAndActivateProvider replaces an existing profile for the same model', 
   expect(h.getStorage().modelProfiles?.[0].apiKey).toBe('new-key')
   // The saved list keeps a single entry for the same normalized model
   expect(h.getStorage().savedModels).toEqual(['deepseek-v4-pro[1m]'])
+})
+
+test('saveAndActivateProvider with self replaces the entry and drops the orphaned old model', async () => {
+  // The user-reported repro: edit "deepseek官方", rename its main model,
+  // save+activate. One profile must remain and savedModels must not keep
+  // the old model as a phantom second provider row.
+  const old: ModelProfile = {
+    model: 'deepseek-v4.1-flash[1m]',
+    providerName: 'deepseek官方',
+    provider: 'anthropic',
+    apiKey: 'sk-1',
+  }
+  const h = makeHarness({
+    model: 'kimi-k3[1m]',
+    savedModels: ['kimi-k3[1m]', 'deepseek-v4.1-flash[1m]'],
+    modelProfiles: [old, { model: 'kimi-k3[1m]', providerName: 'kimi官方', provider: 'anthropic', apiKey: 'sk-2' }],
+  })
+  const renamed: ModelProfile = {
+    model: 'deepseek-flash[1m]',
+    providerName: 'deepseek官方',
+    provider: 'anthropic',
+    apiKey: 'sk-1',
+  }
+
+  await saveAndActivateProvider(renamed, h.deps, h.setAppState, old)
+
+  const profiles = h.getStorage().modelProfiles ?? []
+  expect(profiles).toHaveLength(2)
+  expect(profiles.filter(p => p.providerName === 'deepseek官方')).toHaveLength(1)
+  expect(profiles[0].model).toBe('deepseek-flash[1m]')
+  // Old model string is gone; new one present exactly once
+  expect(h.getStorage().savedModels).toEqual(['kimi-k3[1m]', 'deepseek-flash[1m]'])
+  // The .claude.json mirror got the same cleanup
+  expect(h.getGlobalConfig().customApiEndpoint.savedModels).toEqual(['kimi-k3[1m]', 'deepseek-flash[1m]'])
+})
+
+test('saveAndActivateProvider keeps the old model when another profile still uses it', async () => {
+  const old: ModelProfile = { model: 'shared-model', providerName: 'a官方', provider: 'anthropic', apiKey: 'k' }
+  const h = makeHarness({
+    model: 'shared-model',
+    savedModels: ['shared-model'],
+    modelProfiles: [old, { model: 'shared-model[1m]', providerName: 'b官方', provider: 'anthropic', apiKey: 'k2' }],
+  })
+  const renamed: ModelProfile = { model: 'a-new-model', providerName: 'a官方', provider: 'anthropic', apiKey: 'k' }
+
+  await saveAndActivateProvider(renamed, h.deps, h.setAppState, old)
+
+  // b官方 still owns the same normalized model — it must stay selectable
+  expect(h.getStorage().savedModels).toEqual(['shared-model', 'a-new-model'])
+  expect(h.getStorage().modelProfiles).toHaveLength(2)
 })
