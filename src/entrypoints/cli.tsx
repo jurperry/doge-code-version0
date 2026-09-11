@@ -298,6 +298,12 @@ async function main(): Promise<void> {
     migrateLegacyProjectDirs
   } = await import('../utils/sessionStoragePortable.js');
   await migrateLegacyProjectDirs();
+  // One-time repair of provider stores corrupted by the duplicate-provider
+  // bug (same providerName on multiple modelProfiles entries): physically
+  // dedupes secure storage AND the .claude.json mirror before anything reads
+  // them. Idempotent — no write when no duplicates exist.
+  const { migrateDuplicateProviderProfiles } = await import('../utils/customApiStorage.js');
+  migrateDuplicateProviderProfiles();
   // Restore tier env (ANTHROPIC_DEFAULT_*_MODEL / tier-selected main model)
   // from persisted custom API storage before any UI or query code reads them.
   // Only fills in vars a start script didn't already set.

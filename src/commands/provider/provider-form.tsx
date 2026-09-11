@@ -170,7 +170,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
     const validationError = validateProviderForm(
       values,
       readCustomApiStorage().modelProfiles ?? [],
-      existing?.model,
+      existing,
     )
     if (validationError) {
       setError(validationError)
@@ -178,7 +178,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
     }
     const profile = buildModelProfile(values)
     try {
-      await saveAndActivateProvider(profile, defaultProviderSaveDeps(), setAppState)
+      await saveAndActivateProvider(profile, defaultProviderSaveDeps(), setAppState, existing)
       const tiers = [
         profile.defaultOpusModel ? `opus=${profile.defaultOpusModel}` : undefined,
         profile.defaultSonnetModel ? `sonnet=${profile.defaultSonnetModel}` : undefined,
@@ -229,7 +229,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
       const conflict = findProviderNameConflict(
         raw,
         readCustomApiStorage().modelProfiles ?? [],
-        existing?.model,
+        existing,
       )
       if (conflict) {
         setError(
