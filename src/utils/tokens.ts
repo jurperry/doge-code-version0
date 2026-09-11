@@ -14,7 +14,23 @@ export function getTokenUsage(message: Message): Usage | undefined {
     ) &&
     message.message.model !== SYNTHETIC_MODEL
   ) {
-    return message.message.usage
+    const usage = message.message.usage
+    // 全零 usage = 网关占位（GLM 的 message_start 不带输入侧，真实值只在
+    // 回合末 message_delta 合并进最后一条记录；更早的分块记录与被中断的
+    // 响应则永远拿不到）——当作无数据返回 undefined，让调用方继续向前找
+    // 上一条真实 usage，避免上下文余量显示 100% left（input=0/窗口）。
+    // 真实响应的输入侧恒 > 0（系统提示词就有 ~20k），不会误伤。
+    if (
+      usage &&
+      usage.input_tokens +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0) +
+        usage.output_tokens ===
+        0
+    ) {
+      return undefined
+    }
+    return usage
   }
   return undefined
 }
