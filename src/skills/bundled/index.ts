@@ -1,5 +1,6 @@
 import { feature } from 'bun:bundle'
 import { shouldAutoEnableClaudeInChrome } from 'src/utils/claudeInChrome/setup.js'
+import { initAnthropicSkills } from './anthropic/index.js'
 import { registerBatchSkill } from './batch.js'
 import { registerClaudeInChromeSkill } from './claudeInChrome.js'
 import { registerDebugSkill } from './debug.js'
@@ -76,4 +77,7 @@ export function initBundledSkills(): void {
     /* eslint-enable @typescript-eslint/no-require-imports */
     registerRunSkillGeneratorSkill()
   }
+  // Must run last: it skips names already registered above, so the
+  // feature-gated custom claude-api skill keeps precedence where enabled.
+  initAnthropicSkills()
 }

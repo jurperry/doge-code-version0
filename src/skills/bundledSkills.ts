@@ -1,12 +1,20 @@
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import { constants as fsConstants } from 'fs'
-import { mkdir, open } from 'fs/promises'
+import { mkdir, open, readFile } from 'fs/promises'
 import { dirname, isAbsolute, join, normalize, sep as pathSep } from 'path'
 import type { ToolUseContext } from '../Tool.js'
 import type { Command } from '../types/command.js'
 import { logForDebugging } from '../utils/debug.js'
 import { getBundledSkillsRoot } from '../utils/permissions/filesystem.js'
 import type { HooksSettings } from '../utils/settings/types.js'
+
+/**
+ * Content for a single extracted skill file. A plain string is written as
+ * UTF-8 text; `{ copyFrom }` streams raw bytes from the referenced path
+ * (real file in source mode, Bun-embedded asset path in compiled builds),
+ * which is how vendored binary assets (fonts, sample PDFs) ship.
+ */
+export type BundledSkillFileContent = string | { copyFrom: string }
 
 /**
  * Definition for a bundled skill that ships with the CLI.
@@ -29,11 +37,15 @@ export type BundledSkillDefinition = {
   /**
    * Additional reference files to extract to disk on first invocation.
    * Keys are relative paths (forward slashes, no `..`), values are content.
-   * When set, the skill prompt is prefixed with a "Base directory for this
-   * skill: <dir>" line so the model can Read/Grep these files on demand —
-   * same contract as disk-based skills.
+   * May also be a loader function — used by large vendored skill sets so the
+   * content strings only load when the skill is first invoked, not at
+   * process start. When set, the skill prompt is prefixed with a "Base
+   * directory for this skill: <dir>" line so the model can Read/Grep these
+   * files on demand — same contract as disk-based skills.
    */
-  files?: Record<string, string>
+  files?:
+    | Record<string, BundledSkillFileContent>
+    | (() => Promise<Record<string, BundledSkillFileContent>>)
   getPromptForCommand: (
     args: string,
     context: ToolUseContext,
@@ -52,11 +64,14 @@ const bundledSkills: Command[] = []
  */
 export function registerBundledSkill(definition: BundledSkillDefinition): void {
   const { files } = definition
+  const hasFiles =
+    typeof files === 'function' ||
+    (files != null && Object.keys(files).length > 0)
 
   let skillRoot: string | undefined
   let getPromptForCommand = definition.getPromptForCommand
 
-  if (files && Object.keys(files).length > 0) {
+  if (hasFiles) {
     skillRoot = getBundledSkillExtractDir(definition.name)
     // Closure-local memoization: extract once per process.
     // Memoize the promise (not the result) so concurrent callers await
@@ -130,11 +145,14 @@ export function getBundledSkillExtractDir(skillName: string): string {
  */
 async function extractBundledSkillFiles(
   skillName: string,
-  files: Record<string, string>,
+  files:
+    | Record<string, BundledSkillFileContent>
+    | (() => Promise<Record<string, BundledSkillFileContent>>),
 ): Promise<string | null> {
   const dir = getBundledSkillExtractDir(skillName)
   try {
-    await writeSkillFiles(dir, files)
+    const fileMap = typeof files === 'function' ? await files() : files
+    await writeSkillFiles(dir, fileMap)
     return dir
   } catch (e) {
     logForDebugging(
@@ -146,14 +164,14 @@ async function extractBundledSkillFiles(
 
 async function writeSkillFiles(
   dir: string,
-  files: Record<string, string>,
+  files: Record<string, BundledSkillFileContent>,
 ): Promise<void> {
   // Group by parent dir so we mkdir each subtree once, then write.
-  const byParent = new Map<string, [string, string][]>()
+  const byParent = new Map<string, [string, BundledSkillFileContent][]>()
   for (const [relPath, content] of Object.entries(files)) {
     const target = resolveSkillFilePath(dir, relPath)
     const parent = dirname(target)
-    const entry: [string, string] = [target, content]
+    const entry: [string, BundledSkillFileContent] = [target, content]
     const group = byParent.get(parent)
     if (group) group.push(entry)
     else byParent.set(parent, [entry])
@@ -183,10 +201,17 @@ const SAFE_WRITE_FLAGS =
       fsConstants.O_EXCL |
       O_NOFOLLOW
 
-async function safeWriteFile(p: string, content: string): Promise<void> {
+async function safeWriteFile(
+  p: string,
+  content: BundledSkillFileContent,
+): Promise<void> {
+  // copyFrom entries carry bytes read from the vendored asset path (works on
+  // both real source trees and Bun's embedded virtual fs in compiled builds).
+  const data =
+    typeof content === 'string' ? content : await readFile(content.copyFrom)
   const fh = await open(p, SAFE_WRITE_FLAGS, 0o600)
   try {
-    await fh.writeFile(content, 'utf8')
+    await fh.writeFile(data, typeof content === 'string' ? 'utf8' : undefined)
   } finally {
     await fh.close()
   }
