@@ -1021,6 +1021,18 @@ export const SlashCommandSchema = lazySchema(() =>
       argumentHint: z
         .string()
         .describe('Hint for skill arguments (e.g., "<file>")'),
+      type: z
+        .enum(['prompt', 'local', 'local-jsx'])
+        .optional()
+        .describe(
+          'Command kind: prompt = skill-style prompt expansion, local = non-interactive local command',
+        ),
+      source: z
+        .string()
+        .optional()
+        .describe(
+          'Where a prompt-type command comes from (bundled/plugin/project/user/mcp/workflow); absent on local commands',
+        ),
     })
     .describe(
       'Information about an available skill (invoked via /command syntax).',

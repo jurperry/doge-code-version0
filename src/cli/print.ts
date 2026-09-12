@@ -4458,6 +4458,11 @@ async function handleInitializeRequest(
         name: getCommandName(cmd),
         description: formatDescriptionWithSource(cmd),
         argumentHint: cmd.argumentHint || '',
+        // 桌面壳的命令面板/技能清单需要区分 prompt 型技能（含 source：
+        // bundled/plugin/project/user/mcp/workflow）与 local 型透传命令——
+        // description 里的来源标记是给人看的，机器读这两个字段（旧壳忽略）
+        type: cmd.type,
+        source: cmd.type === 'prompt' ? cmd.source : undefined,
       })),
     agents: agents.map(agent => ({
       name: agent.agentType,
