@@ -56,6 +56,7 @@ import {
   sanitizeName,
   writeTeamFileAsync,
 } from '../../utils/swarm/teamHelpers.js'
+import { getLeadOrchestrationReminder } from '../../utils/swarm/leadPromptAddendum.js'
 import {
   assignTeammateColor,
   createTeammatePaneInSwarmView,
@@ -117,6 +118,8 @@ export type SpawnOutput = {
   team_name?: string
   is_splitpane?: boolean
   plan_mode_required?: boolean
+  /** One-time <system-reminder> with lead orchestration guidance; empty when already delivered. */
+  lead_orchestration_reminder?: string
 }
 
 export type SpawnTeammateConfig = {
@@ -1038,6 +1041,19 @@ async function handleSpawnInProcess(
  * it2 CLI or tmux installed).
  */
 async function handleSpawn(
+  input: SpawnInput,
+  context: ToolUseContext,
+): Promise<{ data: SpawnOutput }> {
+  const result = await spawnViaBackend(input, context)
+  if (result.data?.team_name) {
+    result.data.lead_orchestration_reminder = getLeadOrchestrationReminder(
+      result.data.team_name,
+    )
+  }
+  return result
+}
+
+async function spawnViaBackend(
   input: SpawnInput,
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {

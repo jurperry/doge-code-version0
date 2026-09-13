@@ -15,6 +15,7 @@ import {
 import { jsonStringify } from '../../utils/slowOperations.js'
 import { getResolvedTeammateMode } from '../../utils/swarm/backends/registry.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
+import { getLeadOrchestrationReminder } from '../../utils/swarm/leadPromptAddendum.js'
 import type { TeamFile } from '../../utils/swarm/teamHelpers.js'
 import {
   getTeamFilePath,
@@ -53,6 +54,8 @@ export type Output = {
   team_name: string
   team_file_path: string
   lead_agent_id: string
+  /** One-time <system-reminder> with lead orchestration guidance; empty when already delivered. */
+  lead_orchestration_reminder?: string
 }
 
 export type Input = z.infer<InputSchema>
@@ -113,15 +116,25 @@ export const TeamCreateTool: Tool<InputSchema, Output> = buildTool({
   },
 
   mapToolResultToToolResultBlockParam(data, toolUseID) {
+    const blocks: Array<{
+      type: 'text'
+      text: string
+    }> = [
+      {
+        type: 'text' as const,
+        text: jsonStringify(data),
+      },
+    ]
+    if (data.lead_orchestration_reminder) {
+      blocks.push({
+        type: 'text',
+        text: data.lead_orchestration_reminder,
+      })
+    }
     return {
       tool_use_id: toolUseID,
       type: 'tool_result' as const,
-      content: [
-        {
-          type: 'text' as const,
-          text: jsonStringify(data),
-        },
-      ],
+      content: blocks,
     }
   },
 
@@ -232,6 +245,8 @@ export const TeamCreateTool: Tool<InputSchema, Output> = buildTool({
         team_name: finalTeamName,
         team_file_path: teamFilePath,
         lead_agent_id: leadAgentId,
+        lead_orchestration_reminder:
+          getLeadOrchestrationReminder(finalTeamName),
       },
     }
   },

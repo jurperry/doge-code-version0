@@ -173,6 +173,8 @@ type TeammateSpawnedOutput = {
   team_name?: string;
   is_splitpane?: boolean;
   plan_mode_required?: boolean;
+  /** One-time <system-reminder> with lead orchestration guidance; empty when already delivered. */
+  lead_orchestration_reminder?: string;
 };
 
 // Combined output type including both public and internal types
@@ -1302,17 +1304,24 @@ export const AgentTool = buildTool({
     const internalData = data as InternalOutput;
     if (typeof internalData === 'object' && internalData !== null && 'status' in internalData && internalData.status === 'teammate_spawned') {
       const spawnData = internalData as TeammateSpawnedOutput;
-      return {
-        tool_use_id: toolUseID,
-        type: 'tool_result',
-        content: [{
+      const content: Array<{type: 'text', text: string}> = [{
           type: 'text',
           text: `Spawned successfully.
 agent_id: ${spawnData.teammate_id}
 name: ${spawnData.name}
 team_name: ${spawnData.team_name}
 The agent is now running and will receive instructions via mailbox.`
-        }]
+        }];
+      if (spawnData.lead_orchestration_reminder) {
+        content.push({
+          type: 'text',
+          text: spawnData.lead_orchestration_reminder
+        });
+      }
+      return {
+        tool_use_id: toolUseID,
+        type: 'tool_result',
+        content
       };
     }
     if ('status' in internalData && internalData.status === 'remote_launched') {
