@@ -73,6 +73,12 @@ export type InProcessTeammateTaskState = TaskStateBase & {
   // Progress tracking (for computing deltas in notifications)
   lastReportedToolCount: number
   lastReportedTokenCount: number
+
+  // Unified-panel visibility deadline (CoordinatorTaskPanel row). undefined =
+  // no deadline (running); timestamp = hide after grace; 0 = dismissed via x.
+  // Assigned by the panel's 1s tick on first sight of a terminal teammate —
+  // the swarm runtime transitions don't set it (see components/tasks/teammatePanel.ts).
+  evictAfter?: number
 }
 
 export function isInProcessTeammateTask(

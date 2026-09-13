@@ -20,6 +20,17 @@ function isLocalAgent(task: unknown): task is LocalAgentTaskState {
   )
 }
 
+// Same inline pattern for teammates: only a shallow check lives here; the
+// heavier swarm machinery is pulled in lazily via the injectable deps below.
+function isInProcessTeammate(task: unknown): task is { type: 'in_process_teammate'; identity: { agentName: string; teamName?: string }; shutdownRequested: boolean } {
+  return (
+    typeof task === 'object' &&
+    task !== null &&
+    'type' in task &&
+    task.type === 'in_process_teammate'
+  )
+}
+
 /**
  * Return the task released back to stub form: retain dropped, messages
  * cleared, evictAfter set if terminal. Shared by exitTeammateView and
@@ -109,28 +120,114 @@ export function exitTeammateView(
 }
 
 /**
- * Context-sensitive x: running → abort, terminal → dismiss.
+ * Context-sensitive x: running → stop, terminal → dismiss.
  * Dismiss sets evictAfter=0 so the filter hides immediately.
  * If viewing the dismissed agent, also exits to leader.
+ *
+ * Per type:
+ * - local_agent: running → abort; terminal → dismiss.
+ * - in_process_teammate: running → graceful shutdown (mailbox
+ *   shutdown_request + [stopping] flag); already shutting down → hard kill
+ *   (the pane fake task's abortController is wired to killPane); terminal →
+ *   dismiss.
+ *
+ * The side-effecting teammate actions are injectable for tests; defaults
+ * lazy-import the swarm modules so this state helper stays out of the
+ * swarm import graph (cycle safety, same reason as the inline type checks).
  */
-export function stopOrDismissAgent(
+export type StopOrDismissDeps = {
+  requestTeammateShutdown: (
+    taskId: string,
+    teammateName: string,
+    teamName: string | undefined,
+    setAppState: (updater: (prev: AppState) => AppState) => void,
+  ) => void | Promise<void>
+  killTeammate: (
+    taskId: string,
+    setAppState: (updater: (prev: AppState) => AppState) => void,
+  ) => void | Promise<void>
+}
+
+const defaultStopOrDismissDeps: StopOrDismissDeps = {
+  async requestTeammateShutdown(taskId, teammateName, teamName, setAppState) {
+    const [{ sendShutdownRequestToMailbox }, { requestTeammateShutdown }] =
+      await Promise.all([
+        import('../utils/teammateMailbox.js'),
+        import('../tasks/InProcessTeammateTask/InProcessTeammateTask.js'),
+      ])
+    await sendShutdownRequestToMailbox(
+      teammateName,
+      teamName,
+      'Stopped from the agent panel',
+    ).catch(() => {})
+    requestTeammateShutdown(taskId, setAppState)
+  },
+  async killTeammate(taskId, setAppState) {
+    const { InProcessTeammateTask } = await import(
+      '../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
+    )
+    await InProcessTeammateTask.kill(taskId, setAppState)
+  },
+}
+
+export function stopOrDismissAgentWithDeps(
   taskId: string,
   setAppState: (updater: (prev: AppState) => AppState) => void,
+  deps: StopOrDismissDeps,
 ): void {
   setAppState(prev => {
     const task = prev.tasks[taskId]
-    if (!isLocalAgent(task)) return prev
+    if (isLocalAgent(task)) {
+      if (task.status === 'running') {
+        task.abortController?.abort()
+        return prev
+      }
+      if (task.evictAfter === 0) return prev
+      const viewingThis = prev.viewingAgentTaskId === taskId
+      return {
+        ...prev,
+        tasks: {
+          ...prev.tasks,
+          [taskId]: { ...release(task), evictAfter: 0 },
+        },
+        ...(viewingThis && {
+          viewingAgentTaskId: undefined,
+          viewSelectionMode: 'none',
+        }),
+      }
+    }
+    if (!isInProcessTeammate(task)) return prev
     if (task.status === 'running') {
-      task.abortController?.abort()
+      if (!task.shutdownRequested) {
+        // Graceful: mailbox shutdown_request first, then the [stopping] flag.
+        // Side effects are deferred out of the state updater (a sync throw
+        // in deps must not break the state update either).
+        void Promise.resolve()
+          .then(() =>
+            deps.requestTeammateShutdown(
+              taskId,
+              task.identity.agentName,
+              task.identity.teamName,
+              setAppState,
+            ),
+          )
+          .catch(() => {})
+      } else {
+        // Shutdown already requested — escalate to a hard kill.
+        void Promise.resolve()
+          .then(() => deps.killTeammate(taskId, setAppState))
+          .catch(() => {})
+      }
       return prev
     }
+    // Terminal teammate → dismiss immediately.
     if (task.evictAfter === 0) return prev
     const viewingThis = prev.viewingAgentTaskId === taskId
     return {
       ...prev,
       tasks: {
         ...prev.tasks,
-        [taskId]: { ...release(task), evictAfter: 0 },
+        [taskId]: { ...task, evictAfter: 0 },
       },
       ...(viewingThis && {
         viewingAgentTaskId: undefined,
@@ -138,4 +235,11 @@ export function stopOrDismissAgent(
       }),
     }
   })
+}
+
+export function stopOrDismissAgent(
+  taskId: string,
+  setAppState: (updater: (prev: AppState) => AppState) => void,
+): void {
+  stopOrDismissAgentWithDeps(taskId, setAppState, defaultStopOrDismissDeps)
 }

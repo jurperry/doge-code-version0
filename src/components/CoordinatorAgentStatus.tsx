@@ -3,10 +3,11 @@ import { c as _c } from "react/compiler-runtime";
  * CoordinatorTaskPanel — Steerable list of background agents.
  *
  * Renders below the prompt input footer: the main row (main-<model>) is
- * always visible; each local_agent task gets a row (sub-agent-<model>-<task>).
- * Visibility of agent rows is driven by evictAfter: undefined (running/
- * retained) shows always; a timestamp shows until passed. Enter to view/
- * steer, x to dismiss.
+ * always visible; each local_agent task gets a row (sub-agent-<model>-<task>)
+ * and each in_process_teammate a row (sub-agent-<name>-<activity>, see
+ * TeammateAgentLine) — the unified roster. Visibility of agent rows is driven
+ * by evictAfter: undefined (running/retained) shows always; a timestamp shows
+ * until passed. Enter to view/steer, x to dismiss.
  */
 
 import figures from 'figures';
@@ -19,20 +20,25 @@ import { Box, Text, wrapText } from '../ink.js';
 import { type AppState, useAppState, useSetAppState } from '../state/AppState.js';
 import { enterTeammateView, exitTeammateView } from '../state/teammateViewHelpers.js';
 import { isPanelAgentTask, type LocalAgentTaskState } from '../tasks/LocalAgentTask/LocalAgentTask.js';
+import { isInProcessTeammateTask, type InProcessTeammateTaskState } from '../tasks/InProcessTeammateTask/types.js';
 import { formatDuration, formatNumber } from '../utils/format.js';
 import { evictTerminalTask } from '../utils/task/framework.js';
+import { applyTeammatePanelTick } from './tasks/teammatePanel.js';
+import { TeammateAgentLine } from './tasks/TeammateAgentLine.js';
 import { isTerminalStatus } from './tasks/taskStatusUtils.js';
 
 /**
- * Which panel-managed tasks currently have a visible row.
- * Presence in AppState.tasks IS visibility — the 1s tick in
- * CoordinatorTaskPanel evicts tasks past their evictAfter deadline. The
- * evictAfter !== 0 check handles immediate dismiss (x key) without making
- * the filter time-dependent. Shared by panel render, useCoordinatorTaskCount,
- * and index resolvers so the math can't drift.
+ * Which panel-managed tasks currently have a visible row. Panel-managed =
+ * local_agent tasks (non main-session) + in_process_teammate tasks — the
+ * unified main-/sub-agent- roster. Presence in AppState.tasks IS visibility —
+ * the 1s tick in CoordinatorTaskPanel evicts tasks past their evictAfter
+ * deadline (teammates get their grace assigned by the tick, see
+ * teammatePanel.ts). The evictAfter !== 0 check handles immediate dismiss
+ * (x key) without making the filter time-dependent. Shared by panel render,
+ * useCoordinatorTaskCount, and index resolvers so the math can't drift.
  */
-export function getVisibleAgentTasks(tasks: AppState['tasks']): LocalAgentTaskState[] {
-  return Object.values(tasks).filter((t): t is LocalAgentTaskState => isPanelAgentTask(t) && t.evictAfter !== 0).sort((a, b) => a.startTime - b.startTime);
+export function getVisibleAgentTasks(tasks: AppState['tasks']): Array<LocalAgentTaskState | InProcessTeammateTaskState> {
+  return Object.values(tasks).filter((t): t is LocalAgentTaskState | InProcessTeammateTaskState => (isPanelAgentTask(t) || isInProcessTeammateTask(t)) && t.evictAfter !== 0).sort((a, b) => a.startTime - b.startTime);
 }
 /**
  * Short model label for panel rows: strip the local-only [1m]/[2m] context
@@ -51,7 +57,7 @@ export function CoordinatorTaskPanel(): React.ReactNode {
   const selectedIndex = tasksSelected ? coordinatorTaskIndex : undefined;
   const setAppState = useSetAppState();
   const visibleTasks = getVisibleAgentTasks(tasks);
-  const hasTasks = Object.values(tasks).some(isPanelAgentTask);
+  const hasTasks = Object.values(tasks).some(t => isPanelAgentTask(t) || isInProcessTeammateTask(t));
   // Main row label: resolved main-loop model (display-only resolution, same
   // as other footer consumers) → e.g. `main-kimi-k3`.
   const mainModel = useMainLoopModel();
@@ -72,6 +78,8 @@ export function CoordinatorTaskPanel(): React.ReactNode {
           evictTerminalTask(t.id, setAppState_0);
         }
       }
+      // Teammates: assign terminal grace on first sighting, evict past deadline.
+      applyTeammatePanelTick(tasksRef_0.current, now, setAppState_0);
       setTick_0((prev: number) => prev + 1);
     }, 1000, tasksRef, setAppState, setTick);
     return () => clearInterval(interval);
@@ -80,7 +88,7 @@ export function CoordinatorTaskPanel(): React.ReactNode {
   // no sub-agents, so the team roster is a stable fixture below the prompt.
   return <Box flexDirection="column" marginTop={1}>
       <MainLine label={mainLabel} isSelected={selectedIndex === 0} isViewed={viewingAgentTaskId === undefined} onClick={() => exitTeammateView(setAppState)} />
-      {visibleTasks.map((task, i) => <AgentLine key={task.id} task={task} name={`sub-agent-${shortModelName(task.model, 'inherit')}`} isSelected={selectedIndex === i + 1} isViewed={viewingAgentTaskId === task.id} onClick={() => enterTeammateView(task.id, setAppState)} />)}
+      {visibleTasks.map((task, i) => task.type === 'in_process_teammate' ? <TeammateAgentLine key={task.id} task={task} isSelected={selectedIndex === i + 1} isViewed={viewingAgentTaskId === task.id} onClick={() => enterTeammateView(task.id, setAppState)} /> : <AgentLine key={task.id} task={task} name={`sub-agent-${shortModelName(task.model, 'inherit')}`} isSelected={selectedIndex === i + 1} isViewed={viewingAgentTaskId === task.id} onClick={() => enterTeammateView(task.id, setAppState)} />)}
     </Box>;
 }
 
