@@ -4649,6 +4649,7 @@ type LiteMetadata = {
   isSidechain: boolean
   projectPath?: string
   teamName?: string
+  agentName?: string
   customTitle?: string
   summary?: string
   tag?: string
@@ -4817,6 +4818,7 @@ async function readLiteMetadata(
     head.includes('"isSidechain":true') || head.includes('"isSidechain": true')
   const projectPath = extractJsonStringField(head, 'cwd')
   const teamName = extractJsonStringField(head, 'teamName')
+  const agentName = extractJsonStringField(head, 'agentName')
   const agentSetting = extractJsonStringField(head, 'agentSetting')
 
   // Prefer the last-prompt tail entry — captured by extractFirstPrompt at
@@ -4869,6 +4871,7 @@ async function readLiteMetadata(
     isSidechain,
     projectPath,
     teamName,
+    agentName,
     customTitle,
     summary,
     tag,
@@ -5102,6 +5105,7 @@ async function enrichLog(
     gitBranch: meta.gitBranch,
     isSidechain: meta.isSidechain,
     teamName: meta.teamName,
+    agentName: meta.agentName,
     customTitle: meta.customTitle,
     summary: meta.summary,
     tag: meta.tag,
@@ -5119,16 +5123,21 @@ async function enrichLog(
   if (!enriched.firstPrompt && !enriched.customTitle) {
     enriched.firstPrompt = '(session)'
   }
-  // Filter: skip sidechains and agent sessions
+  // Filter: skip sidechains and teammate sessions. teamName alone marks the
+  // LEAD's session (useLogMessages stamps teamContext.teamName on lead
+  // messages once a team is created) — the lead is the user's actual
+  // conversation and MUST stay resumable; only teamName+agentName (a named
+  // teammate worker session) is internal. Filtering on teamName alone made
+  // every /agent-teams conversation disappear from /resume.
   if (enriched.isSidechain) {
     logForDebugging(
       `Session ${log.sessionId} filtered from /resume: isSidechain=true`,
     )
     return null
   }
-  if (enriched.teamName) {
+  if (enriched.teamName && enriched.agentName) {
     logForDebugging(
-      `Session ${log.sessionId} filtered from /resume: teamName=${enriched.teamName}`,
+      `Session ${log.sessionId} filtered from /resume: teammate session teamName=${enriched.teamName} agentName=${enriched.agentName}`,
     )
     return null
   }

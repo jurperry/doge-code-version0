@@ -32,6 +32,7 @@ import {
   isTeamLead,
   isTeammate,
 } from '../../utils/teammate.js'
+import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import {
   createShutdownApprovedMessage,
   createShutdownRejectedMessage,
@@ -63,6 +64,36 @@ const StructuredMessage = lazySchema(() =>
     }),
   ]),
 )
+
+type StructuredMessageValue = z.infer<ReturnType<typeof StructuredMessage>>
+
+/**
+ * Models frequently serialize protocol payloads as JSON strings instead of
+ * using the structured union — `message: "{\"type\":\"shutdown_request\",…}"`
+ * plus a summary. The plain-text path delivers those as chat, the protocol
+ * handlers (requestId generation, approval abort, team-file cleanup) never
+ * run, and shutdowns silently no-op: observed live with both the lead and
+ * the teammates stringifying, the teammate approving three times into the
+ * void and staying "running" forever (TeamDelete blocked on active members).
+ * Promote strings that parse into an exact structured message so the
+ * protocol engages regardless of serialization. Only exact schema matches
+ * promote — plain text or JSON reports without a protocol `type` still go
+ * through as chat.
+ */
+export function parseStructuredMessageFromString(
+  text: string,
+): StructuredMessageValue | null {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{')) return null
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    const result = StructuredMessage().safeParse(parsed)
+    if (result.success) return result.data
+  } catch {
+    // Not JSON — plain text
+  }
+  return null
+}
 
 const inputSchema = lazySchema(() =>
   z.object({
@@ -345,7 +376,11 @@ async function handleShutdownApproval(
     teamName,
   )
 
-  if (ownBackendType === 'in-process') {
+  // In-process teammates share the LEAD's process — gracefulShutdown(0)
+  // below exits the whole CLI, so this branch must ALWAYS return. Abort is
+  // the only exit mechanism (the runner loop tears down on abort and marks
+  // the member inactive).
+  if (isInProcessTeammate() || ownBackendType === 'in-process') {
     logForDebugging(
       `[SendMessageTool] In-process teammate ${agentName} approving shutdown - signaling abort`,
     )
@@ -364,30 +399,41 @@ async function handleShutdownApproval(
         )
       }
     }
-  } else {
-    if (agentId) {
-      const appState = context.getAppState()
-      const task = findTeammateTaskByAgentId(agentId, appState.tasks)
-      if (task?.abortController) {
-        logForDebugging(
-          `[SendMessageTool] Fallback: Found in-process task for ${agentName} via AppState, aborting`,
-        )
-        task.abortController.abort()
 
-        return {
-          data: {
-            success: true,
-            message: `Shutdown approved (fallback path). Agent ${agentName} is now exiting.`,
-            request_id: requestId,
-          },
-        }
+    return {
+      data: {
+        success: true,
+        message: `Shutdown approved. Sent confirmation to team-lead. Agent ${agentName} is now exiting.`,
+        request_id: requestId,
+      },
+    }
+  }
+
+  // Out-of-process teammates: abort a matching in-process task if one exists
+  // (registry mismatch), else exit this process — for a real teammate
+  // subprocess that terminates only the teammate.
+  if (agentId) {
+    const appState = context.getAppState()
+    const task = findTeammateTaskByAgentId(agentId, appState.tasks)
+    if (task?.abortController) {
+      logForDebugging(
+        `[SendMessageTool] Fallback: Found in-process task for ${agentName} via AppState, aborting`,
+      )
+      task.abortController.abort()
+
+      return {
+        data: {
+          success: true,
+          message: `Shutdown approved (fallback path). Agent ${agentName} is now exiting.`,
+          request_id: requestId,
+        },
       }
     }
-
-    setImmediate(async () => {
-      await gracefulShutdown(0, 'other')
-    })
   }
+
+  setImmediate(async () => {
+    await gracefulShutdown(0, 'other')
+  })
 
   return {
     data: {
@@ -602,6 +648,21 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
     },
 
     async validateInput(input, _context) {
+      // Promote stringified protocol payloads BEFORE the string checks below
+      // — a model sending message: '{"type":"shutdown_request",…}' without a
+      // summary would otherwise be rejected by "summary is required when
+      // message is a string" before call()'s own promotion could engage the
+      // protocol handlers. Mutating input here is safe: call() receives the
+      // same object and re-promotes (a no-op now).
+      if (typeof input.message === 'string') {
+        const promoted = parseStructuredMessageFromString(input.message)
+        if (promoted) {
+          input.message = promoted
+          logForDebugging(
+            `[SendMessageTool] Promoted stringified ${promoted.type} message during validation`,
+          )
+        }
+      }
       if (input.to.trim().length === 0) {
         return {
           result: false,
@@ -797,9 +858,23 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
         }
       }
 
+      // Stringified protocol payloads (e.g. message:
+      // '{"type":"shutdown_request",…}') are promoted to the structured form
+      // so the protocol handlers run — see parseStructuredMessageFromString.
+      // Bridge/UDS peers already received the raw string above.
+      const message: Input['message'] =
+        typeof input.message === 'string'
+          ? (parseStructuredMessageFromString(input.message) ?? input.message)
+          : input.message
+      if (message !== input.message) {
+        logForDebugging(
+          `[SendMessageTool] Promoted stringified ${(message as StructuredMessageValue).type} message to structured form`,
+        )
+      }
+
       // Route to in-process subagent by name or raw agentId before falling
       // through to ambient-team resolution. Stopped agents are auto-resumed.
-      if (typeof input.message === 'string' && input.to !== '*') {
+      if (typeof message === 'string' && input.to !== '*') {
         const appState = context.getAppState()
         const registered = appState.agentNameRegistry.get(input.to)
         const agentId = registered ?? toAgentId(input.to)
@@ -809,7 +884,7 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
             if (task.status === 'running') {
               queuePendingMessage(
                 agentId,
-                input.message,
+                message,
                 context.setAppStateForTasks ?? context.setAppState,
               )
               return {
@@ -823,7 +898,7 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
             try {
               const result = await resumeAgentBackground({
                 agentId,
-                prompt: input.message,
+                prompt: message,
                 toolUseContext: context,
                 canUseTool,
                 invokingRequestId: assistantMessage?.requestId,
@@ -850,7 +925,7 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
             try {
               const result = await resumeAgentBackground({
                 agentId,
-                prompt: input.message,
+                prompt: message,
                 toolUseContext: context,
                 canUseTool,
                 invokingRequestId: assistantMessage?.requestId,
@@ -873,40 +948,40 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
         }
       }
 
-      if (typeof input.message === 'string') {
+      if (typeof message === 'string') {
         if (input.to === '*') {
-          return handleBroadcast(input.message, input.summary, context)
+          return handleBroadcast(message, input.summary, context)
         }
-        return handleMessage(input.to, input.message, input.summary, context)
+        return handleMessage(input.to, message, input.summary, context)
       }
 
       if (input.to === '*') {
         throw new Error('structured messages cannot be broadcast')
       }
 
-      switch (input.message.type) {
+      switch (message.type) {
         case 'shutdown_request':
-          return handleShutdownRequest(input.to, input.message.reason, context)
+          return handleShutdownRequest(input.to, message.reason, context)
         case 'shutdown_response':
-          if (input.message.approve) {
-            return handleShutdownApproval(input.message.request_id, context)
+          if (message.approve) {
+            return handleShutdownApproval(message.request_id, context)
           }
           return handleShutdownRejection(
-            input.message.request_id,
-            input.message.reason!,
+            message.request_id,
+            message.reason!,
           )
         case 'plan_approval_response':
-          if (input.message.approve) {
+          if (message.approve) {
             return handlePlanApproval(
               input.to,
-              input.message.request_id,
+              message.request_id,
               context,
             )
           }
           return handlePlanRejection(
             input.to,
-            input.message.request_id,
-            input.message.feedback ?? 'Plan needs revision',
+            message.request_id,
+            message.feedback ?? 'Plan needs revision',
             context,
           )
       }
