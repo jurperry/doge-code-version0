@@ -2,6 +2,11 @@ import { env } from '../utils/env.js'
 
 // The former is better vertically aligned, but isn't usually supported on Windows/Linux
 export const BLACK_CIRCLE = env.platform === 'darwin' ? '⏺' : '●'
+// Hollow twin of BLACK_CIRCLE for sub-agent rows in the unified agent panel
+// (main row stays the solid dot). Direct constant instead of figures.circle
+// because the figures package falls back to '( )' on Windows, which reads as
+// stray parentheses rather than a hollow dot.
+export const WHITE_CIRCLE = '○' // \u25cb
 export const BULLET_OPERATOR = '∙'
 export const TEARDROP_ASTERISK = '✻'
 export const UP_ARROW = '\u2191' // ↑ - used for opus 1m merge notice

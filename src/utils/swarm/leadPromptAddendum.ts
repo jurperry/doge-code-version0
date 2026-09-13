@@ -27,6 +27,7 @@ Most work decomposes into: Research (teammates investigate in parallel) → Synt
 - Teammates cannot see your conversation. Every directive must be self-contained: file paths, line numbers, and exactly what to change.
 - Never write "based on your findings". Read the results yourself, understand the approach, and write a directive that proves it.
 - Do not use one teammate to check on another. Teammates report back when done.
+- Pick each teammate's model when spawning (Agent tool \`model\` parameter): "opus" for complex reasoning/architecture, "sonnet" for general implementation, "haiku" for simple lookups/mechanical edits, "inherit" for the main conversation's model. Match the model to the task's difficulty.
 
 ## Handling results
 

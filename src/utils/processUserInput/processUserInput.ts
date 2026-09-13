@@ -55,6 +55,11 @@ import {
 import { queryCheckpoint } from '../queryProfiler.js'
 import { parseSlashCommand } from '../slashCommandParsing.js'
 import {
+  enableAgentSwarmsForSession,
+  isAgentSwarmsOptedIn,
+} from '../agentSwarmsEnabled.js'
+import { hasAgentTeamsKeyword } from '../agentTeamsKeywords.js'
+import {
   hasUltraplanKeyword,
   replaceUltraplanKeyword,
 } from '../ultraplan/keyword.js'
@@ -480,6 +485,40 @@ async function processUserInputBase(
     const { processSlashCommand } = await import('./processSlashCommand.js')
     const slashResult = await processSlashCommand(
       `/ultraplan ${rewritten}`,
+      precedingInputBlocks,
+      imageContentBlocks,
+      [],
+      context,
+      setToolJSX,
+      uuid,
+      isAlreadyProcessing,
+      canUseTool,
+    )
+    return addImageMetadataMessage(slashResult, imageMetadataTexts)
+  }
+
+  // Agent-teams keyword — the user explicitly asked for multi-agent
+  // collaboration ("agent teams", "多agent协作", "智能体集群", …), so opt the
+  // session into agent teams and route through /agent-teams, which expands
+  // to the team-lead prompt (see commands/agent-teams). Only fires while the
+  // session is NOT yet opted in: once enabled (env var set here, the CLI
+  // flag, or a pre-set env var), keyword messages pass through untouched —
+  // the model already has the team tools and repeated hijacking of the
+  // conversation would be wrong. Same guard shape as the ultraplan block
+  // above; quote/path/slash exclusions in agentTeamsKeywords.ts.
+  if (
+    mode === 'prompt' &&
+    !context.options.isNonInteractiveSession &&
+    inputString !== null &&
+    !effectiveSkipSlash &&
+    !inputString.startsWith('/') &&
+    !isAgentSwarmsOptedIn() &&
+    hasAgentTeamsKeyword(preExpansionInput ?? inputString)
+  ) {
+    enableAgentSwarmsForSession()
+    const { processSlashCommand } = await import('./processSlashCommand.js')
+    const slashResult = await processSlashCommand(
+      `/agent-teams ${inputString.trim()}`,
       precedingInputBlocks,
       imageContentBlocks,
       [],

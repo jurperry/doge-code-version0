@@ -12,7 +12,7 @@ import { c as _c } from "react/compiler-runtime";
 
 import figures from 'figures';
 import * as React from 'react';
-import { BLACK_CIRCLE, PAUSE_ICON, PLAY_ICON } from '../constants/figures.js';
+import { BLACK_CIRCLE, PAUSE_ICON, PLAY_ICON, WHITE_CIRCLE } from '../constants/figures.js';
 import { useMainLoopModel } from '../hooks/useMainLoopModel.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { stringWidth } from '../ink/stringWidth.js';
@@ -24,6 +24,7 @@ import { isInProcessTeammateTask, type InProcessTeammateTaskState } from '../tas
 import { formatDuration, formatNumber } from '../utils/format.js';
 import { evictTerminalTask } from '../utils/task/framework.js';
 import { applyTeammatePanelTick } from './tasks/teammatePanel.js';
+import { shortModelName } from './tasks/shortModelName.js';
 import { TeammateAgentLine } from './tasks/TeammateAgentLine.js';
 import { isTerminalStatus } from './tasks/taskStatusUtils.js';
 
@@ -41,14 +42,9 @@ export function getVisibleAgentTasks(tasks: AppState['tasks']): Array<LocalAgent
   return Object.values(tasks).filter((t): t is LocalAgentTaskState | InProcessTeammateTaskState => (isPanelAgentTask(t) || isInProcessTeammateTask(t)) && t.evictAfter !== 0).sort((a, b) => a.startTime - b.startTime);
 }
 /**
- * Short model label for panel rows: strip the local-only [1m]/[2m] context
- * suffix (never sent to the API) and trim. Empty → fallback label.
+ * Short model label for panel rows lives in ./tasks/shortModelName.ts
+ * (shared with TeammateAgentLine, cycle-free).
  */
-function shortModelName(model: string | undefined, fallback = 'default'): string {
-  const m = (model ?? '').trim();
-  if (!m) return fallback;
-  return m.replace(/\[[12]m\]$/i, '');
-}
 export function CoordinatorTaskPanel(): React.ReactNode {
   const tasks = useAppState(s => s.tasks);
   const viewingAgentTaskId = useAppState(s_0 => s_0.viewingAgentTaskId);
@@ -115,7 +111,12 @@ function MainLine(t0) {
   } = t0;
   const [hover, setHover] = React.useState(false);
   const prefix = isSelected || hover ? figures.pointer + " " : "  ";
-  const bullet = isViewed ? BLACK_CIRCLE : figures.circle;
+  // Solid dot = the transcript currently shown (main row in leader view, the
+  // viewed agent otherwise); hollow circle = not being viewed. WHITE_CIRCLE
+  // replaces figures.circle, whose Windows fallback '( )' read as stray
+  // parentheses. Slot layout unchanged: bullet still feeds the single
+  // memo-cache slot ($[2] here, $[15] in AgentLine).
+  const bullet = isViewed ? BLACK_CIRCLE : WHITE_CIRCLE;
   let t1;
   let t2;
   if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
@@ -200,7 +201,8 @@ function AgentLine(t0) {
   const displayDescription = task.progress?.summary || task.description;
   const highlighted = isSelected || hover;
   const prefix = highlighted ? figures.pointer + " " : "  ";
-  const bullet = isViewed ? BLACK_CIRCLE : figures.circle;
+  // Hollow/solid pairing mirrors MainLine — see the comment there.
+  const bullet = isViewed ? BLACK_CIRCLE : WHITE_CIRCLE;
   const dim = !highlighted && !isViewed;
   const sep = isRunning ? PLAY_ICON : PAUSE_ICON;
   // Row label format: `sub-agent-<model>-<task>` — the name is the steering

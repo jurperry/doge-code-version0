@@ -1,5 +1,6 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import addDir from './commands/add-dir/index.js'
+import agentTeams from './commands/agent-teams/index.js'
 import provider from './commands/provider/index.js'
 import autofixPr from './commands/autofix-pr/index.js'
 import backfillSessions from './commands/backfill-sessions/index.js'
@@ -262,6 +263,7 @@ const COMMANDS = memoize((): Command[] => [
   provider,
   advisor,
   agents,
+  agentTeams,
   auto,
   branch,
   btw,

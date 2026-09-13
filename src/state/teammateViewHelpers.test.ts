@@ -2,7 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import type { AppState } from './AppState.js'
 import type { LocalAgentTaskState } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { InProcessTeammateTaskState } from '../tasks/InProcessTeammateTask/types.js'
-import { stopOrDismissAgentWithDeps } from './teammateViewHelpers.js'
+import {
+  enterTeammateView,
+  exitTeammateView,
+  stopOrDismissAgentWithDeps,
+} from './teammateViewHelpers.js'
 import type { StopOrDismissDeps } from './teammateViewHelpers.js'
 
 type State = Pick<AppState, 'tasks' | 'viewingAgentTaskId' | 'viewSelectionMode'>
@@ -190,5 +194,54 @@ describe('stopOrDismissAgentWithDeps — local_agent branch (unchanged)', () => 
         },
       }),
     ).not.toThrow()
+  })
+})
+
+describe('enterTeammateView — the Enter-key action on a panel row', () => {
+  function runEnter(
+    start: State,
+    taskId: string,
+  ): State {
+    let state = start
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      state = updater(state as unknown as AppState) as unknown as State
+    }
+    enterTeammateView(taskId, setAppState)
+    return state
+  }
+
+  test('local_agent row → viewing mode with retain set', () => {
+    const state = runEnter(fakeState({ 'a-1': fakeLocalAgent() }), 'a-1')
+    expect(state.viewingAgentTaskId).toBe('a-1')
+    expect(state.viewSelectionMode).toBe('viewing-agent')
+    expect((state.tasks['a-1'] as LocalAgentTaskState).retain).toBe(true)
+  })
+
+  test('teammate row → viewing mode (no retain, roster intact)', () => {
+    const state = runEnter(fakeState({ 'tm-1': fakeTeammate() }), 'tm-1')
+    expect(state.viewingAgentTaskId).toBe('tm-1')
+    expect(state.viewSelectionMode).toBe('viewing-agent')
+    // Teammates are not stub-released on exit — messages stay live.
+    expect(state.tasks['tm-1'].status).toBe('running')
+  })
+
+  test('switching rows releases the previous local agent back to stub', () => {
+    const retained = fakeLocalAgent({ retain: true, evictAfter: undefined })
+    const state = runEnter(
+      fakeState({ 'a-1': retained, 'tm-1': fakeTeammate() }, 'a-1'),
+      'tm-1',
+    )
+    expect(state.viewingAgentTaskId).toBe('tm-1')
+    expect((state.tasks['a-1'] as LocalAgentTaskState).retain).toBe(false)
+  })
+
+  test('exitTeammateView returns to the leader view', () => {
+    let state: State = fakeState({ 'tm-1': fakeTeammate() }, 'tm-1')
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      state = updater(state as unknown as AppState) as unknown as State
+    }
+    exitTeammateView(setAppState)
+    expect(state.viewingAgentTaskId).toBeUndefined()
+    expect(state.viewSelectionMode).toBe('none')
   })
 })

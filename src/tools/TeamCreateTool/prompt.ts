@@ -21,6 +21,17 @@ When spawning teammates via the Agent tool, choose the \`subagent_type\` based o
 
 Always review the agent type descriptions and their available tools listed in the Agent tool prompt before selecting a \`subagent_type\` for a teammate.
 
+## Choosing Teammate Models
+
+When spawning teammates via the Agent tool, pick each teammate's \`model\` parameter to match the task's difficulty — this is a per-teammate decision, not a team-wide one:
+
+- **opus** — complex reasoning, architecture design, tricky debugging
+- **sonnet** — general implementation work (the workhorse default)
+- **haiku** — simple lookups, formatting, mechanical edits
+- **inherit** — the main conversation's model
+
+Omitting \`model\` follows the configured teammate default.
+
 Create a new team to coordinate multiple agents working on a project. Teams have a 1:1 correspondence with task lists (Team = TaskList).
 
 \`\`\`

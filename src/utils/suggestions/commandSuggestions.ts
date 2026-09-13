@@ -232,15 +232,22 @@ export function formatCommand(command: string): string {
  */
 function getCommandId(cmd: Command): string {
   const commandName = getCommandName(cmd)
+  // The 'command-' namespace prefix matters: suggestion ids are matched by
+  // prefix in PromptInputFooterSuggestions (file-/mcp-resource-/agent- pick
+  // the unified item layout with its own icon). Without it, a command named
+  // e.g. 'agent-teams' produces 'agent-teams:builtin', which startsWith
+  // ('agent-') and renders with the @agent star icon and unaligned layout
+  // instead of the aligned command row. Ids are opaque keys (dedup/React
+  // key/selection), never parsed back, so the prefix is safe.
   if (cmd.type === 'prompt') {
     // For plugin commands, include the repository to disambiguate
     if (cmd.source === 'plugin' && cmd.pluginInfo?.repository) {
-      return `${commandName}:${cmd.source}:${cmd.pluginInfo.repository}`
+      return `command-${commandName}:${cmd.source}:${cmd.pluginInfo.repository}`
     }
-    return `${commandName}:${cmd.source}`
+    return `command-${commandName}:${cmd.source}`
   }
   // Built-in commands include type as fallback for future-proofing
-  return `${commandName}:${cmd.type}`
+  return `command-${commandName}:${cmd.type}`
 }
 
 /**

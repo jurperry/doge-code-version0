@@ -2,13 +2,14 @@
  * TeammateAgentLine — unified-panel row for an in_process_teammate task.
  *
  * Visual twin of AgentLine in CoordinatorAgentStatus.tsx (main-/sub-agent-
- * rows) so teammates render in the same form: `sub-agent-<name>-<activity>`.
- * Differences from the local_agent row: the identity slot is the teammate's
- * person name (tinted with its swarm color) instead of a model id, the
- * play/pause icon follows isIdle, and shutdown/plan-approval states surface
- * as `[stopping]` / `[awaiting approval]` markers (mirrors the old spinner
- * tree indicators). Kept as plain source — the panel component is a React
- * Compiler artifact and only branches here.
+ * rows) so teammates render in the same form: `sub-agent-<name>-<model>-
+ * <activity>`. Differences from the local_agent row: the identity slot is
+ * the teammate's person name plus its model spec (tinted with its swarm
+ * color) instead of a bare model id, the play/pause icon follows isIdle,
+ * and shutdown/plan-approval states surface as `[stopping]` /
+ * `[awaiting approval]` markers (mirrors the old spinner tree indicators).
+ * Kept as plain source — the panel component is a React Compiler artifact
+ * and only branches here.
  */
 
 import figures from 'figures'
@@ -18,7 +19,13 @@ import {
   AGENT_COLORS,
   type AgentColorName,
 } from '../../tools/AgentTool/agentColorManager.js'
-import { BLACK_CIRCLE, PAUSE_ICON, PLAY_ICON } from '../../constants/figures.js'
+import {
+  BLACK_CIRCLE,
+  PAUSE_ICON,
+  PLAY_ICON,
+  WHITE_CIRCLE,
+} from '../../constants/figures.js'
+import { shortModelName } from './shortModelName.js'
 import { useTerminalSize } from '../../hooks/useTerminalSize.js'
 import { stringWidth } from '../../ink/stringWidth.js'
 import { Box, Text, wrapText } from '../../ink.js'
@@ -35,6 +42,16 @@ function getAgentThemeColor(
     return AGENT_COLOR_TO_THEME_COLOR[colorName as AgentColorName]
   }
   return undefined
+}
+
+/**
+ * Row label for a teammate task: `sub-agent-<name>-<model>`. Exported for
+ * tests — the model spec (alias like `opus` or resolved id, [1m]/[2m]
+ * stripped) rides in the same segment as the person name so teammate rows
+ * match the local_agent form `sub-agent-<model>-<task>`.
+ */
+export function teammateRowLabel(task: InProcessTeammateTaskState): string {
+  return `sub-agent-${task.identity.agentName}-${shortModelName(task.model, 'inherit')}`
 }
 
 type TeammateAgentLineProps = {
@@ -81,15 +98,15 @@ export function TeammateAgentLine({
 
   const highlighted = isSelected || hover
   const prefix = highlighted ? figures.pointer + ' ' : '  '
-  const bullet = isViewed ? BLACK_CIRCLE : figures.circle
+  const bullet = isViewed ? BLACK_CIRCLE : WHITE_CIRCLE
   const dim = !highlighted && !isViewed
   // Icon mirrors the old spinner tree: active work ▶, idle or shutting down ⏸.
   const sep = isRunning && !task.isIdle && !task.shutdownRequested ? PLAY_ICON : PAUSE_ICON
 
-  // Row label format: `sub-agent-<teammateName>-<task>` — the person name is
+  // Row label: `sub-agent-<teammateName>-<model>-<task>` — the person name is
   // the steering handle (kept out of truncation, undimmed, tinted with the
-  // swarm color so it matches the view banner).
-  const name = `sub-agent-${task.identity.agentName}`
+  // swarm color so it matches the view banner); see teammateRowLabel.
+  const name = teammateRowLabel(task)
   const namePart = `${name}-`
   const hintPart =
     isSelected && !isViewed ? ` · x to ${isRunning ? 'stop' : 'clear'}` : ''

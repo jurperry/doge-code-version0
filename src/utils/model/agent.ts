@@ -2,7 +2,7 @@ import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getGlobalConfig } from '../config.js'
 import { readCustomApiStorage } from '../customApiStorage.js'
 import { capitalize } from '../stringUtils.js'
-import { MODEL_ALIASES, type ModelAlias } from './aliases.js'
+import { MODEL_ALIASES } from './aliases.js'
 import { applyBedrockRegionPrefix, getBedrockRegionPrefix } from './bedrock.js'
 import {
   getCanonicalName,
@@ -39,7 +39,7 @@ export function getDefaultSubagentModel(): string {
 export function getAgentModel(
   agentModel: string | undefined,
   parentModel: string,
-  toolSpecifiedModel?: ModelAlias,
+  toolSpecifiedModel?: AgentModelAlias,
   permissionMode?: PermissionMode,
 ): string {
   if (process.env.CLAUDE_CODE_SUBAGENT_MODEL) {
@@ -68,8 +68,13 @@ export function getAgentModel(
     return resolvedModel
   }
 
-  // Prioritize tool-specified model if provided
-  if (toolSpecifiedModel) {
+  // Prioritize tool-specified model if provided. An explicit 'inherit' from
+  // the Agent tool's model parameter means "use the agent definition's
+  // model, falling back to the parent" — the same as omitting the parameter
+  // — not a literal model id (parseUserSpecifiedModel passes it through
+  // unchanged, which would 404 at the API; gh-31069 fixed the same alias
+  // leaking to --model on the teammate path).
+  if (toolSpecifiedModel && toolSpecifiedModel !== 'inherit') {
     if (aliasMatchesParentTier(toolSpecifiedModel, parentModel)) {
       return parentModel
     }

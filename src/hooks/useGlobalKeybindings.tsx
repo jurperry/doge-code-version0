@@ -46,9 +46,16 @@ export function GlobalKeybindingHandlers({
   const expandedView = useAppState(s => s.expandedView);
   const setAppState = useSetAppState();
 
-  // Toggle todo list (ctrl+t) - cycles through views
-  // Unified panel: the 'teammates' expanded view (spinner tree) is retired —
-  // teammates are rows in CoordinatorTaskPanel — so this is a none ↔ tasks toggle.
+  // Toggle tasks (ctrl+t) — focuses the unified agent panel.
+  // Unified-panel semantics: "tasks" IS the CoordinatorTaskPanel roster below
+  // the prompt (main + sub-agents), so ctrl+t selects/deselects its footer
+  // item, which arms ↑/↓/Enter/x. The old expandedView toggle rendered the
+  // TaskListV2 todo list only, which is empty whenever the model hasn't
+  // written todos — pressing ctrl+t then did nothing visible (user-reported
+  // bug). The todo list still renders inline in the transcript when the
+  // model writes it; expandedView stays settable via the showExpandedTodos
+  // config. Same effect as ctrl+shift+a (app:focusAgentList); kept as an
+  // alias because ctrl+t is a single, modifier-unambiguous keystroke.
   const handleToggleTodos = useCallback(() => {
     logEvent('tengu_toggle_todos', {
       is_expanded: expandedView === 'tasks'
@@ -56,7 +63,8 @@ export function GlobalKeybindingHandlers({
     setAppState(prev => {
       return {
         ...prev,
-        expandedView: prev.expandedView === 'tasks' ? 'none' as const : 'tasks' as const
+        footerSelection: prev.footerSelection === 'tasks' ? null : 'tasks' as never,
+        coordinatorTaskIndex: 0
       };
     });
   }, [expandedView, setAppState]);
