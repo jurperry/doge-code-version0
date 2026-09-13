@@ -51,10 +51,10 @@ import {
 } from '../../utils/swarm/spawnInProcess.js'
 import { buildInheritedEnvVars } from '../../utils/swarm/spawnUtils.js'
 import {
+  mutateTeamFileAsync,
   readTeamFileAsync,
   sanitizeAgentName,
   sanitizeName,
-  writeTeamFileAsync,
 } from '../../utils/swarm/teamHelpers.js'
 import { getLeadOrchestrationReminder } from '../../utils/swarm/leadPromptAddendum.js'
 import {
@@ -481,6 +481,7 @@ async function handleSpawnSplitPane(
     teamName,
     teammateColor,
     prompt,
+    model,
     plan_mode_required,
     paneId,
     insideTmux,
@@ -488,28 +489,29 @@ async function handleSpawnSplitPane(
     toolUseId: context.toolUseId,
   })
 
-  // Register agent in the team file
-  const teamFile = await readTeamFileAsync(teamName)
-  if (!teamFile) {
+  // Register agent in the team file (locked RMW: parallel spawns must not
+  // lose each other's registrations)
+  const registered = await mutateTeamFileAsync(teamName, teamFile => {
+    teamFile.members.push({
+      agentId: teammateId,
+      name: sanitizedName,
+      agentType: agent_type,
+      model,
+      prompt,
+      color: teammateColor,
+      planModeRequired: plan_mode_required,
+      joinedAt: Date.now(),
+      tmuxPaneId: paneId,
+      cwd: workingDir,
+      subscriptions: [],
+      backendType: detectionResult.backend.type,
+    })
+  })
+  if (registered === null) {
     throw new Error(
       `Team "${teamName}" does not exist. Call spawnTeam first to create the team.`,
     )
   }
-  teamFile.members.push({
-    agentId: teammateId,
-    name: sanitizedName,
-    agentType: agent_type,
-    model,
-    prompt,
-    color: teammateColor,
-    planModeRequired: plan_mode_required,
-    joinedAt: Date.now(),
-    tmuxPaneId: paneId,
-    cwd: workingDir,
-    subscriptions: [],
-    backendType: detectionResult.backend.type,
-  })
-  await writeTeamFileAsync(teamName, teamFile)
 
   // Send initial instructions to teammate via mailbox
   // The teammate's inbox poller will pick this up and submit it as their first turn
@@ -695,6 +697,7 @@ async function handleSpawnSeparateWindow(
     teamName,
     teammateColor,
     prompt,
+    model,
     plan_mode_required,
     paneId,
     insideTmux: false,
@@ -702,28 +705,29 @@ async function handleSpawnSeparateWindow(
     toolUseId: context.toolUseId,
   })
 
-  // Register agent in the team file
-  const teamFile = await readTeamFileAsync(teamName)
-  if (!teamFile) {
+  // Register agent in the team file (locked RMW: parallel spawns must not
+  // lose each other's registrations)
+  const registered = await mutateTeamFileAsync(teamName, teamFile => {
+    teamFile.members.push({
+      agentId: teammateId,
+      name: sanitizedName,
+      agentType: agent_type,
+      model,
+      prompt,
+      color: teammateColor,
+      planModeRequired: plan_mode_required,
+      joinedAt: Date.now(),
+      tmuxPaneId: paneId,
+      cwd: workingDir,
+      subscriptions: [],
+      backendType: 'tmux', // This handler always uses tmux directly
+    })
+  })
+  if (registered === null) {
     throw new Error(
       `Team "${teamName}" does not exist. Call spawnTeam first to create the team.`,
     )
   }
-  teamFile.members.push({
-    agentId: teammateId,
-    name: sanitizedName,
-    agentType: agent_type,
-    model,
-    prompt,
-    color: teammateColor,
-    planModeRequired: plan_mode_required,
-    joinedAt: Date.now(),
-    tmuxPaneId: paneId,
-    cwd: workingDir,
-    subscriptions: [],
-    backendType: 'tmux', // This handler always uses tmux directly
-  })
-  await writeTeamFileAsync(teamName, teamFile)
 
   // Send initial instructions to teammate via mailbox
   // The teammate's inbox poller will pick this up and submit it as their first turn
@@ -768,6 +772,7 @@ function registerOutOfProcessTeammateTask(
     teamName,
     teammateColor,
     prompt,
+    model,
     plan_mode_required,
     paneId,
     insideTmux,
@@ -779,6 +784,8 @@ function registerOutOfProcessTeammateTask(
     teamName: string
     teammateColor: string
     prompt: string
+    /** Resolved model spec (resolveTeammateModel) — shown in the panel row. */
+    model?: string
     plan_mode_required?: boolean
     paneId: string
     insideTmux: boolean
@@ -809,6 +816,7 @@ function registerOutOfProcessTeammateTask(
       parentSessionId: getSessionId(),
     },
     prompt,
+    model,
     abortController,
     awaitingPlanApproval: false,
     permissionMode: plan_mode_required ? 'plan' : 'default',
@@ -988,28 +996,29 @@ async function handleSpawnInProcess(
     }
   })
 
-  // Register agent in the team file
-  const teamFile = await readTeamFileAsync(teamName)
-  if (!teamFile) {
+  // Register agent in the team file (locked RMW: parallel spawns must not
+  // lose each other's registrations)
+  const registered = await mutateTeamFileAsync(teamName, teamFile => {
+    teamFile.members.push({
+      agentId: teammateId,
+      name: sanitizedName,
+      agentType: agent_type,
+      model,
+      prompt,
+      color: teammateColor,
+      planModeRequired: plan_mode_required,
+      joinedAt: Date.now(),
+      tmuxPaneId: 'in-process',
+      cwd: getCwd(),
+      subscriptions: [],
+      backendType: 'in-process',
+    })
+  })
+  if (registered === null) {
     throw new Error(
       `Team "${teamName}" does not exist. Call spawnTeam first to create the team.`,
     )
   }
-  teamFile.members.push({
-    agentId: teammateId,
-    name: sanitizedName,
-    agentType: agent_type,
-    model,
-    prompt,
-    color: teammateColor,
-    planModeRequired: plan_mode_required,
-    joinedAt: Date.now(),
-    tmuxPaneId: 'in-process',
-    cwd: getCwd(),
-    subscriptions: [],
-    backendType: 'in-process',
-  })
-  await writeTeamFileAsync(teamName, teamFile)
 
   // Note: Do NOT send the prompt via mailbox for in-process teammates.
   // In-process teammates receive the prompt directly via startInProcessTeammate().

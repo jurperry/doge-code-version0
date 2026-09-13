@@ -6,6 +6,7 @@ import { buildTool, type ToolDef } from '../../Tool.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
+import { findTeammateTaskByAgentId } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
 import {
   cleanupTeamDirectories,
@@ -84,7 +85,23 @@ export const TeamDeleteTool: Tool<InputSchema, Output> = buildTool({
 
         // Separate truly active members from idle/dead ones
         // Members with isActive === false are idle (finished their turn or crashed)
-        const activeMembers = nonLeadMembers.filter(m => m.isActive !== false)
+        const activeMembers = nonLeadMembers.filter(m => {
+          if (m.isActive === false) {
+            return false
+          }
+          // Stale in-process registration: the runner marks isActive=false on
+          // exit, but a crash or a lost concurrent write can leave a member
+          // registered as active with no running task in this lead's
+          // AppState. That zombie must not block deletion forever — the task
+          // table is the live source of truth for in-process members.
+          if (m.backendType === 'in-process' && m.agentId) {
+            const task = findTeammateTaskByAgentId(m.agentId, appState.tasks)
+            if (!task || task.status !== 'running') {
+              return false
+            }
+          }
+          return true
+        })
 
         if (activeMembers.length > 0) {
           const memberNames = activeMembers.map(m => m.name).join(', ')

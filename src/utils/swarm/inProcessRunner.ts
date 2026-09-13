@@ -108,6 +108,7 @@ import {
   sendPermissionRequestViaMailbox,
 } from './permissionSync.js'
 import { TEAMMATE_SYSTEM_PROMPT_ADDENDUM } from './teammatePromptAddendum.js'
+import { setMemberActive } from './teamHelpers.js'
 
 type SetAppStateFn = (updater: (prev: AppState) => AppState) => void
 
@@ -1451,6 +1452,14 @@ export async function runInProcessTeammate(
     void evictTaskOutput(taskId)
     // Eagerly evict task from AppState since it's been consumed
     evictTerminalTask(taskId, setAppState)
+    // In-process members have no Stop hook (that's a CLI-teammate lifecycle),
+    // so mark the member idle here — TeamDelete counts isActive !== false as
+    // active and would otherwise block team cleanup forever.
+    void setMemberActive(
+      identity.teamName,
+      identity.agentName,
+      false,
+    ).catch(() => {})
     // notified:true pre-set → no XML notification → print.ts won't emit
     // the SDK task_notification. Close the task_started bookend directly.
     if (!alreadyTerminal) {
@@ -1504,6 +1513,12 @@ export async function runInProcessTeammate(
     void evictTaskOutput(taskId)
     // Eagerly evict task from AppState since it's been consumed
     evictTerminalTask(taskId, setAppState)
+    // Failed exit is still an exit — mark the member idle (see completed path).
+    void setMemberActive(
+      identity.teamName,
+      identity.agentName,
+      false,
+    ).catch(() => {})
     // notified:true pre-set → no XML notification → close SDK bookend directly.
     if (!alreadyTerminal) {
       emitTaskTerminatedSdk(taskId, 'failed', {

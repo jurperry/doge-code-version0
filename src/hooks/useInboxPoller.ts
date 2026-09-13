@@ -714,17 +714,51 @@ export function useInboxPoller({
 
         // Remove the teammate from teamContext.teammates so the count is accurate
         const teammateToRemove = parsed.from
-        if (teammateToRemove && currentAppState.teamContext?.teammates) {
+        if (teammateToRemove) {
           // Find the teammate ID by name
-          const teammateId = Object.entries(
-            currentAppState.teamContext.teammates,
-          ).find(([, t]) => t.name === teammateToRemove)?.[0]
+          const teammateId = currentAppState.teamContext?.teammates
+            ? Object.entries(currentAppState.teamContext.teammates).find(
+                ([, t]) => t.name === teammateToRemove,
+              )?.[0]
+            : undefined
+          const teamName = currentAppState.teamContext?.teamName
 
-          if (teammateId) {
-            // Remove from team file (leader owns team file mutations)
-            const teamName = currentAppState.teamContext?.teamName
+          if (!teammateId) {
+            // Registry miss — the in-memory teamContext doesn't know this
+            // teammate (e.g. its registration was lost to a concurrent team
+            // file write, or the lead restarted). Without this fallback the
+            // member would stay in config.json as active forever and block
+            // TeamDelete. Remove from the team file by name only, and still
+            // complete any matching in-process task by identity name.
             if (teamName) {
-              removeTeammateFromTeamFile(teamName, {
+              void removeTeammateFromTeamFile(teamName, {
+                name: teammateToRemove,
+              })
+            }
+            setAppState(prev => {
+              const updatedTasks = { ...prev.tasks }
+              for (const [tid, task] of Object.entries(updatedTasks)) {
+                if (
+                  isInProcessTeammateTask(task) &&
+                  task.identity.agentName === teammateToRemove &&
+                  task.status === 'running'
+                ) {
+                  updatedTasks[tid] = {
+                    ...task,
+                    status: 'completed' as const,
+                    endTime: Date.now(),
+                  }
+                }
+              }
+              return { ...prev, tasks: updatedTasks }
+            })
+            logForDebugging(
+              `[InboxPoller] Shutdown approval for unregistered teammate ${teammateToRemove} — removed from team file by name`,
+            )
+          } else {
+            // Remove from team file (leader owns team file mutations)
+            if (teamName) {
+              void removeTeammateFromTeamFile(teamName, {
                 agentId: teammateId,
                 name: teammateToRemove,
               })
