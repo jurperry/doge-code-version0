@@ -3917,6 +3917,14 @@ async function run(): Promise<CommanderCommand> {
     }));
     program.addOption(new Option('--tasks [id]', '[ANT-ONLY] Tasks mode: watch for tasks and auto-process them. Optional id is used as both the task list ID and agent ID (defaults to "tasklist").').argParser(String).hideHelp());
     program.option('--agent-teams', '[ANT-ONLY] Force Claude to use multi-agent mode for solving problems', () => true);
+  } else {
+    // Registered for external builds too: agentSwarmsEnabled.ts scans
+    // process.argv for this flag as an external opt-in, but an unregistered
+    // option dies in commander's parse as `error: unknown option` before any
+    // session logic (and the runtime gate) ever runs. Help stays ant-only
+    // via hideHelp() — the external opt-in is documented via the
+    // CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var.
+    program.addOption(new Option('--agent-teams', '[ANT-ONLY] Force Claude to use multi-agent mode for solving problems').hideHelp());
   }
   if (feature('TRANSCRIPT_CLASSIFIER')) {
     program.addOption(new Option('--enable-auto-mode', 'Opt in to auto mode').hideHelp());
