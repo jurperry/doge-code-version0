@@ -99,7 +99,11 @@ export function BackgroundTaskStatus(t0) {
     t7 = $[11];
   }
   const pillWidths = t7;
-  if (allTeammates || !showSpinnerTree && isViewingTeammate) {
+  // Unified panel: teammate @name pills are retired (rows live in
+  // CoordinatorTaskPanel). allTeammates is always false now that _temp3
+  // filters teammates out of runningTasks, so this branch is dead — kept
+  // slot-neutral instead of excised to stay safe inside the compiled JSX.
+  if (allTeammates) {
     const selectedIdx = tasksSelected ? teammateFooterIndex : -1;
     let t8;
     if ($[12] !== teammateEntries || $[13] !== viewingAgentTaskId) {
@@ -269,7 +273,9 @@ function _temp4(s_1) {
   return s_1.expandedView;
 }
 function _temp3(t) {
-  return isBackgroundTask(t) && !(false && isPanelAgentTask(t));
+  // Teammates live in the unified CoordinatorTaskPanel rows — the footer
+  // pill row only summarizes the remaining background task kinds.
+  return isBackgroundTask(t) && t.type !== "in_process_teammate";
 }
 function _temp2(s_0) {
   return s_0.viewingAgentTaskId;

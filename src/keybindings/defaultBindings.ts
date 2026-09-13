@@ -45,7 +45,8 @@ export const DEFAULT_BINDINGS: KeybindingBlock[] = [
       ...(feature('KAIROS') || feature('KAIROS_BRIEF')
         ? { 'ctrl+shift+b': 'app:toggleBrief' as const }
         : {}),
-      'ctrl+shift+o': 'app:toggleTeammatePreview',
+      // app:toggleTeammatePreview (ctrl+shift+o) removed with the teammate
+      // spinner tree — teammates live in the unified CoordinatorTaskPanel.
       // Focus/clear the agent-teams panel below the prompt (main + sub-agents)
       'ctrl+shift+a': 'app:focusAgentList',
       'ctrl+r': 'history:search',

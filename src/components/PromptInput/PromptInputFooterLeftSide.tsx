@@ -337,9 +337,11 @@ function ModeIndicator({
   const shouldShowModeHint = primaryItemCount < 2;
 
   // Check if we have in-process teammates (showing pills)
-  // In spinner-tree mode, pills are disabled - teammates appear in the spinner tree instead
-  const hasInProcessTeammates = !showSpinnerTree && hasBackgroundTasks && Object.values(tasks).some(t_1 => t_1.type === 'in_process_teammate');
-  const hasTeammatePills = hasInProcessTeammates || !showSpinnerTree && isViewingTeammate;
+  // Unified panel: teammates render as sub-agent rows in CoordinatorTaskPanel,
+  // so the dedicated @name pill row is retired — keep these false to preserve
+  // the summary-pill layout below without touching the compiled slots.
+  const hasInProcessTeammates = false;
+  const hasTeammatePills = false;
 
   // In remote mode (`claude assistant`, --teleport) the agent runs elsewhere;
   // the local permission mode shown here doesn't reflect the agent's state.
@@ -484,22 +486,9 @@ function ModeIndicator({
 }
 function getSpinnerHintParts(isLoading: boolean, escShortcut: string, todosShortcut: string, killAgentsShortcut: string, hasTaskItems: boolean, expandedView: 'none' | 'tasks' | 'teammates', hasTeammates: boolean, hasRunningAgentTasks: boolean, isKillAgentsConfirmShowing: boolean): React.ReactElement[] {
   let toggleAction: string;
-  if (hasTeammates) {
-    // Cycling: none → tasks → teammates → none
-    switch (expandedView) {
-      case 'none':
-        toggleAction = 'show tasks';
-        break;
-      case 'tasks':
-        toggleAction = 'show teammates';
-        break;
-      case 'teammates':
-        toggleAction = 'hide';
-        break;
-    }
-  } else {
-    toggleAction = expandedView === 'tasks' ? 'hide tasks' : 'show tasks';
-  }
+  // Unified panel: the 'teammates' expanded view is retired — ctrl+t is a
+  // plain none ↔ tasks toggle regardless of running teammates.
+  toggleAction = expandedView === 'tasks' ? 'hide tasks' : 'show tasks';
 
   // Show the toggle hint only when there are task items to display or
   // teammates to cycle to

@@ -12,7 +12,6 @@ import type { Screen } from '../screens/REPL.js';
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../services/analytics/index.js';
 import { useAppState, useSetAppState } from '../state/AppState.js';
-import { count } from '../utils/array.js';
 import { getTerminalPanel } from '../utils/terminalPanel.js';
 type Props = {
   screen: Screen;
@@ -48,38 +47,13 @@ export function GlobalKeybindingHandlers({
   const setAppState = useSetAppState();
 
   // Toggle todo list (ctrl+t) - cycles through views
+  // Unified panel: the 'teammates' expanded view (spinner tree) is retired —
+  // teammates are rows in CoordinatorTaskPanel — so this is a none ↔ tasks toggle.
   const handleToggleTodos = useCallback(() => {
     logEvent('tengu_toggle_todos', {
       is_expanded: expandedView === 'tasks'
     });
     setAppState(prev => {
-      const {
-        getAllInProcessTeammateTasks
-      } =
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('../tasks/InProcessTeammateTask/InProcessTeammateTask.js') as typeof import('../tasks/InProcessTeammateTask/InProcessTeammateTask.js');
-      const hasTeammates = count(getAllInProcessTeammateTasks(prev.tasks), t => t.status === 'running') > 0;
-      if (hasTeammates) {
-        // Both exist: none → tasks → teammates → none
-        switch (prev.expandedView) {
-          case 'none':
-            return {
-              ...prev,
-              expandedView: 'tasks' as const
-            };
-          case 'tasks':
-            return {
-              ...prev,
-              expandedView: 'teammates' as const
-            };
-          case 'teammates':
-            return {
-              ...prev,
-              expandedView: 'none' as const
-            };
-        }
-      }
-      // Only tasks: none ↔ tasks
       return {
         ...prev,
         expandedView: prev.expandedView === 'tasks' ? 'none' as const : 'tasks' as const
@@ -195,15 +169,8 @@ export function GlobalKeybindingHandlers({
     });
   }
 
-  // Register teammate keybinding
-  useKeybinding('app:toggleTeammatePreview', () => {
-    setAppState(prev_3 => ({
-      ...prev_3,
-      showTeammateMessagePreview: !prev_3.showTeammateMessagePreview
-    }));
-  }, {
-    context: 'Global'
-  });
+  // Unified panel: app:toggleTeammatePreview (ctrl+shift+o) was removed with
+  // the teammate spinner tree — the preview pane no longer exists.
 
   // Focus the agent-teams panel (ctrl+shift+a): select the 'tasks' footer
   // item with the pointer on the main row. ↑/↓ move across main + sub-agent
