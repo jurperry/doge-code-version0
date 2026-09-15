@@ -814,6 +814,10 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
               imagePasteIds: imageId !== undefined ? [imageId] : undefined,
               origin: message.origin,
             }),
+            // teamName is the persisted transcript stamp (insertMessageChain)
+            // that the /resume teammate-render gate in Message.tsx keys on —
+            // the whitelist rebuild above must pass it through.
+            teamName: message.teamName,
             uuid: isNewChain ? deriveUUID(message.uuid, index) : message.uuid,
           } as NormalizedMessage
         })

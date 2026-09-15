@@ -151,6 +151,18 @@ const envelope = (id: string, color: string | undefined, summary: string | undef
   check(!frame.includes('<teammate-message'), '⑤ 无原始 XML 泄漏')
 }
 
+// ⑥ 渲染管线 normalizeMessages 不得丢 teamName 戳——真实 /resume 链路必经
+//    （组件直渲染测不到这一层：白名单重建曾把戳丢掉，resume 仍裸显 XML）
+{
+  const { normalizeMessages } = await import('../src/utils/messages.js')
+  const text = envelope('pipe-teammate', 'green', '管线透传摘要', '管线正文')
+  const normalized = normalizeMessages([makeMessage(text, 'agent-teams-analysis') as never])
+  check(normalized.length === 1 && (normalized[0] as { teamName?: string }).teamName === 'agent-teams-analysis', '⑥ normalizeMessages 保留 teamName 戳')
+  const frame = await renderFrame(normalized as never)
+  check(frame.includes('@pipe-teammate'), '⑥ 管线归一后仍渲染 @pipe-teammate 头')
+  check(!frame.includes('<teammate-message'), '⑥ 管线归一后无原始 XML 泄漏')
+}
+
 rmSync(TMP, { recursive: true, force: true })
 
 if (failures.length > 0) {
