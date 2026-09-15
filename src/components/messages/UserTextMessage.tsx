@@ -25,6 +25,12 @@ type Props = {
   planContent?: string;
   isTranscriptMode?: boolean;
   timestamp?: string;
+  // Persisted teamName stamp on the transcript entry (present on messages
+  // logged while the session had agent teams active). Lets a resumed session
+  // render teammate messages even though the new process never opted into
+  // the swarms flag — the gate below must not depend on live feature state
+  // for content already in the transcript.
+  isTeamTranscriptEntry?: boolean;
 };
 export function UserTextMessage(t0) {
   const $ = _c(49);
@@ -34,7 +40,8 @@ export function UserTextMessage(t0) {
     verbose,
     planContent,
     isTranscriptMode,
-    timestamp
+    timestamp,
+    isTeamTranscriptEntry
   } = t0;
   if (param.text.trim() === NO_CONTENT_MESSAGE) {
     return null;
@@ -150,7 +157,7 @@ export function UserTextMessage(t0) {
     }
     return t1;
   }
-  if (isAgentSwarmsEnabled() && param.text.includes(`<${TEAMMATE_MESSAGE_TAG}`)) {
+  if ((isTeamTranscriptEntry || isAgentSwarmsEnabled()) && param.text.includes(`<${TEAMMATE_MESSAGE_TAG}`)) {
     let t1;
     if ($[22] !== addMargin || $[23] !== isTranscriptMode || $[24] !== param) {
       t1 = <UserTeammateMessage addMargin={addMargin} param={param} isTranscriptMode={isTranscriptMode} />;

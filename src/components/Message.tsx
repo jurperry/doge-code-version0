@@ -354,7 +354,7 @@ function MessageImpl(t0) {
   }
 }
 function UserMessage(t0) {
-  const $ = _c(20);
+  const $ = _c(21);
   const {
     message,
     addMargin,
@@ -374,18 +374,25 @@ function UserMessage(t0) {
   switch (param.type) {
     case "text":
       {
+        // Resumed agent-teams sessions carry a persisted teamName stamp on
+        // every message logged while the team was active (see useLogMessages).
+        // The current process may not have the swarms flag on (e.g. plain
+        // /resume), so pass the stamp down to keep teammate envelopes
+        // rendering as teammate messages instead of raw XML.
+        const isTeamTranscriptEntry = 'teamName' in message && message.teamName !== undefined;
         let t1;
-        if ($[0] !== addMargin || $[1] !== isTranscriptMode || $[2] !== message.planContent || $[3] !== message.timestamp || $[4] !== param || $[5] !== verbose) {
-          t1 = <UserTextMessage addMargin={addMargin} param={param} verbose={verbose} planContent={message.planContent} isTranscriptMode={isTranscriptMode} timestamp={message.timestamp} />;
+        if ($[0] !== addMargin || $[1] !== isTranscriptMode || $[2] !== message.planContent || $[3] !== message.timestamp || $[4] !== param || $[5] !== verbose || $[6] !== isTeamTranscriptEntry) {
+          t1 = <UserTextMessage addMargin={addMargin} param={param} verbose={verbose} planContent={message.planContent} isTranscriptMode={isTranscriptMode} timestamp={message.timestamp} isTeamTranscriptEntry={isTeamTranscriptEntry} />;
           $[0] = addMargin;
           $[1] = isTranscriptMode;
           $[2] = message.planContent;
           $[3] = message.timestamp;
           $[4] = param;
           $[5] = verbose;
-          $[6] = t1;
+          $[6] = isTeamTranscriptEntry;
+          $[7] = t1;
         } else {
-          t1 = $[6];
+          t1 = $[7];
         }
         return t1;
       }
@@ -393,13 +400,13 @@ function UserMessage(t0) {
       {
         const t1 = addMargin && !isUserContinuation;
         let t2;
-        if ($[7] !== imageIndex || $[8] !== t1) {
+        if ($[8] !== imageIndex || $[9] !== t1) {
           t2 = <UserImageMessage imageId={imageIndex} addMargin={t1} />;
-          $[7] = imageIndex;
-          $[8] = t1;
-          $[9] = t2;
+          $[8] = imageIndex;
+          $[9] = t1;
+          $[10] = t2;
         } else {
-          t2 = $[9];
+          t2 = $[10];
         }
         return t2;
       }
@@ -407,20 +414,20 @@ function UserMessage(t0) {
       {
         const t1 = columns - 5;
         let t2;
-        if ($[10] !== isTranscriptMode || $[11] !== lookups || $[12] !== message || $[13] !== param || $[14] !== progressMessagesForMessage || $[15] !== style || $[16] !== t1 || $[17] !== tools || $[18] !== verbose) {
+        if ($[11] !== isTranscriptMode || $[12] !== lookups || $[13] !== message || $[14] !== param || $[15] !== progressMessagesForMessage || $[16] !== style || $[17] !== t1 || $[18] !== tools || $[19] !== verbose) {
           t2 = <UserToolResultMessage param={param} message={message} lookups={lookups} progressMessagesForMessage={progressMessagesForMessage} style={style} tools={tools} verbose={verbose} width={t1} isTranscriptMode={isTranscriptMode} />;
-          $[10] = isTranscriptMode;
-          $[11] = lookups;
-          $[12] = message;
-          $[13] = param;
-          $[14] = progressMessagesForMessage;
-          $[15] = style;
-          $[16] = t1;
-          $[17] = tools;
-          $[18] = verbose;
-          $[19] = t2;
+          $[11] = isTranscriptMode;
+          $[12] = lookups;
+          $[13] = message;
+          $[14] = param;
+          $[15] = progressMessagesForMessage;
+          $[16] = style;
+          $[17] = t1;
+          $[18] = tools;
+          $[19] = verbose;
+          $[20] = t2;
         } else {
-          t2 = $[19];
+          t2 = $[20];
         }
         return t2;
       }
