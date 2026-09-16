@@ -198,6 +198,79 @@ check(submitted.length === 0, `Enter 未触发消息提交（onSubmit 调用数 
 await sendKeys('\x14', 400)
 check(store().footerSelection === null, `再按 ctrl+t 取消聚焦，实际: ${String(store().footerSelection)}`)
 
+// ⑤ x 键（footer:close 默认绑定）清除终态 sub-agent 行：
+// 先退出查看态并把任务置为 completed，x 应 evictAfter=0 隐藏该行，
+// 且 'x' 不落入输入框（面板选中时 TextInput 失焦）
+storeHolder.store!.setState(prev => ({
+  ...prev,
+  viewingAgentTaskId: undefined,
+  viewSelectionMode: 'none' as never,
+  tasks: {
+    ...prev.tasks,
+    'ag-keys': { ...prev.tasks['ag-keys'], status: 'completed' as never, notified: true },
+  },
+}))
+await sleep(200)
+check(getVisibleAgentTasks(store().tasks).some(t => t.id === 'ag-keys'), '终态 sub-agent 行仍在面板（宽限期内可见）')
+
+await sendKeys('\x14', 400) // ctrl+t 重新聚焦
+check(store().coordinatorTaskIndex === 0, '重新聚焦后索引回到 main 行')
+await sendKeys(ESC + '[B', 300) // ↓ 到 sub-agent 行
+check(store().coordinatorTaskIndex === 1, `↓ 后索引=1，实际: ${store().coordinatorTaskIndex}`)
+await sendKeys('x', 300)
+check(!getVisibleAgentTasks(store().tasks).some(t => t.id === 'ag-keys'), `x 后终态行被清除（evictAfter=0），实际可见行: ${getVisibleAgentTasks(store().tasks).map(t => t.id).join(',')}`)
+check(inputState.value === '', `x 未落入输入框，实际: "${inputState.value}"`)
+
+// ⑥ teammate 模式下 Enter 走面板高亮行（coordinatorTaskIndex），
+// 不再被已退役的 teammateFooterIndex 隐形游标劫持：
+// 注入运行中 in_process_teammate（startTime 晚于已隐藏的 ag-keys），
+// ↓ 选中其行后 Enter 应进入该 teammate 的查看态
+storeHolder.store!.setState(prev => ({
+  ...prev,
+  tasks: {
+    ...prev.tasks,
+    'tm-keys': {
+      id: 'tm-keys',
+      type: 'in_process_teammate',
+      status: 'running',
+      description: 'research stuff',
+      startTime: Date.now() - 500,
+      endTime: undefined,
+      outputFile: '/tmp/out-tm',
+      outputOffset: 0,
+      notified: false,
+      evictAfter: undefined,
+      identity: {
+        agentId: 'tm-keys@e2e-team',
+        agentName: 'tm-keys',
+        teamName: 'e2e-team',
+        planModeRequired: false,
+        parentSessionId: 'sess-e2e',
+      },
+      prompt: 'do research',
+      awaitingPlanApproval: false,
+      permissionMode: 'default',
+      pendingUserMessages: [],
+    } as never,
+  },
+}))
+await sleep(300)
+check(getVisibleAgentTasks(store().tasks).some(t => t.id === 'tm-keys'), '注入的 teammate 行可见')
+// x 清除最后一行后 pill 自动失焦（无可运行行）——ctrl+t 重新聚焦；
+// 有运行中任务时 hasBgTaskPill 使聚焦索引重置为 -1（bg-tasks 伪行），需两次 ↓ 到 teammate 行
+await sendKeys('\x14', 400)
+check(store().footerSelection === 'tasks', `ctrl+t 重新聚焦任务面板，实际: ${String(store().footerSelection)}`)
+await sendKeys(ESC + '[B' + ESC + '[B', 400)
+check(store().coordinatorTaskIndex === 1, `↓↓ 后索引=1（teammate 行），实际: ${store().coordinatorTaskIndex}`)
+await sendKeys('\r', 300)
+check(store().viewingAgentTaskId === 'tm-keys', `teammate 模式 Enter 打开高亮 teammate，实际: ${String(store().viewingAgentTaskId)}`)
+check(store().viewSelectionMode === 'viewing-agent', `viewSelectionMode='viewing-agent'，实际: ${store().viewSelectionMode}`)
+check(submitted.length === 0, `Enter 未触发消息提交（onSubmit 调用数 ${submitted.length}）`)
+
+// ⑦ 再按 ctrl+t 取消聚焦收尾
+await sendKeys('\x14', 400)
+check(store().footerSelection === null, `收尾 ctrl+t 取消聚焦，实际: ${String(store().footerSelection)}`)
+
 instance.unmount()
 rmSync(TMP, { recursive: true, force: true })
 

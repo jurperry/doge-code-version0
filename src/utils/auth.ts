@@ -1166,10 +1166,19 @@ export async function saveApiKey(apiKey: string): Promise<void> {
       // Process monitors only see "security -i", not the password
       const command = `add-generic-password -U -a "${username}" -s "${storageServiceName}" -X "${hexValue}"\n`
 
-      await execa('security', ['-i'], {
+      // reject:false keeps execa from throwing, but `security` can still exit
+      // non-zero (locked keychain, denied access). Treating that as success
+      // leaves the key saved NOWHERE: config skips it because it believes the
+      // keychain holds it.
+      const result = await execa('security', ['-i'], {
         input: command,
         reject: false,
       })
+      if (result.failed || (result.exitCode ?? 0) !== 0) {
+        throw new Error(
+          `security add-generic-password exited with ${result.exitCode}`,
+        )
+      }
 
       logEvent('tengu_api_key_saved_to_keychain', {})
       savedToKeychain = true

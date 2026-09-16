@@ -1,5 +1,6 @@
 import { PROFILE_MANAGED_ENV_KEYS, type ProfileManagedEnvKey } from './profileEnvKeys.js'
 import type { ModelProfile } from '../customApiStorage.js'
+import { clearModelCapabilityOverrideCache } from './modelSupportOverrides.js'
 
 export type ModelSwitchPhase = 'apply' | 'persist' | 'commit'
 
@@ -26,6 +27,7 @@ export function clearProfileEnvVars(): void {
   for (const key of PROFILE_MANAGED_ENV_KEYS) {
     delete process.env[key]
   }
+  clearModelCapabilityOverrideCache()
 }
 
 /**
@@ -52,6 +54,7 @@ export function restoreEnvSnapshot(snapshot: Record<ProfileManagedEnvKey, string
       process.env[key] = value
     }
   }
+  clearModelCapabilityOverrideCache()
 }
 
 /**

@@ -66,3 +66,14 @@ export const get3PModelCapabilityOverride = memoize(
   },
   (model, capability) => `${model.toLowerCase()}:${capability}`,
 )
+
+/**
+ * Clear the memoized capability overrides. The memo key is only
+ * `model:capability` while the value reads the ANTHROPIC_DEFAULT_*_MODEL /
+ * *_SUPPORTED_CAPABILITIES env vars, so every rewrite of those vars (profile
+ * apply/clear/rollback, tier restore) must invalidate the cache or the
+ * previous provider's capability strings stick until process restart.
+ */
+export function clearModelCapabilityOverrideCache(): void {
+  get3PModelCapabilityOverride.cache.clear()
+}

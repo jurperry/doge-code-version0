@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { readFileSync } from 'fs'
 import { mkdir, readFile, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { z } from 'zod/v4'
@@ -161,16 +161,6 @@ export async function readTeamFileAsync(
 }
 
 /**
- * Writes a team file (sync — for sync contexts)
- */
-// sync IO: called from sync context
-function writeTeamFile(teamName: string, teamFile: TeamFile): void {
-  const teamDir = getTeamDir(teamName)
-  mkdirSync(teamDir, { recursive: true })
-  writeFileSync(getTeamFilePath(teamName), jsonStringify(teamFile, null, 2))
-}
-
-/**
  * Writes a team file (async — for tool handlers)
  */
 export async function writeTeamFileAsync(
@@ -285,165 +275,97 @@ export async function removeTeammateFromTeamFile(
 }
 
 /**
- * Adds a pane ID to the hidden panes list in the team file.
- * @param teamName - The name of the team
- * @param paneId - The pane ID to hide
- * @returns true if the pane was added to hidden list, false if team doesn't exist
- */
-export function addHiddenPaneId(teamName: string, paneId: string): boolean {
-  const teamFile = readTeamFile(teamName)
-  if (!teamFile) {
-    return false
-  }
-
-  const hiddenPaneIds = teamFile.hiddenPaneIds ?? []
-  if (!hiddenPaneIds.includes(paneId)) {
-    hiddenPaneIds.push(paneId)
-    teamFile.hiddenPaneIds = hiddenPaneIds
-    writeTeamFile(teamName, teamFile)
-    logForDebugging(
-      `[TeammateTool] Added ${paneId} to hidden panes for team ${teamName}`,
-    )
-  }
-  return true
-}
-
-/**
- * Removes a pane ID from the hidden panes list in the team file.
- * @param teamName - The name of the team
- * @param paneId - The pane ID to show (remove from hidden list)
- * @returns true if the pane was removed from hidden list, false if team doesn't exist
- */
-export function removeHiddenPaneId(teamName: string, paneId: string): boolean {
-  const teamFile = readTeamFile(teamName)
-  if (!teamFile) {
-    return false
-  }
-
-  const hiddenPaneIds = teamFile.hiddenPaneIds ?? []
-  const index = hiddenPaneIds.indexOf(paneId)
-  if (index !== -1) {
-    hiddenPaneIds.splice(index, 1)
-    teamFile.hiddenPaneIds = hiddenPaneIds
-    writeTeamFile(teamName, teamFile)
-    logForDebugging(
-      `[TeammateTool] Removed ${paneId} from hidden panes for team ${teamName}`,
-    )
-  }
-  return true
-}
-
-/**
  * Removes a teammate from the team config file by pane ID.
  * Also removes from hiddenPaneIds if present.
+ * Locked RMW via mutateTeamFileAsync — safe against concurrent spawns and
+ * other member mutations (last-writer-wins would drop registrations).
  * @param teamName - The name of the team
  * @param tmuxPaneId - The pane ID of the teammate to remove
  * @returns true if the member was removed, false if team or member doesn't exist
  */
-export function removeMemberFromTeam(
+export async function removeMemberFromTeam(
   teamName: string,
   tmuxPaneId: string,
-): boolean {
-  const teamFile = readTeamFile(teamName)
-  if (!teamFile) {
-    return false
-  }
-
-  const memberIndex = teamFile.members.findIndex(
-    m => m.tmuxPaneId === tmuxPaneId,
-  )
-  if (memberIndex === -1) {
-    return false
-  }
-
-  // Remove from members array
-  teamFile.members.splice(memberIndex, 1)
-
-  // Also remove from hiddenPaneIds if present
-  if (teamFile.hiddenPaneIds) {
-    const hiddenIndex = teamFile.hiddenPaneIds.indexOf(tmuxPaneId)
-    if (hiddenIndex !== -1) {
-      teamFile.hiddenPaneIds.splice(hiddenIndex, 1)
+): Promise<boolean> {
+  const removed = await mutateTeamFileAsync(teamName, teamFile => {
+    const originalLength = teamFile.members.length
+    teamFile.members = teamFile.members.filter(
+      m => m.tmuxPaneId !== tmuxPaneId,
+    )
+    if (teamFile.hiddenPaneIds) {
+      teamFile.hiddenPaneIds = teamFile.hiddenPaneIds.filter(
+        id => id !== tmuxPaneId,
+      )
     }
+    return teamFile.members.length < originalLength
+  })
+  if (removed === true) {
+    logForDebugging(
+      `[TeammateTool] Removed member with pane ${tmuxPaneId} from team ${teamName}`,
+    )
   }
-
-  writeTeamFile(teamName, teamFile)
-  logForDebugging(
-    `[TeammateTool] Removed member with pane ${tmuxPaneId} from team ${teamName}`,
-  )
-  return true
+  return removed === true
 }
 
 /**
  * Removes a teammate from a team's member list by agent ID.
  * Use this for in-process teammates which all share the same tmuxPaneId.
+ * Locked RMW via mutateTeamFileAsync.
  * @param teamName - The name of the team
  * @param agentId - The agent ID of the teammate to remove (e.g., "researcher@my-team")
  * @returns true if the member was removed, false if team or member doesn't exist
  */
-export function removeMemberByAgentId(
+export async function removeMemberByAgentId(
   teamName: string,
   agentId: string,
-): boolean {
-  const teamFile = readTeamFile(teamName)
-  if (!teamFile) {
-    return false
+): Promise<boolean> {
+  const removed = await mutateTeamFileAsync(teamName, teamFile => {
+    const originalLength = teamFile.members.length
+    teamFile.members = teamFile.members.filter(m => m.agentId !== agentId)
+    return teamFile.members.length < originalLength
+  })
+  if (removed === true) {
+    logForDebugging(
+      `[TeammateTool] Removed member ${agentId} from team ${teamName}`,
+    )
   }
-
-  const memberIndex = teamFile.members.findIndex(m => m.agentId === agentId)
-  if (memberIndex === -1) {
-    return false
-  }
-
-  // Remove from members array
-  teamFile.members.splice(memberIndex, 1)
-
-  writeTeamFile(teamName, teamFile)
-  logForDebugging(
-    `[TeammateTool] Removed member ${agentId} from team ${teamName}`,
-  )
-  return true
+  return removed === true
 }
 
 /**
  * Sets a team member's permission mode.
  * Called when the team leader changes a teammate's mode via the TeamsDialog.
+ * Locked RMW via mutateTeamFileAsync.
  * @param teamName - The name of the team
  * @param memberName - The name of the member to update
  * @param mode - The new permission mode
  */
-export function setMemberMode(
+export async function setMemberMode(
   teamName: string,
   memberName: string,
   mode: PermissionMode,
-): boolean {
-  const teamFile = readTeamFile(teamName)
-  if (!teamFile) {
-    return false
-  }
-
-  const member = teamFile.members.find(m => m.name === memberName)
-  if (!member) {
+): Promise<boolean> {
+  const result = await mutateTeamFileAsync(teamName, teamFile => {
+    const member = teamFile.members.find(m => m.name === memberName)
+    if (!member) return 'missing' as const
+    if (member.mode === mode) return 'unchanged' as const
+    teamFile.members = teamFile.members.map(m =>
+      m.name === memberName ? { ...m, mode } : m,
+    )
+    return 'updated' as const
+  })
+  if (result === 'missing') {
     logForDebugging(
       `[TeammateTool] Cannot set member mode: member ${memberName} not found in team ${teamName}`,
     )
     return false
   }
-
-  // Only write if the value is actually changing
-  if (member.mode === mode) {
-    return true
+  if (result === 'updated') {
+    logForDebugging(
+      `[TeammateTool] Set member ${memberName} in team ${teamName} to mode: ${mode}`,
+    )
   }
-
-  // Create updated members array immutably
-  const updatedMembers = teamFile.members.map(m =>
-    m.name === memberName ? { ...m, mode } : m,
-  )
-  writeTeamFile(teamName, { ...teamFile, members: updatedMembers })
-  logForDebugging(
-    `[TeammateTool] Set member ${memberName} in team ${teamName} to mode: ${mode}`,
-  )
-  return true
+  return result === 'updated' || result === 'unchanged'
 }
 
 /**
@@ -452,54 +374,48 @@ export function setMemberMode(
  * @param mode - The permission mode to sync
  * @param teamNameOverride - Optional team name override (uses env var if not provided)
  */
-export function syncTeammateMode(
+export async function syncTeammateMode(
   mode: PermissionMode,
   teamNameOverride?: string,
-): void {
+): Promise<void> {
   if (!isTeammate()) return
   const teamName = teamNameOverride ?? getTeamName()
   const agentName = getAgentName()
   if (teamName && agentName) {
-    setMemberMode(teamName, agentName, mode)
+    await setMemberMode(teamName, agentName, mode)
   }
 }
 
 /**
- * Sets multiple team members' permission modes in a single atomic operation.
+ * Sets multiple team members' permission modes in a single locked operation.
  * Avoids race conditions when updating multiple teammates at once.
+ * Locked RMW via mutateTeamFileAsync.
  * @param teamName - The name of the team
  * @param modeUpdates - Array of {memberName, mode} to update
  */
-export function setMultipleMemberModes(
+export async function setMultipleMemberModes(
   teamName: string,
   modeUpdates: Array<{ memberName: string; mode: PermissionMode }>,
-): boolean {
-  const teamFile = readTeamFile(teamName)
-  if (!teamFile) {
-    return false
-  }
-
-  // Build a map of updates for efficient lookup
-  const updateMap = new Map(modeUpdates.map(u => [u.memberName, u.mode]))
-
-  // Create updated members array immutably
-  let anyChanged = false
-  const updatedMembers = teamFile.members.map(member => {
-    const newMode = updateMap.get(member.name)
-    if (newMode !== undefined && member.mode !== newMode) {
-      anyChanged = true
-      return { ...member, mode: newMode }
-    }
-    return member
+): Promise<boolean> {
+  const anyChanged = await mutateTeamFileAsync(teamName, teamFile => {
+    const updateMap = new Map(modeUpdates.map(u => [u.memberName, u.mode]))
+    let changed = false
+    teamFile.members = teamFile.members.map(member => {
+      const newMode = updateMap.get(member.name)
+      if (newMode !== undefined && member.mode !== newMode) {
+        changed = true
+        return { ...member, mode: newMode }
+      }
+      return member
+    })
+    return changed
   })
-
-  if (anyChanged) {
-    writeTeamFile(teamName, { ...teamFile, members: updatedMembers })
+  if (anyChanged === true) {
     logForDebugging(
       `[TeammateTool] Set ${modeUpdates.length} member modes in team ${teamName}`,
     )
   }
-  return true
+  return anyChanged !== null
 }
 
 /**

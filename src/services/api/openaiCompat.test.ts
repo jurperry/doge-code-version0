@@ -1,7 +1,8 @@
 import { test, expect } from 'bun:test'
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
-import { convertAnthropicRequestToOpenAI, createOpenAICompatStream } from './openaiCompat.js'
+import { convertAnthropicRequestToOpenAI, createAnthropicStreamFromOpenAI, createOpenAICompatStream } from './openaiCompat.js'
+import type { BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 
 const GATEWAY_UPSTREAM_400 =
   '{"error":{"message":"Error from provider (Console Go): Upstream request failed","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}'
@@ -138,6 +139,97 @@ test('200 with body returns a stream reader', async () => {
   )
   expect(typeof reader.read).toBe('function')
   await reader.cancel()
+})
+
+// --- Streaming tool-call translation (createAnthropicStreamFromOpenAI) ---
+
+function sseOf(chunks: unknown[]): string {
+  return chunks.map(c => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n'
+}
+
+async function collectStreamEvents(sse: string): Promise<BetaRawMessageStreamEvent[]> {
+  const reader = new Response(sse).body!.getReader()
+  const events: BetaRawMessageStreamEvent[] = []
+  for await (const event of createAnthropicStreamFromOpenAI({ reader, model: 'test-model' })) {
+    events.push(event)
+  }
+  return events
+}
+
+test('parallel tool calls with no preceding text get distinct content-block indices', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_a', function: { name: 'Read', arguments: '' } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"path":"a.txt"}' } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 1, id: 'call_b', function: { name: 'Bash', arguments: '' } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 1, function: { arguments: '{"cmd":"ls"}' } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 5 } },
+    ]),
+  )
+  const starts = events.filter(
+    e => e.type === 'content_block_start' && e.content_block.type === 'tool_use',
+  )
+  expect(starts.length).toBe(2)
+  const indices = starts.map(e => e.index)
+  expect(new Set(indices).size).toBe(2)
+
+  const deltas = events.filter(
+    e => e.type === 'content_block_delta' && e.delta.type === 'input_json_delta',
+  )
+  // Reassemble each block's argument stream — interleaved (colliding) indices
+  // would concatenate both tools' fragments into invalid JSON.
+  const argsByIndex = new Map<number, string>()
+  for (const delta of deltas) {
+    const partial = (delta.delta as { partial_json: string }).partial_json
+    argsByIndex.set(delta.index, (argsByIndex.get(delta.index) ?? '') + partial)
+  }
+  expect(JSON.parse(argsByIndex.get(indices[0])!)).toEqual({ path: 'a.txt' })
+  expect(JSON.parse(argsByIndex.get(indices[1])!)).toEqual({ cmd: 'ls' })
+})
+
+test('text then tool calls keeps the historical index assignment (text=0, tools after)', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      { choices: [{ index: 0, delta: { content: 'thinking...' }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_a', function: { name: 'Read', arguments: '{"p":1}' } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 1, id: 'call_b', function: { name: 'Bash', arguments: '{"c":2}' } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+    ]),
+  )
+  const textStart = events.find(
+    e => e.type === 'content_block_start' && e.content_block.type === 'text',
+  )
+  const toolStarts = events.filter(
+    e => e.type === 'content_block_start' && e.content_block.type === 'tool_use',
+  )
+  expect(textStart?.index).toBe(0)
+  expect(toolStarts.map(e => e.index)).toEqual([1, 2])
+})
+
+test('zero-argument tool call survives — no synthetic empty-text block clobbers it', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_x', function: { name: 'ping', arguments: '' } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+    ]),
+  )
+  const starts = events.filter(e => e.type === 'content_block_start')
+  expect(starts.length).toBe(1)
+  expect(starts[0].content_block.type).toBe('tool_use')
+  expect((starts[0].content_block as { id?: string }).id).toBe('call_x')
+})
+
+test('response with no content at all still emits the synthetic empty-text block', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+    ]),
+  )
+  const textStart = events.find(
+    e => e.type === 'content_block_start' && e.content_block.type === 'text',
+  )
+  expect(textStart).toBeDefined()
+  expect(textStart?.index).toBe(0)
 })
 
 // --- Multimodal image conversion (vision through Chat Completions) ---

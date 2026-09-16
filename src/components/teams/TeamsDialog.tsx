@@ -23,7 +23,7 @@ import { IT2_COMMAND, isInsideTmuxSync } from '../../utils/swarm/backends/detect
 import { ensureBackendsRegistered, getBackendByType, getCachedBackend } from '../../utils/swarm/backends/registry.js';
 import type { PaneBackendType } from '../../utils/swarm/backends/types.js';
 import { getSwarmSocketName, TMUX_COMMAND } from '../../utils/swarm/constants.js';
-import { addHiddenPaneId, removeHiddenPaneId, removeMemberFromTeam, setMemberMode, setMultipleMemberModes } from '../../utils/swarm/teamHelpers.js';
+import { removeMemberFromTeam, setMemberMode, setMultipleMemberModes } from '../../utils/swarm/teamHelpers.js';
 import { listTasks, type Task, unassignTeammateTasks } from '../../utils/tasks.js';
 import { getTeammateStatuses, type TeammateStatus, type TeamSummary } from '../../utils/teamDiscovery.js';
 import { createModeSetRequestMessage, sendShutdownRequestToMailbox, writeToMailbox } from '../../utils/teammateMailbox.js';
@@ -564,8 +564,8 @@ async function killTeammate(paneId: string, backendType: PaneBackendType | undef
     // teammates have no pane to kill, so this is correct for them.
     logForDebugging(`[TeamsDialog] Skipping pane kill for ${paneId}: no backendType recorded`);
   }
-  // Remove from team config file
-  removeMemberFromTeam(teamName, paneId);
+  // Remove from team config file (locked RMW — safe against concurrent spawns)
+  await removeMemberFromTeam(teamName, paneId);
 
   // Unassign tasks and build notification message
   const {
@@ -644,7 +644,9 @@ async function showTeammate(teammate: TeammateStatus, teamName: string): Promise
  */
 function sendModeChangeToTeammate(teammateName: string, teamName: string, targetMode: PermissionMode): void {
   // Update config.json directly so UI shows the change immediately
-  setMemberMode(teamName, teammateName, targetMode);
+  void setMemberMode(teamName, teammateName, targetMode).catch(error => {
+    logForDebugging(`[TeamsDialog] Failed to sync mode for ${teammateName} to team file: ${error}`);
+  });
 
   // Also send message so teammate updates their local permission context
   const message = createModeSetRequestMessage({
@@ -691,12 +693,14 @@ function cycleAllTeammateModes(teammates: TeammateStatus[], teamName: string, is
     isBypassPermissionsModeAvailable: isBypassAvailable
   });
 
-  // Batch update config.json in a single atomic operation
+  // Batch update config.json in a single locked operation
   const modeUpdates = teammates.map(t => ({
     memberName: t.name,
     mode: targetMode
   }));
-  setMultipleMemberModes(teamName, modeUpdates);
+  void setMultipleMemberModes(teamName, modeUpdates).catch(error => {
+    logForDebugging(`[TeamsDialog] Failed to batch-sync member modes to team file: ${error}`);
+  });
 
   // Send mailbox messages to each teammate
   for (const teammate of teammates) {

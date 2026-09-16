@@ -648,7 +648,12 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           if (anthropicIndex === undefined) {
             anthropicIndex = textStarted ? nextContentIndex + 1 : nextContentIndex
             toolIndexByOpenAIIndex.set(openAIIndex, anthropicIndex)
-            nextContentIndex = Math.max(nextContentIndex, anthropicIndex)
+            // Without a preceding text block the +1 above never applies, so
+            // advancing only to anthropicIndex hands the same index to every
+            // tool call and their input_json_delta streams interleave.
+            nextContentIndex = textStarted
+              ? Math.max(nextContentIndex, anthropicIndex)
+              : anthropicIndex + 1
             const state = {
               id: toolCall.id ?? `toolu_${openAIIndex}`,
               name: toolCall.function?.name ?? '',
@@ -665,6 +670,10 @@ export async function* createAnthropicStreamFromOpenAI(input: {
                 input: '',
               },
             } as BetaRawMessageStreamEvent
+            // A tool_use block is content: a zero-argument tool streams no
+            // argument deltas, and without this flag the synthetic empty-text
+            // block at finish would clobber this block at index 0.
+            emittedAnyContent = true
           }
 
           const state = toolCallState.get(openAIIndex)

@@ -1548,7 +1548,7 @@ function PromptInput({
     });
 
     // If this is a teammate, update config.json so team lead sees the change
-    syncTeammateMode(nextMode, teamContext?.teamName);
+    void syncTeammateMode(nextMode, teamContext?.teamName);
 
     // Close help tips if they're open when mode is cycled
     if (helpOpen) {
@@ -1793,15 +1793,11 @@ function PromptInput({
           }
           break;
         case 'tasks':
-          if (isTeammateMode) {
-            // Enter switches to the selected agent's view
-            if (teammateFooterIndex === 0) {
-              exitTeammateView(setAppState);
-            } else {
-              const teammate = inProcessTeammates[teammateFooterIndex - 1];
-              if (teammate) enterTeammateView(teammate.id, setAppState);
-            }
-          } else if (coordinatorTaskIndex === 0 && coordinatorTaskCount > 0) {
+          // Enter follows the panel's highlighted row (coordinatorTaskIndex)
+          // in both modes — the retired teammate-footer selector's own cursor
+          // (teammateFooterIndex) no longer gates Enter. Row 0 is the main
+          // transcript (exit any teammate view); other rows open that agent.
+          if (coordinatorTaskIndex === 0 && coordinatorTaskCount > 0) {
             exitTeammateView(setAppState);
           } else {
             const selectedTaskId = getVisibleAgentTasks(tasks)[coordinatorTaskIndex - 1]?.id;

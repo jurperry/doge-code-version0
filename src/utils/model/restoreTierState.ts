@@ -5,6 +5,7 @@ import {
   writeCustomApiStorage,
   type TierAliasName,
 } from '../customApiStorage.js'
+import { clearModelCapabilityOverrideCache } from './modelSupportOverrides.js'
 
 const TIER_ENV_KEYS: Record<TierAliasName, string> = {
   opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
@@ -95,4 +96,6 @@ export function restoreTierStateFromStorage(): void {
     const model = resolveTierModel(tier, mainModel)
     if (model) process.env[envKey] = model
   }
+  // Tier env (re)populated — drop any memoized capability overrides.
+  clearModelCapabilityOverrideCache()
 }

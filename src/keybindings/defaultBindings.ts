@@ -244,6 +244,9 @@ export const DEFAULT_BINDINGS: KeybindingBlock[] = [
       left: 'footer:previous',
       enter: 'footer:openSelected',
       escape: 'footer:clearSelection',
+      // Stop/dismiss the highlighted agent row; the handler returns false on
+      // the main row so the keystroke falls through and types 'x' instead.
+      x: 'footer:close',
     },
   },
   // Message selector (rewind dialog) navigation

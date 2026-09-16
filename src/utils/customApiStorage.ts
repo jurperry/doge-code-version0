@@ -2,6 +2,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { saveGlobalConfig } from './config.js'
 import { getGlobalClaudeFile } from './env.js'
 import { getSecureStorage } from './secureStorage/index.js'
+import { clearModelCapabilityOverrideCache } from './model/modelSupportOverrides.js'
 
 export type TierAliasName = 'opus' | 'sonnet' | 'haiku'
 
@@ -516,6 +517,9 @@ export function applyModelProfile(profile: ModelProfile, opts?: { persist?: bool
   applyEnvVar('CLAUDE_CODE_SUBAGENT_MODEL', profile.subagentModel)
   applyEnvVar('ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES', profile.opusCapabilities)
   applyEnvVar('ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES', profile.sonnetCapabilities)
+  // Tier env changed — drop memoized capability overrides (the memo key does
+  // not include env state, see modelSupportOverrides).
+  clearModelCapabilityOverrideCache()
 
   // --- Behavior config ---
   applyEnvVar('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',

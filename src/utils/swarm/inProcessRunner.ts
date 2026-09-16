@@ -62,7 +62,7 @@ import {
   createUserMessage,
 } from '../../utils/messages.js'
 import { evictTaskOutput } from '../../utils/task/diskOutput.js'
-import { evictTerminalTask } from '../../utils/task/framework.js'
+import { PANEL_GRACE_MS } from '../../utils/task/framework.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
 import { createAbortController } from '../abortController.js'
 import { type AgentContext, runWithAgentContext } from '../agentContext.js'
@@ -1438,6 +1438,10 @@ export async function runInProcessTeammate(
           status: 'completed' as const,
           notified: true,
           endTime: Date.now(),
+          // Panel grace: the row lingers briefly instead of vanishing in the
+          // same frame. The panel's 1s tick (teammatePanel.ts) and the lazy
+          // GC both evict once the deadline passes.
+          evictAfter: Date.now() + PANEL_GRACE_MS,
           messages: task.messages?.length ? [task.messages.at(-1)!] : undefined,
           pendingUserMessages: [],
           inProgressToolUseIDs: undefined,
@@ -1450,8 +1454,6 @@ export async function runInProcessTeammate(
       setAppState,
     )
     void evictTaskOutput(taskId)
-    // Eagerly evict task from AppState since it's been consumed
-    evictTerminalTask(taskId, setAppState)
     // In-process members have no Stop hook (that's a CLI-teammate lifecycle),
     // so mark the member idle here — TeamDelete counts isActive !== false as
     // active and would otherwise block team cleanup forever.
@@ -1499,6 +1501,8 @@ export async function runInProcessTeammate(
           error: errorMessage,
           isIdle: true,
           endTime: Date.now(),
+          // Panel grace — see the completed path above.
+          evictAfter: Date.now() + PANEL_GRACE_MS,
           onIdleCallbacks: [],
           messages: task.messages?.length ? [task.messages.at(-1)!] : undefined,
           pendingUserMessages: [],
@@ -1511,8 +1515,6 @@ export async function runInProcessTeammate(
       setAppState,
     )
     void evictTaskOutput(taskId)
-    // Eagerly evict task from AppState since it's been consumed
-    evictTerminalTask(taskId, setAppState)
     // Failed exit is still an exit — mark the member idle (see completed path).
     void setMemberActive(
       identity.teamName,

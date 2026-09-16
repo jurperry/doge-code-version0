@@ -300,7 +300,11 @@ export function killInProcessTeammate(
 
   // Remove from team file (outside state updater to avoid file I/O in callback)
   if (teamName && agentId) {
-    removeMemberByAgentId(teamName, agentId)
+    void removeMemberByAgentId(teamName, agentId).catch(e => {
+      logForDebugging(
+        `[spawnInProcess] Failed to remove member ${agentId} from team file: ${e}`,
+      )
+    })
   }
 
   if (killed) {

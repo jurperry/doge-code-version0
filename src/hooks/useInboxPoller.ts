@@ -591,7 +591,7 @@ export function useInboxPoller({
         const teamName = currentAppState.teamContext?.teamName
         const agentName = getAgentName()
         if (teamName && agentName) {
-          setMemberMode(teamName, agentName, targetMode)
+          await setMemberMode(teamName, agentName, targetMode)
         }
       }
     }
@@ -746,6 +746,9 @@ export function useInboxPoller({
                   updatedTasks[tid] = {
                     ...task,
                     status: 'completed' as const,
+                    // notified lets evictTerminalTask + the panel grace tick
+                    // actually evict the row; without it the row sticks forever.
+                    notified: true,
                     endTime: Date.now(),
                   }
                 }
@@ -793,6 +796,9 @@ export function useInboxPoller({
                   updatedTasks[tid] = {
                     ...task,
                     status: 'completed' as const,
+                    // notified lets evictTerminalTask + the panel grace tick
+                    // actually evict the row; without it the row sticks forever.
+                    notified: true,
                     endTime: Date.now(),
                   }
                 }

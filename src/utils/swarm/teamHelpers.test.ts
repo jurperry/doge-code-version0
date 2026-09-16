@@ -9,8 +9,12 @@ process.env.CLAUDE_CONFIG_DIR = TMP
 const {
   mutateTeamFileAsync,
   readTeamFile,
+  removeMemberByAgentId,
+  removeMemberFromTeam,
   removeTeammateFromTeamFile,
   setMemberActive,
+  setMemberMode,
+  setMultipleMemberModes,
   writeTeamFileAsync,
 } = await import('./teamHelpers.js')
 
@@ -84,5 +88,58 @@ describe('removeTeammateFromTeamFile', () => {
       name: 'ghost',
     })
     expect(removed).toBe(false)
+  })
+})
+
+describe('removeMemberFromTeam / removeMemberByAgentId — locked removals', () => {
+  test('concurrent removals and spawn registrations do not lose each other', async () => {
+    // Reproduces the unlocked-RMW class: TeamsDialog terminate racing a
+    // concurrent spawn push used to erase one side's change.
+    await Promise.all([
+      removeMemberFromTeam(TEAM, 'pane-7'),
+      removeMemberByAgentId(TEAM, 'agent-3@lock-test-team'),
+      mutateTeamFileAsync(TEAM, tf => {
+        tf.members.push({
+          agentId: 'spawn-racer@lock-test-team',
+          name: 'spawn-racer',
+          joinedAt: Date.now(),
+        })
+      }),
+    ])
+    const tf = readTeamFile(TEAM)
+    expect(tf?.members.some(m => m.name === 'spawn-racer')).toBe(true)
+    expect(tf?.members.some(m => m.agentId === 'agent-3@lock-test-team')).toBe(false)
+    expect(tf?.members.some(m => m.tmuxPaneId === 'pane-7')).toBe(false)
+  })
+
+  test('removeMemberByAgentId returns false for a missing team or member', async () => {
+    expect(await removeMemberByAgentId('no-such-team', 'x@no-such-team')).toBe(false)
+    expect(await removeMemberByAgentId(TEAM, 'ghost@lock-test-team')).toBe(false)
+  })
+})
+
+describe('setMemberMode / setMultipleMemberModes — locked mode updates', () => {
+  test('setMemberMode updates the member and returns true (unchanged → true too)', async () => {
+    expect(await setMemberMode(TEAM, 'researcher-0', 'acceptEdits')).toBe(true)
+    expect(readTeamFile(TEAM)?.members.find(m => m.name === 'researcher-0')?.mode).toBe('acceptEdits')
+    // Same value again — still success, no write churn.
+    expect(await setMemberMode(TEAM, 'researcher-0', 'acceptEdits')).toBe(true)
+  })
+
+  test('setMemberMode returns false for a missing member or team', async () => {
+    expect(await setMemberMode(TEAM, 'ghost', 'default')).toBe(false)
+    expect(await setMemberMode('no-such-team', 'researcher-0', 'default')).toBe(false)
+  })
+
+  test('setMultipleMemberModes updates all members atomically under the lock', async () => {
+    const ok = await setMultipleMemberModes(TEAM, [
+      { memberName: 'researcher-1', mode: 'plan' },
+      { memberName: 'researcher-2', mode: 'plan' },
+    ])
+    expect(ok).toBe(true)
+    const tf = readTeamFile(TEAM)
+    expect(tf?.members.find(m => m.name === 'researcher-1')?.mode).toBe('plan')
+    expect(tf?.members.find(m => m.name === 'researcher-2')?.mode).toBe('plan')
+    expect(await setMultipleMemberModes('no-such-team', [])).toBe(false)
   })
 })

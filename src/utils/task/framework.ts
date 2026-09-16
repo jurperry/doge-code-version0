@@ -14,6 +14,7 @@ import {
   type TaskType,
 } from '../../Task.js'
 import type { TaskState } from '../../tasks/types.js'
+import { isInProcessTeammateTask } from '../../tasks/InProcessTeammateTask/types.js'
 import { enqueuePendingNotification } from '../messageQueueManager.js'
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 import { getTaskOutputDelta, getTaskOutputPath } from './diskOutput.js'
@@ -117,6 +118,20 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
 }
 
 /**
+ * Panel grace check shared by the eviction paths. Only the task types that
+ * carry an evictAfter field participate: local agents ('retain' narrows to
+ * LocalAgentTaskState) and in-process teammates. Other task types never set
+ * it and keep their evict-immediately semantics. evictAfter is optional, so
+ * `?? Infinity` also covers "not yet assigned" (a retained row, or a
+ * terminal teammate the panel tick hasn't stamped with a deadline yet).
+ */
+function panelGraceBlocksEviction(task: TaskState): boolean {
+  if (!('retain' in task) && !isInProcessTeammateTask(task)) return false
+  const evictAfter = (task as { evictAfter?: number }).evictAfter
+  return (evictAfter ?? Infinity) > Date.now()
+}
+
+/**
  * Eagerly evict a terminal task from AppState.
  * The task must be in a terminal state (completed/failed/killed) with notified=true.
  * This allows memory to be freed without waiting for the next query loop iteration.
@@ -132,10 +147,7 @@ export function evictTerminalTask(
     if (!isTerminalTaskStatus(task.status)) return prev
     if (!task.notified) return prev
     // Panel grace period — blocks eviction until deadline passes.
-    // 'retain' in task narrows to LocalAgentTaskState (the only type with
-    // that field); evictAfter is optional so 'evictAfter' in task would
-    // miss tasks that haven't had it set yet.
-    if ('retain' in task && (task.evictAfter ?? Infinity) > Date.now()) {
+    if (panelGraceBlocksEviction(task)) {
       return prev
     }
     const { [taskId]: _, ...remainingTasks } = prev.tasks
@@ -238,7 +250,7 @@ export function applyTaskOffsetsAndEvictions(
       if (!fresh || !isTerminalTaskStatus(fresh.status) || !fresh.notified) {
         continue
       }
-      if ('retain' in fresh && (fresh.evictAfter ?? Infinity) > Date.now()) {
+      if (panelGraceBlocksEviction(fresh)) {
         continue
       }
       delete newTasks[id]
