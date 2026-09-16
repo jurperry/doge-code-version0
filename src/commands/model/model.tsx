@@ -352,26 +352,6 @@ function isKnownAlias(model: string): boolean {
   return (MODEL_ALIASES as readonly string[]).includes(model.toLowerCase().trim());
 }
 
-/** Clear all third-party provider env vars when switching to a native model. */
-function clearThirdPartyEnvVars(): void {
-  delete process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER;
-  delete process.env.DOGE_API_KEY;
-  delete process.env.ANTHROPIC_AUTH_TOKEN;
-  delete process.env.ANTHROPIC_BASE_URL;
-  delete process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOW;
-  // Sub-agent model overrides
-  delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-  delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-  delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-  delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
-  delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES;
-  delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES;
-  // Behavior config
-  delete process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
-  delete process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK;
-  delete process.env.CLAUDE_CODE_EFFORT_LEVEL;
-}
-
 function isOpus1mUnavailable(model: string): boolean {
   const m = model.toLowerCase();
   return !checkOpus1mAccess() && !isOpus1mMergeEnabled() && m.includes('opus') && m.includes('[1m]');

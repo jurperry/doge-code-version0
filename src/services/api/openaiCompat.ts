@@ -831,16 +831,3 @@ export async function* createAnthropicStreamFromOpenAI(input: {
     `[openaiCompat] stream ended unexpectedly before message_stop for model=${input.model}`,
   )
 }
-
-export function mapOpenAIUsageToAnthropic(usage?: {
-  prompt_tokens?: number
-  completion_tokens?: number
-}): BetaUsage | undefined {
-  if (!usage) return undefined
-  return {
-    input_tokens: usage.prompt_tokens ?? 0,
-    output_tokens: usage.completion_tokens ?? 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
-  } as BetaUsage
-}

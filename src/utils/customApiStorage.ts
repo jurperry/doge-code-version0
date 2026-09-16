@@ -424,26 +424,6 @@ export function getModelProfile(modelName: string): ModelProfile | undefined {
   )
 }
 
-export function saveModelProfile(profile: ModelProfile, self?: ModelProfile): void {
-  const current = readCustomApiStorage()
-  const profiles = current.modelProfiles ?? []
-  // providerName is the identity: an edit that renamed the provider and/or
-  // its main model replaces the stored entry in place instead of appending a
-  // same-name duplicate. `self` (the entry being edited) takes precedence so
-  // a provider RENAME still finds the old entry to replace.
-  let idx = self ? profiles.findIndex(p => isSameProviderEntry(p, self)) : -1
-  if (idx < 0) idx = profiles.findIndex(p => isSameProviderEntry(p, profile))
-  if (idx >= 0) {
-    profiles[idx] = profile
-  } else {
-    profiles.push(profile)
-  }
-  writeCustomApiStorage({
-    ...current,
-    modelProfiles: profiles,
-  })
-}
-
 /** Helper: set or delete an env var */
 function applyEnvVar(name: string, value: string | undefined): void {
   if (value !== undefined && value !== '') {
