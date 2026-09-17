@@ -2,91 +2,7 @@
  * Shared utilities for spawning teammates across different backends.
  */
 
-import {
-  getChromeFlagOverride,
-  getFlagSettingsPath,
-  getInlinePlugins,
-  getMainLoopModelOverride,
-  getSessionBypassPermissionsMode,
-} from '../../bootstrap/state.js'
 import { quote } from '../bash/shellQuote.js'
-import { isInBundledMode } from '../bundledMode.js'
-import type { PermissionMode } from '../permissions/PermissionMode.js'
-import { getTeammateModeFromSnapshot } from './backends/teammateModeSnapshot.js'
-import { TEAMMATE_COMMAND_ENV_VAR } from './constants.js'
-
-/**
- * Gets the command to use for spawning teammate processes.
- * Uses TEAMMATE_COMMAND_ENV_VAR if set, otherwise falls back to the
- * current process executable path.
- */
-export function getTeammateCommand(): string {
-  if (process.env[TEAMMATE_COMMAND_ENV_VAR]) {
-    return process.env[TEAMMATE_COMMAND_ENV_VAR]
-  }
-  return isInBundledMode() ? process.execPath : process.argv[1]!
-}
-
-/**
- * Builds CLI flags to propagate from the current session to spawned teammates.
- * This ensures teammates inherit important settings like permission mode,
- * model selection, and plugin configuration from their parent.
- *
- * @param options.planModeRequired - If true, don't inherit bypass permissions (plan mode takes precedence)
- * @param options.permissionMode - Permission mode to propagate
- */
-export function buildInheritedCliFlags(options?: {
-  planModeRequired?: boolean
-  permissionMode?: PermissionMode
-}): string {
-  const flags: string[] = []
-  const { planModeRequired, permissionMode } = options || {}
-
-  // Propagate permission mode to teammates, but NOT if plan mode is required
-  // Plan mode takes precedence over bypass permissions for safety
-  if (planModeRequired) {
-    // Don't inherit bypass permissions when plan mode is required
-  } else if (
-    permissionMode === 'bypassPermissions' ||
-    getSessionBypassPermissionsMode()
-  ) {
-    flags.push('--dangerously-skip-permissions')
-  } else if (permissionMode === 'acceptEdits') {
-    flags.push('--permission-mode acceptEdits')
-  }
-
-  // Propagate --model if explicitly set via CLI
-  const modelOverride = getMainLoopModelOverride()
-  if (modelOverride) {
-    flags.push(`--model ${quote([modelOverride])}`)
-  }
-
-  // Propagate --settings if set via CLI
-  const settingsPath = getFlagSettingsPath()
-  if (settingsPath) {
-    flags.push(`--settings ${quote([settingsPath])}`)
-  }
-
-  // Propagate --plugin-dir for each inline plugin
-  const inlinePlugins = getInlinePlugins()
-  for (const pluginDir of inlinePlugins) {
-    flags.push(`--plugin-dir ${quote([pluginDir])}`)
-  }
-
-  // Propagate --teammate-mode so tmux teammates use the same mode as leader
-  const sessionMode = getTeammateModeFromSnapshot()
-  flags.push(`--teammate-mode ${sessionMode}`)
-
-  // Propagate --chrome / --no-chrome if explicitly set on the CLI
-  const chromeFlagOverride = getChromeFlagOverride()
-  if (chromeFlagOverride === true) {
-    flags.push('--chrome')
-  } else if (chromeFlagOverride === false) {
-    flags.push('--no-chrome')
-  }
-
-  return flags.join(' ')
-}
 
 /**
  * Environment variables that must be explicitly forwarded to tmux-spawned
@@ -101,6 +17,19 @@ const TEAMMATE_ENV_VARS = [
   'CLAUDE_CODE_USE_FOUNDRY',
   // Custom API endpoint
   'ANTHROPIC_BASE_URL',
+  // API protocol selection — without it a tmux teammate falls back to the
+  // anthropic format while the lead talks openai/responses to the same URL
+  'CLAUDE_CODE_COMPATIBLE_API_PROVIDER',
+  // Tier model slots — teammates resolve opus/sonnet/haiku aliases and
+  // subagent models through the same env chain the lead does; without these
+  // an alias like `model: 'sonnet'` in a teammate expands to first-party
+  // model ids and gets sent to a third-party endpoint
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
+  'CLAUDE_CODE_MODEL_CONTEXT_WINDOW',
   // Config directory override
   'CLAUDE_CONFIG_DIR',
   // CCR marker — teammates need this for CCR-aware code paths. Auth finds
@@ -143,4 +72,26 @@ export function buildInheritedEnvVars(): string {
   }
 
   return envVars.join(' ')
+}
+
+/**
+ * SECURITY: this whitelist is embedded in the tmux spawn COMMAND STRING,
+ * which is visible to every local user via `ps`. Secret-bearing vars
+ * (DOGE_API_KEY / ANTHROPIC_AUTH_TOKEN / …) must NEVER be added here —
+ * teammates get credentials from the shared CLAUDE_CONFIG_DIR disk storage,
+ * not from the spawn command.
+ *
+ * Detects the config that whitelist can't serve: the key exists in THIS
+ * process's env but was never persisted to storage (env-only start script
+ * with no /provider entry). A tmux teammate then inherits the base URL but
+ * no key and 401s on its first request — surfaced so spawn sites can warn.
+ * Pure — takes the parsed storage so tests can inject.
+ */
+export function isEnvOnlyCredentialConfig(storage: {
+  apiKey?: string
+}): boolean {
+  return (
+    (!!process.env.DOGE_API_KEY || !!process.env.ANTHROPIC_AUTH_TOKEN) &&
+    !storage.apiKey
+  )
 }

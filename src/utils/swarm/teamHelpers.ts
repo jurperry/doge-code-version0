@@ -62,6 +62,25 @@ export type TeamAllowedPath = {
   addedAt: number // Timestamp when added
 }
 
+export type TeamMember = {
+  agentId: string
+  name: string
+  agentType?: string
+  model?: string
+  prompt?: string
+  color?: string
+  planModeRequired?: boolean
+  joinedAt: number
+  tmuxPaneId: string
+  cwd: string
+  worktreePath?: string
+  sessionId?: string
+  subscriptions: string[]
+  backendType?: BackendType
+  isActive?: boolean // false when idle, undefined/true when active
+  mode?: PermissionMode // Current permission mode for this teammate
+}
+
 export type TeamFile = {
   name: string
   description?: string
@@ -70,24 +89,7 @@ export type TeamFile = {
   leadSessionId?: string // Actual session UUID of the leader (for discovery)
   hiddenPaneIds?: string[] // Pane IDs that are currently hidden from the UI
   teamAllowedPaths?: TeamAllowedPath[] // Paths all teammates can edit without asking
-  members: Array<{
-    agentId: string
-    name: string
-    agentType?: string
-    model?: string
-    prompt?: string
-    color?: string
-    planModeRequired?: boolean
-    joinedAt: number
-    tmuxPaneId: string
-    cwd: string
-    worktreePath?: string
-    sessionId?: string
-    subscriptions: string[]
-    backendType?: BackendType
-    isActive?: boolean // false when idle, undefined/true when active
-    mode?: PermissionMode // Current permission mode for this teammate
-  }>
+  members: TeamMember[]
 }
 
 export type Input = z.infer<ReturnType<typeof inputSchema>>
@@ -158,6 +160,24 @@ export async function readTeamFileAsync(
     )
     return null
   }
+}
+
+/**
+ * Mailbox sender authentication (2026-09 audit): lead-side protocol messages
+ * (shutdown_approved, plan_approval_request) used to trust the message's
+ * `from` field alone — any process that can write the lead's inbox JSON could
+ * kill an arbitrary tmux pane (paneId taken from the message body), remove
+ * arbitrary members by name, or extract an auto-approved plan request that
+ * inherits the lead's permission mode. The team file's member registry is the
+ * source of truth for "who is on this team"; unregistered senders are
+ * ignored. Pure — pairs with readTeamFile/readTeamFileAsync for tests.
+ */
+export function findRegisteredMember(
+  teamFile: TeamFile | null | undefined,
+  senderName: string | undefined,
+): TeamMember | undefined {
+  if (!teamFile || !senderName) return undefined
+  return teamFile.members.find(m => m.name === senderName)
 }
 
 /**

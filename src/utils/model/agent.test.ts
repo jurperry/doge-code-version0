@@ -56,3 +56,26 @@ describe('getAgentModel — tool-specified model', () => {
     expect(resolved.length).toBeGreaterThan(0)
   })
 })
+
+describe('getAgentModel — CLAUDE_CODE_SUBAGENT_MODEL env', () => {
+  test("env 'inherit' falls through to agent-def/parent resolution, not the literal (audit fix)", () => {
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'inherit'
+    // Agent def also 'inherit' → parent model. The regression this guards:
+    // parseUserSpecifiedModel passes unknown strings through unchanged, so the
+    // literal 'inherit' used to be sent straight to the API.
+    const resolved = getAgentModel(
+      'inherit',
+      'claude-sonnet-4-5',
+      undefined,
+      'default',
+    )
+    expect(resolved).toBe('claude-sonnet-4-5')
+  })
+
+  test('env value still overrides everything when concrete', () => {
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-4-5'
+    expect(getAgentModel('opus', 'claude-sonnet-4-5', 'haiku', 'default')).toBe(
+      'claude-haiku-4-5',
+    )
+  })
+})

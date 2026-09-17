@@ -7,6 +7,7 @@ const TMP = mkdtempSync(join(tmpdir(), 'doge-teamhelpers-'))
 process.env.CLAUDE_CONFIG_DIR = TMP
 
 const {
+  findRegisteredMember,
   mutateTeamFileAsync,
   readTeamFile,
   removeMemberByAgentId,
@@ -141,5 +142,31 @@ describe('setMemberMode / setMultipleMemberModes — locked mode updates', () =>
     expect(tf?.members.find(m => m.name === 'researcher-1')?.mode).toBe('plan')
     expect(tf?.members.find(m => m.name === 'researcher-2')?.mode).toBe('plan')
     expect(await setMultipleMemberModes('no-such-team', [])).toBe(false)
+  })
+})
+
+// findRegisteredMember — mailbox sender authentication (2026-09 audit):
+// lead-side protocol messages must only be honored from names that exist in
+// the team file's member registry.
+describe('findRegisteredMember — mailbox sender authentication', () => {
+  const teamFile = {
+    teamName: 'auth-test-team',
+    createdAt: Date.now(),
+    leadAgentId: 'lead@auth-test-team',
+    members: [
+      { agentId: 'lead@auth-test-team', name: 'team-lead', joinedAt: Date.now(), tmuxPaneId: '', cwd: '', subscriptions: [] },
+      { agentId: 'researcher@auth-test-team', name: 'researcher', joinedAt: Date.now(), tmuxPaneId: '%3', backendType: 'tmux' as const, cwd: '', subscriptions: [] },
+    ],
+  } as never
+
+  test('finds a registered member by name', () => {
+    const member = findRegisteredMember(teamFile, 'researcher')
+    expect(member?.tmuxPaneId).toBe('%3')
+  })
+
+  test('returns undefined for unregistered senders, null/undefined team file or name', () => {
+    expect(findRegisteredMember(teamFile, 'attacker')).toBeUndefined()
+    expect(findRegisteredMember(null, 'researcher')).toBeUndefined()
+    expect(findRegisteredMember(teamFile, undefined)).toBeUndefined()
   })
 })

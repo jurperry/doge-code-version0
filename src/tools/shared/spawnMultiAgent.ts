@@ -20,11 +20,12 @@ import { formatAgentId } from '../../utils/agentId.js'
 import { quote } from '../../utils/bash/shellQuote.js'
 import { isInBundledMode } from '../../utils/bundledMode.js'
 import { getGlobalConfig } from '../../utils/config.js'
+import { readCustomApiStorage } from '../../utils/customApiStorage.js'
 import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
-import { parseUserSpecifiedModel } from '../../utils/model/model.js'
+import { getDefaultMainLoopModel, parseUserSpecifiedModel } from '../../utils/model/model.js'
 import type { PermissionMode } from '../../utils/permissions/PermissionMode.js'
 import { isTmuxAvailable } from '../../utils/swarm/backends/detection.js'
 import {
@@ -99,6 +100,44 @@ export function resolveTeammateModel(
     return leaderModel ?? getDefaultTeammateModel(leaderModel)
   }
   return inputModel ?? getDefaultTeammateModel(leaderModel)
+}
+
+/**
+ * The leader's EFFECTIVE model: the session-scoped override (/model switch in
+ * THIS terminal, mainLoopModelForSession) wins over the global slot, falling
+ * back to the configured default when neither is set. Mirrors
+ * resolveMainLoopModel's priority and TeamCreateTool's lead-model resolution.
+ *
+ * All three spawn handlers used to read the RAW mainLoopModel field, so a
+ * lead that had switched models in-session spawned teammates (tmux and
+ * in-process alike) on the stale global model — teammate and lead then talked
+ * to different providers. Exported for testing.
+ */
+export function getLeaderModel(appState: AppState): string | null {
+  return (
+    appState.mainLoopModelForSession ??
+    appState.mainLoopModel ??
+    getDefaultMainLoopModel()
+  )
+}
+
+/**
+ * tmux teammates inherit env only through the ps-visible spawn command line,
+ * so secrets never go into TEAMMATE_ENV_VARS (see spawnUtils). When the API
+ * key exists only in this process's env (start script) and was never
+ * persisted, the teammate gets the base URL but no key and 401s on its first
+ * request — warn so that failure is diagnosable at spawn time.
+ */
+function warnIfEnvOnlyTeammateCredentials(): void {
+  if (
+    (process.env.DOGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) &&
+    !readCustomApiStorage().apiKey
+  ) {
+    logForDebugging(
+      '[spawnMultiAgent] API key exists only in this process env (not persisted in ~/.doge storage) — pane teammates cannot inherit it and will fail to authenticate. Persist the provider via /provider so teammates read credentials from disk.',
+      { level: 'error' },
+    )
+  }
 }
 
 // ============================================================================
@@ -313,7 +352,7 @@ async function handleSpawnSplitPane(
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -440,6 +479,7 @@ async function handleSpawnSplitPane(
   // Propagate env vars that teammates need but may not inherit from tmux split-window shells.
   // Includes CLAUDECODE, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, and API provider vars.
   const envStr = buildInheritedEnvVars()
+  warnIfEnvOnlyTeammateCredentials()
   const spawnCommand = `cd ${quote([workingDir])} && env ${envStr} ${quote([binaryPath])} ${teammateArgs}${flagsStr}`
 
   // Send the command to the new pane
@@ -555,7 +595,7 @@ async function handleSpawnSeparateWindow(
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -649,6 +689,7 @@ async function handleSpawnSeparateWindow(
   // Propagate env vars that teammates need but may not inherit from tmux split-window shells.
   // Includes CLAUDECODE, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, and API provider vars.
   const envStr = buildInheritedEnvVars()
+  warnIfEnvOnlyTeammateCredentials()
   const spawnCommand = `cd ${quote([workingDir])} && env ${envStr} ${quote([binaryPath])} ${teammateArgs}${flagsStr}`
 
   // Send the command to the new window
@@ -856,7 +897,7 @@ async function handleSpawnInProcess(
   const { name, prompt, agent_type, plan_mode_required } = input
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')

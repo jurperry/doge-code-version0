@@ -1,4 +1,4 @@
-import { readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { saveGlobalConfig } from './config.js'
 import { getGlobalClaudeFile } from './env.js'
 import { getSecureStorage } from './secureStorage/index.js'
@@ -297,11 +297,20 @@ export function migrateDuplicateProviderProfiles(): boolean {
   return changed
 }
 
-/** tmp + rename write, so a crash mid-migration can't truncate the config. */
+/** tmp + rename write, so a crash mid-migration can't truncate the config.
+ *  mode 0o600 at tmp creation + chmod after rename: rename installs the TMP
+ *  file's inode, so without this the ~/.doge/.claude.json mirror (which
+ *  carries the plaintext key mirror) lands at the umask default 0644 —
+ *  compare plainTextStorage/config.ts which both set 0o600 explicitly. */
 function writeAtomicJson(path: string, data: unknown): void {
   const tmp = `${path}.doge-tmp`
-  writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8')
+  writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 })
   renameSync(tmp, path)
+  try {
+    chmodSync(path, 0o600)
+  } catch {
+    // Platforms without POSIX chmod semantics (Windows maps it to the read-only bit)
+  }
 }
 
 // --- Tier selection persistence ---

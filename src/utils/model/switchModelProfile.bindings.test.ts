@@ -3,7 +3,7 @@
 // the /model command renders it in "Set model to …", so both must resolve
 // the same chain: env sonnet tier → stored main profile's sonnet field →
 // ANTHROPIC_MODEL → stored main model → null.
-import { test, expect, beforeAll, afterAll } from 'bun:test'
+import { test, expect, beforeAll, afterAll, describe } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 
@@ -15,10 +15,13 @@ const ENV_KEYS = [
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_BASE_URL',
+  'DOGE_API_KEY',
 ] as const
 let originalEnv: Record<string, string | undefined> = {}
 let resolveSessionDefaultModel: () => string | null
 let switchTierBound: typeof import('./switchModelProfile.bindings.js').switchTierBound
+let findProfileByModel: typeof import('./switchModelProfile.bindings.js').findProfileByModel
 
 beforeAll(async () => {
   for (const key of ENV_KEYS) originalEnv[key] = process.env[key]
@@ -30,6 +33,7 @@ beforeAll(async () => {
   const mod = await import('./switchModelProfile.bindings.js')
   resolveSessionDefaultModel = mod.resolveSessionDefaultModel
   switchTierBound = mod.switchTierBound
+  findProfileByModel = mod.findProfileByModel
 })
 
 afterAll(() => {
@@ -147,4 +151,55 @@ test('returns null for a first-party user with no custom config', () => {
   clearEnv()
   writeStorage({})
   expect(resolveSessionDefaultModel()).toBeNull()
+})
+
+// findProfileByModel — P1 profile lookup with same-model-id disambiguation.
+// Two providers may legitimately share a main model id (identity is
+// providerName); picking that id from a picker must resolve to the profile
+// the ACTIVE env points at, not an arbitrary first match.
+describe('findProfileByModel', () => {
+  test('returns null for no match and null/undefined input', () => {
+    clearEnv()
+    writeStorage({ modelProfiles: [{ model: 'deepseek-v4-pro' }] })
+    expect(findProfileByModel('kimi-k3')).toBeNull()
+    expect(findProfileByModel(null)).toBeNull()
+    expect(findProfileByModel(undefined)).toBeNull()
+  })
+
+  test('single match returns that profile regardless of env', () => {
+    clearEnv()
+    writeStorage({
+      modelProfiles: [
+        { model: 'DeepSeek-V4-Pro', providerName: 'deepseek官方', baseURL: 'https://a.test/v1' },
+      ],
+    })
+    // normalizeModelName is case-insensitive
+    expect(findProfileByModel('deepseek-v4-pro')?.providerName).toBe('deepseek官方')
+  })
+
+  test('ambiguous match prefers the profile the ACTIVE env endpoint describes', () => {
+    clearEnv()
+    writeStorage({
+      modelProfiles: [
+        { model: 'gpt-5.2', providerName: 'official', baseURL: 'https://official.test/v1', apiKey: 'sk-official' },
+        { model: 'gpt-5.2', providerName: 'relay', baseURL: 'https://relay.test/v1', apiKey: 'sk-relay' },
+      ],
+    })
+    // Active env (written by applyModelProfile on every switch) points at relay
+    process.env.ANTHROPIC_BASE_URL = 'https://relay.test/v1'
+    process.env.DOGE_API_KEY = 'sk-relay'
+    expect(findProfileByModel('gpt-5.2')?.providerName).toBe('relay')
+  })
+
+  test('ambiguous match with no matching env endpoint falls back to first (historic behavior)', () => {
+    clearEnv()
+    writeStorage({
+      modelProfiles: [
+        { model: 'gpt-5.2', providerName: 'official', baseURL: 'https://official.test/v1' },
+        { model: 'gpt-5.2', providerName: 'relay', baseURL: 'https://relay.test/v1' },
+      ],
+    })
+    process.env.ANTHROPIC_BASE_URL = 'https://somewhere-else.test/v1'
+    expect(findProfileByModel('gpt-5.2')?.providerName).toBe('official')
+  })
 })

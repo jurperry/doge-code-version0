@@ -1181,6 +1181,44 @@ function saveConfig<A extends object>(
  * whether to invalidate the cache -- invalidating after a skipped write
  * destroys the good cached state the auth-loss guard depends on.
  */
+/**
+ * Create a config backup WITHOUT the plaintext API key mirror. The key inside
+ * customApiEndpoint is only a convenience MIRROR of secure storage (the
+ * credential source of truth — see healStoredCredentials), so stripping it
+ * costs nothing on restore, while the rotating backup files (unlike the live
+ * config write below, which sets 0o600) would otherwise leave 5 world-default
+ * -permission plaintext copies of the key in ~/.doge/backups/. Non-JSON or
+ * key-less files are byte-copied unchanged.
+ */
+function writeConfigBackup(file: string, backupPath: string): void {
+  const fs = getFsImplementation()
+  try {
+    const content = fs.readFileSync(file, { encoding: 'utf-8' })
+    const parsed = jsonParse(stripBOM(content)) as {
+      customApiEndpoint?: { apiKey?: string } & Record<string, unknown>
+    } & Record<string, unknown>
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      parsed.customApiEndpoint &&
+      typeof parsed.customApiEndpoint === 'object' &&
+      parsed.customApiEndpoint.apiKey !== undefined
+    ) {
+      parsed.customApiEndpoint = {
+        ...parsed.customApiEndpoint,
+        apiKey: undefined,
+      }
+      writeFileSyncAndFlush_DEPRECATED(backupPath, jsonStringify(parsed, null, 2), {
+        encoding: 'utf-8',
+      })
+      return
+    }
+  } catch {
+    // Not JSON / unreadable — fall through to a byte copy
+  }
+  fs.copyFileSync(file, backupPath)
+}
+
 function saveConfigWithLock<A extends object>(
   file: string,
   createDefault: () => A,
@@ -1308,7 +1346,7 @@ function saveConfigWithLock<A extends object>(
 
       if (shouldCreateBackup) {
         const backupPath = join(backupDir, `${fileBase}.backup.${Date.now()}`)
-        fs.copyFileSync(file, backupPath)
+        writeConfigBackup(file, backupPath)
       }
 
       // Clean up old backups, keeping only the 5 most recent

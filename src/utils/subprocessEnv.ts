@@ -53,13 +53,39 @@ const GHA_SUBPROCESS_SCRUB = [
 ] as const
 
 /**
+ * Fork credentials stripped from subprocess environments BY DEFAULT. The
+ * parent doge process re-reads these per request; child processes (Bash tool,
+ * shell snapshot, MCP stdio, LSP, hooks) never need them. Without this scrub,
+ * a prompt-injected `echo $DOGE_API_KEY` in any Bash command exfiltrates the
+ * key — the fork's primary credential, since /auto sessions and the
+ * always-on Computer Use gates make unattended tool runs a first-class path.
+ *
+ * Deliberately NARROWER than GHA_SUBPROCESS_SCRUB: cloud provider creds
+ * (AWS, AZURE, …) are NOT stripped by default — on a dev machine, running
+ * `aws`/`az` in the Bash tool with ambient creds is a legitimate workflow.
+ * The full CI list remains available via CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1.
+ */
+const DEFAULT_SUBPROCESS_SCRUB = [
+  'DOGE_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_FOUNDRY_API_KEY',
+  'ANTHROPIC_CUSTOM_HEADERS',
+] as const
+
+/**
  * Returns a copy of process.env with sensitive secrets stripped, for use when
  * spawning subprocesses (Bash tool, shell snapshot, MCP stdio servers, LSP
  * servers, shell hooks).
  *
- * Gated on CLAUDE_CODE_SUBPROCESS_ENV_SCRUB. claude-code-action sets this
- * automatically when `allowed_non_write_users` is configured — the flag that
- * exposes a workflow to untrusted content (prompt injection surface).
+ * Modes (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB):
+ *  - unset            → DEFAULT fork-credential scrub (DOGE_API_KEY etc.).
+ *  - truthy ('1'/...) → full CI scrub list (claude-code-action sets this when
+ *                       `allowed_non_write_users` exposes the workflow to
+ *                       untrusted content; GHA/cloud/OIDC vars included).
+ *  - falsy ('0'/...)  → no scrubbing at all (escape hatch for setups that
+ *                       genuinely need credentials in child envs).
  */
 // Registered by init.ts after the upstreamproxy module is dynamically imported
 // in CCR sessions. Stays undefined in non-CCR startups so we never pull in the
@@ -83,13 +109,20 @@ export function subprocessEnv(): NodeJS.ProcessEnv {
   // CCR containers.
   const proxyEnv = _getUpstreamProxyEnv?.() ?? {}
 
-  if (!isEnvTruthy(process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB)) {
+  const scrubFlag = process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
+  const fullScrub = isEnvTruthy(scrubFlag)
+  // Explicit falsy value ('0'/'false'/...) = opt-out; unset/empty = default scrub.
+  const scrubDisabled =
+    scrubFlag !== undefined && scrubFlag !== '' && !fullScrub
+
+  if (scrubDisabled) {
     return Object.keys(proxyEnv).length > 0
       ? { ...process.env, ...proxyEnv }
       : process.env
   }
   const env = { ...process.env, ...proxyEnv }
-  for (const k of GHA_SUBPROCESS_SCRUB) {
+  const scrubList = fullScrub ? GHA_SUBPROCESS_SCRUB : DEFAULT_SUBPROCESS_SCRUB
+  for (const k of scrubList) {
     delete env[k]
     // GitHub Actions auto-creates INPUT_<NAME> for `with:` inputs, duplicating
     // secrets like INPUT_DOGE_API_KEY. No-op for vars that aren't action inputs.

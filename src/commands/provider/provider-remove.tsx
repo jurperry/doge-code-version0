@@ -11,6 +11,7 @@ import {
   type ModelProfile,
 } from '../../utils/customApiStorage.js';
 import { formatCustomModelLabel } from '../../utils/model/model.js';
+import { PROFILE_MANAGED_ENV_KEYS } from '../../utils/model/profileEnvKeys.js';
 import { updateSettingsForSource } from '../../utils/settings/settings.js';
 import type { LocalJSXCommandOnDone } from '../../types/command.js';
 import { buildSubToMainMap, getMainModels } from './provider-entries.js';
@@ -28,13 +29,16 @@ function getProfileSubKeys(profile?: ModelProfile): Set<string> {
   return keys;
 }
 
-/** Clear tier model env vars that belong to a deleted main model */
+/**
+ * Clear ALL profile-managed env vars (PROFILE_MANAGED_ENV_KEYS is the single
+ * source of truth, same list switchModelProfile clears before apply). The old
+ * version cleared only the five tier vars, leaking the deleted profile's
+ * CLAUDE_CODE_SUBAGENT_MODEL / behavior flags into the fallback provider.
+ */
 function clearTierModelEnvVars() {
-  delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-  delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-  delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-  delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES;
-  delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES;
+  for (const key of PROFILE_MANAGED_ENV_KEYS) {
+    delete process.env[key]
+  }
 }
 
 export function doRemoveProvider(targetModel: string): { success: boolean; message: string } {
@@ -120,7 +124,6 @@ export function doRemoveProvider(targetModel: string): { success: boolean; messa
         delete process.env.DOGE_API_KEY;
         delete process.env.ANTHROPIC_AUTH_TOKEN;
         delete process.env.ANTHROPIC_BASE_URL;
-        delete process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOW;
         storageUpdate.provider = undefined;
         storageUpdate.baseURL = undefined;
         storageUpdate.apiKey = undefined;

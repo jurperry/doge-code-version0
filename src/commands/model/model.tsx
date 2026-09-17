@@ -12,62 +12,15 @@ import { isBilledAsExtraUsage } from '../../utils/extraUsage.js';
 import { clearFastModeCooldown, isFastModeAvailable, isFastModeEnabled, isFastModeSupportedByModel } from '../../utils/fastMode.js';
 import { MODEL_ALIASES, MODEL_FAMILY_ALIASES } from '../../utils/model/aliases.js';
 import { checkOpus1mAccess, checkSonnet1mAccess } from '../../utils/model/check1mAccess.js';
-import { applyModelProfile, getModelProfile, normalizeModelName, readCustomApiStorage, writeCustomApiStorage, type ModelProfile } from '../../utils/customApiStorage.js';
 import { decideAndSwitch } from './handlers.js';
-import { switchModelProfileAtomicBound, switchTierBound, resolveSessionDefaultModel } from '../../utils/model/switchModelProfile.bindings.js';
+import { switchModelProfileAtomicBound, switchTierBound, resolveSessionDefaultModel, findProfileByModel } from '../../utils/model/switchModelProfile.bindings.js';
+import { syncModelConfigToDisk } from '../../utils/model/syncModelConfig.js';
 import { type ModelSwitchScope, resolveModelSwitchScope } from '../../utils/model/modelSwitchScope.js';
-import { saveGlobalConfig } from '../../utils/config.js';
-import { updateSettingsForSource } from '../../utils/settings/settings.js';
 import { formatCustomModelLabel, getDefaultMainLoopModelSetting, isOpus1mMergeEnabled, parseUserSpecifiedModel, renderDefaultModelSetting } from '../../utils/model/model.js';
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js';
 import { validateModel } from '../../utils/model/validateModel.js';
 import { matchesTierModel as isTierModelMatch } from '../../utils/model/modelSupportOverrides.js';
 import { getAPIProvider } from '../../utils/model/providers.js';
-/** Persist model change to .claude.json, .credentials.json and settings.json so all three config
- *  files stay in sync. Writing a new main model invalidates any tier selection
- *  (activeTier), since the tier mapping belonged to the previous main model. */
-function syncModelConfigToDisk(
-  model: string,
-  clearCredentials?: boolean,
-  credentialSourceProfile?: ModelProfile,
-): void {
-  const profile = credentialSourceProfile ?? getModelProfile(model)
-  let credsUpdate: Record<string, unknown> = {}
-
-  if (clearCredentials) {
-    credsUpdate = { provider: undefined as unknown as string, baseURL: undefined as unknown as string, apiKey: undefined as unknown as string, authTokenType: undefined as unknown as string }
-  } else if (profile) {
-    credsUpdate = {
-      provider: profile.provider,
-      baseURL: profile.baseURL,
-      apiKey: profile.apiKey,
-      authTokenType: profile.authTokenType,
-    }
-  }
-
-  saveGlobalConfig(current => ({
-    ...current,
-    customApiEndpoint: {
-      ...current.customApiEndpoint,
-      model,
-      // Tiers are session-scoped; scrub deprecated global tier state on write.
-      activeTier: undefined,
-      tierModels: undefined,
-      ...credsUpdate,
-    }
-  }))
-  updateSettingsForSource('userSettings', { model })
-
-  const currentStorage = readCustomApiStorage()
-  writeCustomApiStorage({
-    ...currentStorage,
-    model,
-    activeTier: undefined,
-    tierModels: undefined,
-    ...credsUpdate
-  })
-}
-
 function ModelPickerWrapper(t0) {
   const $ = _c(17);
   const {
@@ -109,10 +62,8 @@ function ModelPickerWrapper(t0) {
       // terminals are unaffected; DOGE_MODEL_SCOPE=global restores legacy
       // persist-everywhere behavior.
       const scope = resolveModelSwitchScope();
-      const profiles = readCustomApiStorage().modelProfiles ?? [];
-      const findProfile = (m) => profiles.find((p) => normalizeModelName(p.model) === normalizeModelName(m)) ?? null;
       decideAndSwitch(model ?? null, {
-        findProfile,
+        findProfile: findProfileByModel,
         switchModelProfileAtomicBound,
         switchTierBound,
         syncModelConfigToDisk,
@@ -290,10 +241,8 @@ function SetModelAndClose({
     function setModel(modelValue: string | null): void {
       // Model switch: unified decideAndSwitch handles P1 (profile), P2 (alias),
       // and P3 (bare string) with atomic env cleanup. See handlers.ts.
-      const profiles = readCustomApiStorage().modelProfiles ?? [];
-      const findProfile = (m) => profiles.find((p) => normalizeModelName(p.model) === normalizeModelName(m)) ?? null;
       decideAndSwitch(modelValue ?? null, {
-        findProfile,
+        findProfile: findProfileByModel,
         switchModelProfileAtomicBound,
         switchTierBound,
         syncModelConfigToDisk,

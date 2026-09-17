@@ -18,7 +18,8 @@
  * persist-to-disk behavior (e.g. /model <name> --save). Tier aliases are
  * session-scoped in BOTH modes (they never persist — see switchTier).
  */
-import { applyModelProfile, clearLegacyTierState, getModelProfile, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
+import { logForDebugging } from '../debug.js'
+import { applyModelProfile, clearLegacyTierState, getModelProfile, normalizeModelName, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
 import {
   switchModelProfileAtomic as switchModelProfileAtomicCore,
   switchTier as switchTierCore,
@@ -44,6 +45,81 @@ type SyncToDisk = (
 function bindCommit(setAppState: (f: (prev: any) => any) => void) {
   return (updater: (prev: AppStateSlice) => AppStateSlice) =>
     setAppState((prev: any) => updater(prev))
+}
+
+/**
+ * Look up a ModelProfile for a model string the user picked. Identity is the
+ * model id (the pickers only carry model strings); when SEVERAL stored
+ * profiles share that id — allowed, since provider identity is providerName —
+ * prefer the profile whose endpoint the ACTIVE env points at
+ * (ANTHROPIC_BASE_URL / key are written by applyModelProfile on every
+ * switch), so re-picking the already-active provider is a no-op re-apply
+ * instead of silently switching to an arbitrary same-model provider. Falls
+ * back to the first match (historic behavior).
+ */
+export function findProfileByModel(
+  model: string | null | undefined,
+): ModelProfile | null {
+  if (!model) return null
+  const target = normalizeModelName(model)
+  const matches = (readCustomApiStorage().modelProfiles ?? []).filter(
+    p => normalizeModelName(p.model) === target,
+  )
+  if (matches.length === 0) return null
+  if (matches.length > 1) {
+    const envBase = process.env.ANTHROPIC_BASE_URL?.trim()
+    const envKey = process.env.DOGE_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN
+    if (envBase) {
+      const sameEndpoint =
+        matches.find(
+          p =>
+            p.baseURL?.trim() === envBase &&
+            (!p.apiKey || p.apiKey === envKey),
+        ) ?? matches.find(p => p.baseURL?.trim() === envBase)
+      if (sameEndpoint) {
+        logForDebugging(
+          `[modelSwitch] ${matches.length} profiles share model '${model}' — using the active endpoint's profile '${sameEndpoint.providerName ?? sameEndpoint.model}'`,
+        )
+        return sameEndpoint
+      }
+    }
+  }
+  return matches[0]
+}
+
+/**
+ * Apply the stored profile matching `model` to process env (session-scoped:
+ * no disk writes), for switch paths that resolve the model via
+ * setMainLoopModelOverride rather than the AppState session slot — i.e. the
+ * headless/SDK entry points in print.ts (set_model control request,
+ * set_settings.model, SDK onSetModel, CCR metadata restore). Those used to
+ * write only the override, so picking a stored provider's model string sent
+ * it to whatever endpoint env still pointed at (wrong-endpoint requests).
+ *
+ * Returns true when a profile was found and applied. Failures roll env back
+ * (switchModelProfileAtomic) and return false — the caller still sets the
+ * override, matching the previous behavior.
+ */
+export async function applyProfileForModelIfMatch(model: string): Promise<boolean> {
+  const profile = findProfileByModel(model)
+  if (!profile) return false
+  try {
+    await switchModelProfileAtomicCore(profile, {
+      applyProfile: p => applyModelProfile(p, { persist: false }),
+      syncToDisk: noopSyncToDisk,
+      // Headless resolves the main loop model via setMainLoopModelOverride;
+      // there is no interactive AppState session slot to commit.
+      commitAppState: () => {},
+      sessionScoped: true,
+    })
+    return true
+  } catch (e) {
+    logForDebugging(
+      `[modelSwitch] Headless profile application for '${model}' failed: ${e instanceof Error ? e.message : String(e)}`,
+      { level: 'error' },
+    )
+    return false
+  }
 }
 
 export interface BoundSwitchDeps {

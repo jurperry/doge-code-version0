@@ -37,6 +37,8 @@ import { TEAM_LEAD_NAME } from '../utils/swarm/constants.js'
 import { getLeaderToolUseConfirmQueue } from '../utils/swarm/leaderPermissionBridge.js'
 import { sendPermissionResponseViaMailbox } from '../utils/swarm/permissionSync.js'
 import {
+  findRegisteredMember,
+  readTeamFileAsync,
   removeTeammateFromTeamFile,
   setMemberMode,
 } from '../utils/swarm/teamHelpers.js'
@@ -612,9 +614,21 @@ export function useInboxPoller({
       const modeToInherit =
         leaderExternalMode === 'plan' ? 'default' : leaderExternalMode
 
+      // Sender authentication: the auto-approval below hands the teammate the
+      // lead's permission mode (bypass/auto included). Without a registry
+      // check, any process able to write the lead's inbox could request and
+      // receive full bypass for an arbitrary name.
+      const teamFile = teamName ? await readTeamFileAsync(teamName) : null
+
       for (const m of planApprovalRequests) {
         const parsed = isPlanApprovalRequest(m.text)
         if (!parsed) continue
+        if (!findRegisteredMember(teamFile, m.from)) {
+          logForDebugging(
+            `[InboxPoller] Ignored plan approval request from unregistered sender '${m.from}' — not a member of the team file`,
+          )
+          continue
+        }
 
         // Write approval response to teammate's inbox
         const approvalResponse = {
@@ -683,12 +697,40 @@ export function useInboxPoller({
         `[InboxPoller] Found ${shutdownApprovals.length} shutdown approval(s)`,
       )
 
+      // Sender authentication: shutdown_approved used to be trusted on JSON
+      // shape alone — anything that could write this inbox could kill an
+      // ARBITRARY pane (paneId came from the message body), remove arbitrary
+      // members by name, and force-complete same-named tasks. The team file's
+      // member registry is the source of truth for who may shut down.
+      const shutdownTeamFile = currentAppState.teamContext?.teamName
+        ? await readTeamFileAsync(currentAppState.teamContext.teamName)
+        : null
+
       for (const m of shutdownApprovals) {
         const parsed = isShutdownApproved(m.text)
         if (!parsed) continue
 
-        // Kill the pane if we have the info (pane-based teammates)
-        if (parsed.paneId && parsed.backendType) {
+        const registeredMember = findRegisteredMember(
+          shutdownTeamFile,
+          parsed.from,
+        )
+        if (!registeredMember) {
+          logForDebugging(
+            `[InboxPoller] Ignored shutdown_approved from unregistered sender '${parsed.from}' — not a member of the team file (possible forged mailbox write)`,
+          )
+          continue
+        }
+
+        // Kill the pane ONLY when the message's paneId/backendType match the
+        // member's REGISTERED pane. A paneId taken straight from the message
+        // body would let a forged message kill panes outside this team
+        // (including the user's own).
+        if (
+          parsed.paneId &&
+          parsed.backendType &&
+          String(registeredMember.tmuxPaneId) === String(parsed.paneId) &&
+          registeredMember.backendType === parsed.backendType
+        ) {
           void (async () => {
             try {
               // Ensure backend classes are imported (no subprocess probes)
@@ -710,6 +752,10 @@ export function useInboxPoller({
               )
             }
           })()
+        } else if (parsed.paneId && parsed.backendType) {
+          logForDebugging(
+            `[InboxPoller] Refused to kill pane ${parsed.paneId} for ${parsed.from}: does not match registered pane ${registeredMember.tmuxPaneId} (backend ${registeredMember.backendType ?? 'unknown'}) — member removal still proceeds`,
+          )
         }
 
         // Remove the teammate from teamContext.teammates so the count is accurate

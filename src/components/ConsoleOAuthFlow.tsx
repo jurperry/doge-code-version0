@@ -11,6 +11,7 @@ import { getSSLErrorHint } from '../services/api/errorUtils.js';
 import { sendNotification } from '../services/notifier.js';
 import { OAuthService } from '../services/oauth/index.js';
 import { getOauthAccountInfo, validateForceLoginOrg } from '../utils/auth.js';
+import { enforceApiKeyExclusivity } from '../utils/apiKeyExclusivity.js';
 import { getGlobalConfig, saveGlobalConfig } from '../utils/config.js';
 import { normalizeApiKeyForConfig } from '../utils/authPortable.js';
 import { readCustomApiStorage, writeCustomApiStorage } from '../utils/customApiStorage.js';
@@ -193,7 +194,15 @@ export function ConsoleOAuthFlow({
     const normalizedKey = nextApiKey ? normalizeApiKeyForConfig(nextApiKey) : null;
     const nextSavedModels = nextModel ? [...new Set([...(persistedCustomApiEndpoint.savedModels ?? []), nextModel])] : persistedCustomApiEndpoint.savedModels ?? [];
     process.env.ANTHROPIC_BASE_URL = nextBaseURL;
-    process.env.DOGE_API_KEY = nextApiKey;
+    if (nextApiKey) {
+      process.env.DOGE_API_KEY = nextApiKey;
+    } else {
+      delete process.env.DOGE_API_KEY;
+    }
+    // Direct env write bypasses the managedEnv apply entries — run the
+    // mutual-exclusion guard so a stray ANTHROPIC_AUTH_TOKEN can't produce
+    // conflicting x-api-key + Bearer headers.
+    enforceApiKeyExclusivity();
     process.env.ANTHROPIC_MODEL = nextModel;
     saveGlobalConfig(current => ({
       ...current,
@@ -209,7 +218,12 @@ export function ConsoleOAuthFlow({
         rejected: (current.customApiKeyResponses?.rejected ?? []).filter(key => key !== normalizedKey)
       } : current.customApiKeyResponses
     }));
+    // Merge-write: spread the CURRENT storage so modelProfiles[] (other
+    // providers' full configs, including their keys) and authTokenType
+    // survive. Replacing the payload wholesale used to wipe every other
+    // saved provider.
     writeCustomApiStorage({
+      ...readCustomApiStorage(),
       provider: compatibleApiProvider,
       baseURL: nextBaseURL,
       apiKey: nextApiKey,

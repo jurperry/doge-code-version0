@@ -15,6 +15,7 @@ import stripAnsi from 'strip-ansi';
 import { companionReservedColumns } from '../../buddy/CompanionSprite.js';
 import { findBuddyTriggerPositions, useBuddyNotification } from '../../buddy/useBuddyNotification.js';
 import { FastModePicker } from '../../commands/fast/fast.js';
+import { decideAndSwitch } from '../../commands/model/handlers.js';
 import { isUltrareviewEnabled } from '../../commands/review/ultrareviewEnabled.js';
 import { getNativeCSIuTerminalDisplayName } from '../../commands/terminalSetup/terminalSetup.js';
 import { type Command, hasCommand } from '../../commands.js';
@@ -72,6 +73,10 @@ import { cacheImagePath, storeImage } from '../../utils/imageStore.js';
 import { isMacosOptionChar, MACOS_OPTION_SPECIAL_CHARS } from '../../utils/keyboardShortcuts.js';
 import { logError } from '../../utils/log.js';
 import { isOpus1mMergeEnabled, modelDisplayString } from '../../utils/model/model.js';
+import { MODEL_FAMILY_ALIASES } from '../../utils/model/aliases.js';
+import { type ModelSwitchScope, resolveModelSwitchScope } from '../../utils/model/modelSwitchScope.js';
+import { syncModelConfigToDisk } from '../../utils/model/syncModelConfig.js';
+import { findProfileByModel, switchModelProfileAtomicBound, switchTierBound } from '../../utils/model/switchModelProfile.bindings.js';
 import { setAutoModeActive } from '../../utils/permissions/autoModeState.js';
 import { cyclePermissionMode, getNextPermissionMode } from '../../utils/permissions/getNextPermissionMode.js';
 import { transitionPermissionMode } from '../../utils/permissions/permissionSetup.js';
@@ -2017,22 +2022,37 @@ function PromptInput({
   // state (like notifications) changes. This prevents the inline model picker
   // from visually "jumping" when notifications arrive.
   const handleModelSelect = useCallback((model: string | null, _effort: EffortLevel | undefined) => {
+    // Unified pipeline: the SAME decideAndSwitch the /model command runs —
+    // P1 applies the matched profile's env (baseURL/key/provider) atomically
+    // with the model change. The old direct write of the global
+    // mainLoopModel slot left the new model id on the OLD endpoint's
+    // credentials: picking a provider's model from the inline picker sent
+    // requests to the wrong base URL with the wrong key.
+    const scope = resolveModelSwitchScope();
+    void decideAndSwitch(model ?? null, {
+      findProfile: findProfileByModel,
+      switchModelProfileAtomicBound,
+      switchTierBound,
+      syncModelConfigToDisk,
+      setAppState,
+      scope,
+    }).catch(e => {
+      logError(e);
+    });
     let wasFastModeDisabled = false;
     setAppState(prev => {
       wasFastModeDisabled = isFastModeEnabled() && !isFastModeSupportedByModel(model) && !!prev.fastMode;
-      return {
-        ...prev,
-        mainLoopModel: model,
-        mainLoopModelForSession: null,
-        // Turn off fast mode if switching to a model that doesn't support it
-        ...(wasFastModeDisabled && {
-          fastMode: false
-        })
-      };
+      // Turn off fast mode if switching to a model that doesn't support it
+      return wasFastModeDisabled ? { ...prev, fastMode: false } : prev;
     });
     setShowModelPicker(false);
     const effectiveFastMode = (isFastMode ?? false) && !wasFastModeDisabled;
     let message = `Model set to ${modelDisplayString(model)}`;
+    if (scope === 'session') {
+      message += model !== null && (MODEL_FAMILY_ALIASES as readonly string[]).includes(model)
+        ? ' · session only (tier selections never persist; edit tiers via /provider)'
+        : ` · session only (use /model ${model ?? 'default'} --save to persist)`;
+    }
     if (isBilledAsExtraUsage(model, effectiveFastMode, isOpus1mMergeEnabled())) {
       message += ' · Billed as extra usage';
     }

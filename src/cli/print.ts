@@ -271,6 +271,7 @@ import {
   modelDisplayString,
   parseUserSpecifiedModel,
 } from 'src/utils/model/model.js'
+import { applyProfileForModelIfMatch } from 'src/utils/model/switchModelProfile.bindings.js'
 import { getModelOptions } from 'src/utils/model/modelOptions.js'
 import {
   modelSupportsEffort,
@@ -2937,12 +2938,19 @@ function runHeadlessStreaming(
             requestedModel === 'default'
               ? getDefaultMainLoopModel()
               : requestedModel
-          activeUserSpecifiedModel = model
-          setMainLoopModelOverride(model)
-          notifySessionMetadataChanged({ model })
-          injectModelSwitchBreadcrumbs(requestedModel, model)
+          // Apply the matched profile's env (baseURL/key/provider) before the
+          // override lands — writing only the override sent a stored
+          // provider's model id to whatever endpoint env still pointed at.
+          // Helper resolves synchronously in practice and rolls env back on
+          // failure; the override is set either way.
+          void applyProfileForModelIfMatch(model).finally(() => {
+            activeUserSpecifiedModel = model
+            setMainLoopModelOverride(model)
+            notifySessionMetadataChanged({ model })
+            injectModelSwitchBreadcrumbs(requestedModel, model)
 
-          sendControlResponseSuccess(message)
+            sendControlResponseSuccess(message)
+          })
         } else if (message.request.subtype === 'set_max_thinking_tokens') {
           if (message.request.max_thinking_tokens === null) {
             options.thinkingConfig = undefined
@@ -3737,7 +3745,11 @@ function runHeadlessStreaming(
           // change is silently ignored (matching set_model at :2811).
           if ('model' in incoming) {
             if (incoming.model != null) {
-              setMainLoopModelOverride(String(incoming.model))
+              const modelStr = String(incoming.model)
+              // Match set_model: apply the stored profile's env alongside the
+              // override so the model id goes to the right endpoint.
+              void applyProfileForModelIfMatch(modelStr)
+              setMainLoopModelOverride(modelStr)
             } else {
               setMainLoopModelOverride(undefined)
             }
@@ -3942,6 +3954,9 @@ function runHeadlessStreaming(
                     const resolved =
                       model === 'default' ? getDefaultMainLoopModel() : model
                     activeUserSpecifiedModel = resolved
+                    // Match set_model: apply the stored profile's env
+                    // alongside the override (wrong-endpoint guard).
+                    void applyProfileForModelIfMatch(resolved)
                     setMainLoopModelOverride(resolved)
                   },
                   onSetMaxThinkingTokens(maxTokens) {
@@ -5059,6 +5074,9 @@ async function loadInitialMessages(
         if (metadata) {
           setAppState(externalMetadataToAppState(metadata))
           if (typeof metadata.model === 'string') {
+            // Restore the profile env for the saved model too, not just the
+            // override — the saved session may have been on another provider.
+            await applyProfileForModelIfMatch(metadata.model)
             setMainLoopModelOverride(metadata.model)
           }
         }

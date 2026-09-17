@@ -9,6 +9,7 @@ import { useKeybinding, useKeybindings } from '../../keybindings/useKeybinding.j
 import figures from 'figures';
 import { type GlobalConfig, saveGlobalConfig, getCurrentProjectConfig, type OutputStyle } from '../../utils/config.js';
 import { normalizeApiKeyForConfig } from '../../utils/authPortable.js';
+import { enforceApiKeyExclusivity } from '../../utils/apiKeyExclusivity.js';
 import { getGlobalConfig, getAutoUpdaterDisabledReason, formatAutoUpdaterDisabledReason, getRemoteControlAtStartup } from '../../utils/config.js';
 import chalk from 'chalk';
 import { permissionModeTitle, permissionModeFromString, toExternalPermissionMode, isExternalPermissionMode, EXTERNAL_PERMISSION_MODES, PERMISSION_MODES, type ExternalPermissionMode, type PermissionMode } from '../../utils/permissions/PermissionMode.js';
@@ -303,7 +304,15 @@ export function Config({
       }));
       if (nextValue) {
         process.env.DOGE_API_KEY = nextValue;
+      } else {
+        // Clearing the stored key must also clear the in-process env var, or
+        // the old key keeps authenticating requests until restart.
+        delete process.env.DOGE_API_KEY;
       }
+      // Direct env writes bypass the managedEnv apply entries — run the
+      // mutual-exclusion guard so a stray ANTHROPIC_AUTH_TOKEN can't produce
+      // conflicting x-api-key + Bearer headers.
+      enforceApiKeyExclusivity();
       setCustomApiKey(nextValue);
       setGlobalConfig(getGlobalConfig());
     }
