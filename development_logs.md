@@ -227,6 +227,13 @@
 2. 解决：删除 executor 抽象、孤儿类型与死副本函数（live 版本保留在 spawnMultiAgent 局部）。
 3. 位置：已删 `src/utils/swarm/backends/*`，清理 `src/utils/swarm/{registry,types,spawnUtils}.ts`
 
+## 六、2026-09-20 记忆加载批次
+
+### 44. AGENTS.md 回退加载与 .doge/rules 检测残留
+1. 问题：记忆加载器只认 CLAUDE.md 家族，业界通行的 AGENTS.md 完全不被加载（仅 /init 当参考素材读）；`isMemoryFilePath` 仍检测 `.claude/rules`（fork 改名残留），与加载器实际读的 `.doge/rules` 不一致。
+2. 解决：目录级 CLAUDE.md 无可加载内容（缺失/空/被排除）时回退加载同目录 AGENTS.md，二者永不叠加，回退覆盖主遍历、--add-dir、子目录嵌套三处入口；`isMemoryFilePath` 改判 `.doge/rules` 并识别 AGENTS.md；onboarding 检查认可 AGENTS.md（不再误提示 /init）。
+3. 位置：`src/utils/claudemd.ts`（新增 `processProjectMemoryFileWithFallback`）、`src/projectOnboardingState.ts`；测试 `src/utils/claudemd.test.ts` + `test/e2e-agents-md-fallback.ts`
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。

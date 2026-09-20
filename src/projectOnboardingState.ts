@@ -17,10 +17,14 @@ export type Step = {
 }
 
 export function getSteps(): Step[] {
-  const hasClaudeMd = getFsImplementation().existsSync(
-    join(getCwd(), 'CLAUDE.md'),
-  )
-  const isWorkspaceDirEmpty = isDirEmpty(getCwd())
+  const fs = getFsImplementation()
+  const cwd = getCwd()
+  // AGENTS.md counts too — it loads as project memory via the CLAUDE.md
+  // fallback in claudemd.ts, so /init has nothing left to set up.
+  const hasClaudeMd =
+    fs.existsSync(join(cwd, 'CLAUDE.md')) ||
+    fs.existsSync(join(cwd, 'AGENTS.md'))
+  const isWorkspaceDirEmpty = isDirEmpty(cwd)
 
   return [
     {

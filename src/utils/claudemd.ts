@@ -14,6 +14,10 @@
  * - Project and Local files are discovered by traversing from the current directory up to root
  * - Files closer to the current directory have higher priority (loaded later)
  * - CLAUDE.md, .doge/CLAUDE.md, and all .md files in .doge/rules/ are checked in each directory for Project memory
+ * - AGENTS.md fallback: in each project directory, if CLAUDE.md yields no loadable
+ *   content (missing, empty, or excluded), AGENTS.md is loaded instead — never both.
+ *   The fallback applies only to the directory-level CLAUDE.md, not .doge/CLAUDE.md,
+ *   .doge/rules/, User, or Managed memory.
  *
  * Memory @include directive:
  * - Memory files can include other files using @ notation
@@ -685,6 +689,45 @@ export async function processMemoryFile(
 }
 
 /**
+ * Process the directory-level Project memory file with the AGENTS.md
+ * fallback: CLAUDE.md is tried first; only when it yields no loadable
+ * entries (file missing, empty after stripping, or excluded via
+ * claudeMdExcludes) is AGENTS.md processed. Both are never loaded for the
+ * same directory.
+ *
+ * Shared by the eager cwd-up walk, --add-dir directories, and nested
+ * (subdirectory) loading so all three honor the same priority rule.
+ */
+export async function processProjectMemoryFileWithFallback(
+  claudeMdPath: string,
+  agentsMdPath: string,
+  processedPaths: Set<string>,
+  includeExternal: boolean,
+  depth: number = 0,
+  parent?: string,
+): Promise<MemoryFileInfo[]> {
+  const primary = await processMemoryFile(
+    claudeMdPath,
+    'Project',
+    processedPaths,
+    includeExternal,
+    depth,
+    parent,
+  )
+  if (primary.length > 0) {
+    return primary
+  }
+  return processMemoryFile(
+    agentsMdPath,
+    'Project',
+    processedPaths,
+    includeExternal,
+    depth,
+    parent,
+  )
+}
+
+/**
  * Processes all .md files in the .doge/rules/ directory and its subdirectories
  * @param rulesDir The path to the rules directory
  * @param type Type of memory file (User, Project, Local)
@@ -883,13 +926,14 @@ export const getMemoryFiles = memoize(
         pathInWorkingPath(dir, canonicalRoot) &&
         !pathInWorkingPath(dir, gitRoot)
 
-      // Try reading CLAUDE.md (Project) - only if projectSettings is enabled
+      // Try reading CLAUDE.md (Project) - only if projectSettings is enabled.
+      // AGENTS.md is the fallback when CLAUDE.md yields no loadable content.
       if (isSettingSourceEnabled('projectSettings') && !skipProject) {
         const projectPath = join(dir, 'CLAUDE.md')
         result.push(
-          ...(await processMemoryFile(
+          ...(await processProjectMemoryFileWithFallback(
             projectPath,
-            'Project',
+            join(dir, 'AGENTS.md'),
             processedPaths,
             includeExternal,
           )),
@@ -940,12 +984,12 @@ export const getMemoryFiles = memoize(
     if (isEnvTruthy(process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD)) {
       const additionalDirs = getAdditionalDirectoriesForClaudeMd()
       for (const dir of additionalDirs) {
-        // Try reading CLAUDE.md from the additional directory
+        // Try reading CLAUDE.md from the additional directory (AGENTS.md fallback)
         const projectPath = join(dir, 'CLAUDE.md')
         result.push(
-          ...(await processMemoryFile(
+          ...(await processProjectMemoryFileWithFallback(
             projectPath,
-            'Project',
+            join(dir, 'AGENTS.md'),
             processedPaths,
             includeExternal,
           )),
@@ -1253,13 +1297,14 @@ export async function getMemoryFilesForNestedDirectory(
 ): Promise<MemoryFileInfo[]> {
   const result: MemoryFileInfo[] = []
 
-  // Process project memory files (CLAUDE.md and .doge/CLAUDE.md)
+  // Process project memory files (CLAUDE.md and .doge/CLAUDE.md; AGENTS.md
+  // is the fallback for the directory-level CLAUDE.md)
   if (isSettingSourceEnabled('projectSettings')) {
     const projectPath = join(dir, 'CLAUDE.md')
     result.push(
-      ...(await processMemoryFile(
+      ...(await processProjectMemoryFileWithFallback(
         projectPath,
-        'Project',
+        join(dir, 'AGENTS.md'),
         processedPaths,
         false,
       )),
@@ -1430,20 +1475,26 @@ export async function shouldShowClaudeMdExternalIncludesWarning(): Promise<boole
 }
 
 /**
- * Check if a file path is a memory file (CLAUDE.md, CLAUDE.local.md, or .claude/rules/*.md)
+ * Check if a file path is a memory file (CLAUDE.md, CLAUDE.local.md,
+ * AGENTS.md, or .md files inside .doge/rules/ directories)
  */
 export function isMemoryFilePath(filePath: string): boolean {
   const name = basename(filePath)
 
-  // CLAUDE.md or CLAUDE.local.md anywhere
-  if (name === 'CLAUDE.md' || name === 'CLAUDE.local.md') {
+  // CLAUDE.md, CLAUDE.local.md, or AGENTS.md anywhere
+  if (
+    name === 'CLAUDE.md' ||
+    name === 'CLAUDE.local.md' ||
+    name === 'AGENTS.md'
+  ) {
     return true
   }
 
-  // .md files in .claude/rules/ directories
+  // .md files in .doge/rules/ directories (the loader reads .doge/rules,
+  // never .claude/rules — fork isolation principle)
   if (
     name.endsWith('.md') &&
-    filePath.includes(`${sep}.claude${sep}rules${sep}`)
+    filePath.includes(`${sep}.doge${sep}rules${sep}`)
   ) {
     return true
   }
