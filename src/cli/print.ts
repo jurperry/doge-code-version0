@@ -41,6 +41,7 @@ import {
 } from 'src/tools/AgentTool/loadAgentsDir.js'
 import type { Message, NormalizedUserMessage } from 'src/types/message.js'
 import type { QueuedCommand } from 'src/types/textInputTypes.js'
+import { mergeQueuedPastedContents } from 'src/types/textInputTypes.js'
 import {
   dequeue,
   dequeueAllMatching,
@@ -139,7 +140,10 @@ import type { ReplBridgeHandle } from 'src/bridge/replBridge.js'
 import { getRemoteSessionUrl } from 'src/constants/product.js'
 import { buildBridgeConnectUrl } from 'src/bridge/bridgeStatusUtil.js'
 import { extractInboundMessageFields } from 'src/bridge/inboundMessages.js'
-import { resolveAndPrepend } from 'src/bridge/inboundAttachments.js'
+import {
+  materializeStdinImageBlocks,
+  resolveAndPrepend,
+} from 'src/bridge/inboundAttachments.js'
 import type { CanUseToolFn } from 'src/hooks/useCanUseTool.js'
 import { hasPermissionsToUseTool } from 'src/utils/permissions/permissions.js'
 import { safeParseJSON } from 'src/utils/json.js'
@@ -1957,6 +1961,9 @@ function runHeadlessStreaming(
               command = {
                 ...command,
                 value: joinPromptValues(batch.map(c => c.value)),
+                pastedContents: mergeQueuedPastedContents(
+                  batch.map(c => c.pastedContents),
+                ),
                 uuid: batch.findLast(c => c.uuid)?.uuid ?? command.uuid,
               }
             }
@@ -2152,6 +2159,7 @@ function runHeadlessStreaming(
                 'name',
               ),
               prompt: input,
+              pastedContents: cmd.pastedContents,
               promptUuid: cmd.uuid,
               isMeta: cmd.isMeta,
               cwd: cwd(),
@@ -4115,11 +4123,21 @@ function runHeadlessStreaming(
         trackReceivedMessageUuid(message.uuid)
       }
 
+      // file_attachments rides the protobuf catchall from the web composer.
+      // Same-ref no-op when absent (no 'file_attachments' key). Image blocks
+      // are then moved into pastedContents so storeImages() lands them on
+      // disk and the model learns the path (isMeta `[Image: source: …]`) —
+      // otherwise a stdin image is base64-only pixels the model can see but
+      // not locate or edit. image_paths (aligned by image-block order) lets
+      // an embedding shell point at the original file instead.
+      const intake = materializeStdinImageBlocks(
+        message,
+        await resolveAndPrepend(message, message.message.content),
+      )
       enqueue({
         mode: 'prompt' as const,
-        // file_attachments rides the protobuf catchall from the web composer.
-        // Same-ref no-op when absent (no 'file_attachments' key).
-        value: await resolveAndPrepend(message, message.message.content),
+        value: intake.content,
+        pastedContents: intake.pastedContents,
         uuid: message.uuid,
         priority: message.priority,
       })

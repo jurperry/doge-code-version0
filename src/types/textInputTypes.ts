@@ -381,6 +381,30 @@ export function getImagePasteIds(
   return ids.length > 0 ? ids : undefined
 }
 
+/**
+ * Merge per-command pastedContents maps for a batched ask(), re-numbering
+ * ids sequentially so images synthesized for different stdin messages can't
+ * collide (each stdin intake starts its ids at 1). Returns undefined when no
+ * command in the batch carried any.
+ */
+export function mergeQueuedPastedContents(
+  maps: (Record<number, PastedContent> | undefined)[],
+): Record<number, PastedContent> | undefined {
+  const live = maps.filter(
+    (m): m is Record<number, PastedContent> => m !== undefined,
+  )
+  if (live.length === 0) return undefined
+  const merged: Record<number, PastedContent> = {}
+  let nextId = 1
+  for (const map of live) {
+    for (const content of Object.values(map)) {
+      merged[nextId] = { ...content, id: nextId }
+      nextId++
+    }
+  }
+  return merged
+}
+
 export type OrphanedPermission = {
   permissionResult: PermissionResult
   assistantMessage: AssistantMessage

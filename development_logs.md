@@ -234,6 +234,13 @@
 2. 解决：目录级 CLAUDE.md 无可加载内容（缺失/空/被排除）时回退加载同目录 AGENTS.md，二者永不叠加，回退覆盖主遍历、--add-dir、子目录嵌套三处入口；`isMemoryFilePath` 改判 `.doge/rules` 并识别 AGENTS.md；onboarding 检查认可 AGENTS.md（不再误提示 /init）。
 3. 位置：`src/utils/claudemd.ts`（新增 `processProjectMemoryFileWithFallback`）、`src/projectOnboardingState.ts`；测试 `src/utils/claudemd.test.ts` + `test/e2e-agents-md-fallback.ts`
 
+## 七、2026-09-21 headless 图片路径批次
+
+### 45. headless stdin 图片块无盘上路径（模型只能看不能改）
+1. 问题：`-p --input-format stream-json` 的用户消息里 base64 图片块原样透传 API——交互 TUI 有 storeImages 落盘 + `[Image: source: <path>]` 元数据，headless 路径（QueryEngine 直接 processUserInput 且不传 pastedContents）全跳过，模型拿到 token 化像素却没有文件可指，无法 Read/Bash 修改图片。
+2. 解决：print.ts 入队时 `materializeStdinImageBlocks` 把数组内容的 base64 图片块移入 QueuedCommand.pastedContents（复用交互管线：落 session image-cache + isMeta source 元数据 + resize），ask()/QueryEngine.submitMessage()/processUserInput 透传 pastedContents，批处理合并 `mergeQueuedPastedContents` 顺序重编号防 id 撞；stdin 行可选 `image_paths`（与图片块按序对齐，绝对路径 + existsSync 校验后作 sourcePath）让嵌入壳（桌面 app）指向拖入的原文件而非 cache 副本，url/file 源与空数据块原样保留并对齐计数。
+3. 位置：`src/bridge/inboundAttachments.ts`（materializeStdinImageBlocks/extractStdinImagePaths）、`src/cli/print.ts`（enqueue/批合并/ask 调用）、`src/QueryEngine.ts`（ask/submitMessage）、`src/types/textInputTypes.ts`（mergeQueuedPastedContents）；测试 `src/bridge/inboundAttachments.test.ts`（10 项），黑盒 doge-code-app tools/verify-image-protocol.mjs（13 项）
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。
