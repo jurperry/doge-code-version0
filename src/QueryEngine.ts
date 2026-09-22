@@ -43,7 +43,7 @@ import type { Message } from './types/message.js'
 import type { OrphanedPermission } from './types/textInputTypes.js'
 import { createAbortController } from './utils/abortController.js'
 import type { AttributionState } from './utils/commitAttribution.js'
-import { getGlobalConfig } from './utils/config.js'
+import { getGlobalConfig, type PastedContent } from './utils/config.js'
 import { getCwd } from './utils/cwd.js'
 import { isBareMode, isEnvTruthy } from './utils/envUtils.js'
 import { getFastModeState } from './utils/fastMode.js'
@@ -208,7 +208,11 @@ export class QueryEngine {
 
   async *submitMessage(
     prompt: string | ContentBlockParam[],
-    options?: { uuid?: string; isMeta?: boolean },
+    options?: {
+      uuid?: string
+      isMeta?: boolean
+      pastedContents?: Record<number, PastedContent>
+    },
   ): AsyncGenerator<SDKMessage, void, unknown> {
     const {
       cwd,
@@ -415,6 +419,7 @@ export class QueryEngine {
       resultText,
     } = await processUserInput({
       input: prompt,
+      pastedContents: options?.pastedContents,
       mode: 'prompt',
       setToolJSX: () => {},
       context: {
@@ -1186,6 +1191,7 @@ export class QueryEngine {
 export async function* ask({
   commands,
   prompt,
+  pastedContents,
   promptUuid,
   isMeta,
   cwd,
@@ -1217,6 +1223,7 @@ export async function* ask({
 }: {
   commands: Command[]
   prompt: string | Array<ContentBlockParam>
+  pastedContents?: Record<number, PastedContent>
   promptUuid?: string
   isMeta?: boolean
   cwd: string
@@ -1288,6 +1295,7 @@ export async function* ask({
     yield* engine.submitMessage(prompt, {
       uuid: promptUuid,
       isMeta,
+      pastedContents,
     })
   } finally {
     setReadFileCache(engine.getReadFileState())

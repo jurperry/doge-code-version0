@@ -13,10 +13,12 @@
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs'
 import axios from 'axios'
 import { randomUUID } from 'crypto'
+import { existsSync } from 'fs'
 import { mkdir, writeFile } from 'fs/promises'
-import { basename, join } from 'path'
+import { basename, isAbsolute, join } from 'path'
 import { z } from 'zod/v4'
 import { getSessionId } from '../bootstrap/state.js'
+import type { PastedContent } from '../utils/config.js'
 import { logForDebugging } from '../utils/debug.js'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import { lazySchema } from '../utils/lazySchema.js'
@@ -172,4 +174,80 @@ export async function resolveAndPrepend(
   if (attachments.length === 0) return content
   const prefix = await resolveInboundAttachments(attachments)
   return prependPathRefs(content, prefix)
+}
+
+const imagePathsSchema = lazySchema(() => z.array(z.string()))
+
+/**
+ * Pull image_paths off a loosely-typed stdin user message. Embedding shells
+ * (e.g. the desktop app) that already have the image on disk set this field,
+ * aligned by image-block order, so the model is pointed at the original file
+ * instead of a cache copy.
+ */
+function extractStdinImagePaths(msg: unknown): string[] {
+  if (typeof msg !== 'object' || msg === null || !('image_paths' in msg)) {
+    return []
+  }
+  const parsed = imagePathsSchema().safeParse(msg.image_paths)
+  return parsed.success ? parsed.data : []
+}
+
+/**
+ * Move inline base64 image blocks from a headless stdin user message into
+ * pastedContents, so they ride the interactive pipeline: storeImages() writes
+ * each one to the session image-cache and the model is told the path via the
+ * isMeta `[Image: source: <path>]` message. Without this the model sees the
+ * pixels but has no file to point Read/Bash at (it cannot "edit the image").
+ *
+ * `msg.image_paths` entries are validated (absolute + exists) and used as
+ * sourcePath, which both points the model at the caller's original file and
+ * skips nothing — a cache copy is still written, matching TUI drag-drop.
+ * Non-base64 blocks (url/file sources) and empty payloads stay in content
+ * untouched. Same content reference returned when there is nothing to move.
+ */
+export function materializeStdinImageBlocks(
+  msg: unknown,
+  content: string | Array<ContentBlockParam>,
+): {
+  content: string | Array<ContentBlockParam>
+  pastedContents?: Record<number, PastedContent>
+} {
+  if (!Array.isArray(content)) return { content }
+  const provided = extractStdinImagePaths(msg)
+  const pastedContents: Record<number, PastedContent> = {}
+  const kept: ContentBlockParam[] = []
+  let nextId = 1
+  let imageIndex = 0
+  for (const block of content) {
+    if (block.type === 'image') {
+      const source = block.source
+      if (source.type === 'base64' && source.data) {
+        const declared = provided[imageIndex]?.trim()
+        const sourcePath =
+          declared && isAbsolute(declared) && existsSync(declared)
+            ? declared
+            : undefined
+        pastedContents[nextId] = {
+          id: nextId,
+          type: 'image',
+          content: source.data,
+          mediaType: source.media_type ?? 'image/png',
+          filename: 'stdin image',
+          sourcePath,
+        }
+        nextId++
+        imageIndex++
+        continue
+      }
+      // url/file-sourced image block (or empty payload): count it for
+      // image_paths alignment but leave it in content verbatim
+      imageIndex++
+      kept.push(block)
+      continue
+    }
+    kept.push(block)
+  }
+  if (nextId === 1) return { content }
+  debug(`moved ${nextId - 1} stdin image block(s) into pastedContents`)
+  return { content: kept, pastedContents }
 }
