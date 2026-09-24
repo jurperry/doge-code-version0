@@ -6,7 +6,6 @@ import * as path from 'path'
 import { logEvent } from 'src/services/analytics/index.js'
 import { fileURLToPath } from 'url'
 import { existsSync } from 'fs'
-import { isInBundledMode } from './bundledMode.js'
 import { logForDebugging } from './debug.js'
 import { isEnvDefinedFalsy } from './envUtils.js'
 import { execFileNoThrow } from './execFileNoThrow.js'
@@ -46,16 +45,16 @@ const getRipgrepConfig = memoize((): RipgrepConfig => {
     }
   }
 
-  // In bundled (native) mode, ripgrep is statically compiled into bun-internal
-  // and dispatches based on argv[0]. We spawn ourselves with argv0='rg'.
-  if (isInBundledMode()) {
-    return {
-      mode: 'embedded',
-      command: process.execPath,
-      args: ['--no-config'],
-      argv0: 'rg',
-    }
-  }
+  // FORK NOTE (doge-code): the upstream embedded-ripgrep branch is removed.
+  // It gated on isInBundledMode() (Bun.embeddedFiles.length > 0), which is how
+  // Anthropic's bun-internal native bundle exposes statically-linked ripgrep
+  // (self-spawn with argv0='rg'). A stock `bun build --compile` executable can
+  // ALSO report a non-empty Bun.embeddedFiles (observed with the doge.exe
+  // build on bun 1.3.11), so the branch mis-fired there: every Glob/Grep
+  // spawned doge.exe itself as "rg", the child exited 1, and the empty stdout
+  // surfaced as "No files found"/"No matches found". We never ship a
+  // bun-internal build, so the real-disk candidates + system fallback below
+  // are the only valid paths in this fork.
 
   // In a `bun build --compile` executable, __dirname is Bun's virtual mount
   // (B:\~BUN\root\) — the legacy module-relative vendor path can't be spawned
