@@ -241,6 +241,13 @@
 2. 解决：print.ts 入队时 `materializeStdinImageBlocks` 把数组内容的 base64 图片块移入 QueuedCommand.pastedContents（复用交互管线：落 session image-cache + isMeta source 元数据 + resize），ask()/QueryEngine.submitMessage()/processUserInput 透传 pastedContents，批处理合并 `mergeQueuedPastedContents` 顺序重编号防 id 撞；stdin 行可选 `image_paths`（与图片块按序对齐，绝对路径 + existsSync 校验后作 sourcePath）让嵌入壳（桌面 app）指向拖入的原文件而非 cache 副本，url/file 源与空数据块原样保留并对齐计数。
 3. 位置：`src/bridge/inboundAttachments.ts`（materializeStdinImageBlocks/extractStdinImagePaths）、`src/cli/print.ts`（enqueue/批合并/ask 调用）、`src/QueryEngine.ts`（ask/submitMessage）、`src/types/textInputTypes.ts`（mergeQueuedPastedContents）；测试 `src/bridge/inboundAttachments.test.ts`（10 项），黑盒 doge-code-app tools/verify-image-protocol.mjs（13 项）
 
+## 八、2026-09-25 teammate 进度事件批次
+
+### 46. in-process teammate 工作中 headless stdout 零排放（桌面壳看不到子 agent 进度）
+1. 问题：agent-teams 队友（in-process teammate）派生后到终态 bookend 之间，`-p stream-json --verbose` 输出完全静默数分钟——队友循环每跳都算了 progress（updateProgressFromMessage/getProgressUpdate）却只写 AppState（TUI 面板用），从不调 emitTaskProgress；桌面壳/SDK 消费者只能干等。
+2. 解决：队友消息循环补发 `system/task_progress`（镜像 AgentTool 同步子代理的按 tool_use 触发语义：lastToolName 存在才发，taskId 现成、description=队友任务描述、startTime=runner 启动时刻、summary=活动描述 activityDescription）；`lastToolUseName` 用本地 helper（import agentToolUtils 会成环：AgentTool→spawnMultiAgent→inProcessRunner）。enqueueSdkEvent 非交互会话专属（TUI 无操作），task_started/task_notification 首尾 bookend 原有不变。配套坑（壳侧实锤）：AgentTool 与本处两个发射点的 task_progress `description` 字段语义不同（前者放活动描述、后者放任务描述）——消费者刷新行进度的活动文案应取 `summary ?? description`，不得覆盖 task_started 落定的任务描述。
+3. 位置：`src/utils/swarm/inProcessRunner.ts`（lastToolUseName helper + 循环内 emitTaskProgress）；黑盒 doge-code-app tools/verify-chat-pane.mjs T26a/b（teamprog-child 相位链驱动真实队友 Read 工具跳）
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。
