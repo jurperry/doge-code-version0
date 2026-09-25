@@ -63,6 +63,7 @@ import {
 } from '../../utils/messages.js'
 import { evictTaskOutput } from '../../utils/task/diskOutput.js'
 import { PANEL_GRACE_MS } from '../../utils/task/framework.js'
+import { emitTaskProgress } from '../../utils/task/sdkProgress.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
 import { createAbortController } from '../abortController.js'
 import { type AgentContext, runWithAgentContext } from '../agentContext.js'
@@ -512,6 +513,18 @@ export type InProcessRunnerResult = {
   error?: string
   /** Messages produced by the agent */
   messages: Message[]
+}
+
+/**
+ * Last tool_use block name in an assistant message. Local twin of
+ * agentToolUtils.getLastToolUseName — duplicated here because importing
+ * agentToolUtils from the swarm runner would create an import cycle
+ * (AgentTool → spawnMultiAgent → inProcessRunner).
+ */
+function lastToolUseName(message: Message): string | undefined {
+  if (message.type !== 'assistant') return undefined
+  const block = message.message.content.findLast(b => b.type === 'tool_use')
+  return block?.type === 'tool_use' ? block.name : undefined
 }
 
 /**
@@ -1046,6 +1059,7 @@ export async function runInProcessTeammate(
       : undefined
 
     // Main teammate loop - runs until abort or shutdown approved
+    const runnerStartTime = Date.now()
     while (!abortController.signal.aborted && !shouldExit) {
       logForDebugging(
         `[inProcessRunner] ${identity.agentId} processing prompt: ${currentPrompt.substring(0, 50)}...`,
@@ -1229,6 +1243,27 @@ export async function runInProcessTeammate(
               toolUseContext.options.tools,
             )
             const progress = getProgressUpdate(tracker)
+
+            // Stream teammate progress to headless/SDK consumers (desktop
+            // shell subagent panel). Mirrors AgentTool's per-tool_use
+            // task_progress emission — without it, in-process teammates only
+            // wrote AppState (TUI panel) and headless stdout stayed silent
+            // between spawn and the closing task_notification. enqueueSdkEvent
+            // is a no-op outside non-interactive sessions, so the TUI is
+            // unaffected.
+            const lastTool = lastToolUseName(message)
+            if (lastTool) {
+              emitTaskProgress({
+                taskId,
+                toolUseId: undefined,
+                description,
+                startTime: runnerStartTime,
+                totalTokens: progress.tokenCount,
+                toolUses: progress.toolUseCount,
+                lastToolName: lastTool,
+                summary: progress.lastActivity?.activityDescription,
+              })
+            }
 
             updateTaskState(
               taskId,
