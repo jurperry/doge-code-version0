@@ -3122,9 +3122,11 @@ export function REPL({
         };
       });
 
-      // Create file history snapshot for code rewind
+      // Create file history snapshot for code rewind. Await it: fire-and-forget
+      // lets this turn's first Edit/Write win the race against the async backup
+      // IO, so rewinding to this message would restore mid-turn content.
       if (fileHistoryEnabled()) {
-        void fileHistoryMakeSnapshot((updater: (prev: FileHistoryState) => FileHistoryState) => {
+        await fileHistoryMakeSnapshot((updater: (prev: FileHistoryState) => FileHistoryState) => {
           setAppState(prev => ({
             ...prev,
             fileHistory: updater(prev.fileHistory)

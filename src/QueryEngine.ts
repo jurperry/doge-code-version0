@@ -644,19 +644,24 @@ export class QueryEngine {
     }
 
     if (fileHistoryEnabled() && persistSession) {
-      messagesFromUserInput
-        .filter(messageSelector().selectableUserMessagesFilter)
-        .forEach(message => {
-          void fileHistoryMakeSnapshot(
-            (updater: (prev: FileHistoryState) => FileHistoryState) => {
-              setAppState(prev => ({
-                ...prev,
-                fileHistory: updater(prev.fileHistory),
-              }))
-            },
-            message.uuid,
-          )
-        })
+      // Await the snapshots: fire-and-forget lets this turn's first Edit/Write
+      // win the race against the async backup IO, so rewinding to this message
+      // would restore mid-turn content instead of the pre-turn state.
+      await Promise.all(
+        messagesFromUserInput
+          .filter(messageSelector().selectableUserMessagesFilter)
+          .map(message =>
+            fileHistoryMakeSnapshot(
+              (updater: (prev: FileHistoryState) => FileHistoryState) => {
+                setAppState(prev => ({
+                  ...prev,
+                  fileHistory: updater(prev.fileHistory),
+                }))
+              },
+              message.uuid,
+            ),
+          ),
+      )
     }
 
     // Track current message usage (reset on each message_start)
