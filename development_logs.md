@@ -248,6 +248,13 @@
 2. 解决：队友消息循环补发 `system/task_progress`（镜像 AgentTool 同步子代理的按 tool_use 触发语义：lastToolName 存在才发，taskId 现成、description=队友任务描述、startTime=runner 启动时刻、summary=活动描述 activityDescription）；`lastToolUseName` 用本地 helper（import agentToolUtils 会成环：AgentTool→spawnMultiAgent→inProcessRunner）。enqueueSdkEvent 非交互会话专属（TUI 无操作），task_started/task_notification 首尾 bookend 原有不变。配套坑（壳侧实锤）：AgentTool 与本处两个发射点的 task_progress `description` 字段语义不同（前者放活动描述、后者放任务描述）——消费者刷新行进度的活动文案应取 `summary ?? description`，不得覆盖 task_started 落定的任务描述。
 3. 位置：`src/utils/swarm/inProcessRunner.ts`（lastToolUseName helper + 循环内 emitTaskProgress）；黑盒 doge-code-app tools/verify-chat-pane.mjs T26a/b（teamprog-child 相位链驱动真实队友 Read 工具跳）
 
+## 九、2026-09-27 fileHistory 快照竞速
+
+### 47. 逐轮文件快照 fire-and-forget 与本轮首次写盘竞速（rewind 停在本轮中途而非本轮开始前）
+1. 问题：fileHistory 按用户消息 uuid 的逐轮快照在三个调用点全部 `void` 派发——本轮第一次 Edit/Write 可抢在 makeSnapshot 异步 Phase 2（stat+内容对比+copyFile）落盘前写盘；同一文件跨多轮被改时，本轮快照里存的是本轮中途内容，/rewind（及 headless rewind_files）回到本轮无法完整撤销本轮改动。
+2. 解决：三处调用点改为等待完成（`await Promise.all(...map)` 或直接 `await`），快照落盘后 query 循环/初始消息派发才开始；makeSnapshot 签名不动。mtime 捷径核查：`compareStatsAndContent` 的 size 短路（`size` 不等即判已变、进入新建备份）自初始提交起就排在 mtime 捷径之前，无需新增，仅以单测钉住。补聚焦单测钉「await 返回即备份已落盘」契约 + size 短路回归。
+3. 位置：`src/QueryEngine.ts`（headless/SDK）、`src/utils/handlePromptSubmit.ts`（TUI）、`src/screens/REPL.tsx`（初始消息 processInitialMessage）三处调用点；测试 `src/utils/fileHistory.test.ts`（2 项）
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。

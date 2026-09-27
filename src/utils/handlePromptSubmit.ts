@@ -524,17 +524,22 @@ async function executeUserInput(params: ExecuteUserInputParams): Promise<void> {
       queryCheckpoint('query_process_user_input_end')
       if (fileHistoryEnabled()) {
         queryCheckpoint('query_file_history_snapshot_start')
-        newMessages.filter(selectableUserMessagesFilter).forEach(message => {
-          void fileHistoryMakeSnapshot(
-            (updater: (prev: FileHistoryState) => FileHistoryState) => {
-              setAppState(prev => ({
-                ...prev,
-                fileHistory: updater(prev.fileHistory),
-              }))
-            },
-            message.uuid,
-          )
-        })
+        // Await the snapshots: fire-and-forget lets this turn's first
+        // Edit/Write win the race against the async backup IO, so rewinding
+        // to this message would restore mid-turn content, not pre-turn state.
+        await Promise.all(
+          newMessages.filter(selectableUserMessagesFilter).map(message =>
+            fileHistoryMakeSnapshot(
+              (updater: (prev: FileHistoryState) => FileHistoryState) => {
+                setAppState(prev => ({
+                  ...prev,
+                  fileHistory: updater(prev.fileHistory),
+                }))
+              },
+              message.uuid,
+            ),
+          ),
+        )
         queryCheckpoint('query_file_history_snapshot_end')
       }
 
