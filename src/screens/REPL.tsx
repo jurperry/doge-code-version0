@@ -288,6 +288,7 @@ import { useMessageActions, MessageActionsKeybindings, MessageActionsBar, type M
 import { setClipboard } from '../ink/termio/osc.js';
 import type { ScrollBoxHandle } from '../ink/components/ScrollBox.js';
 import { createAttachmentMessage, getQueuedCommandAttachments } from '../utils/attachments.js';
+import { emitShellTurnMarker } from '../utils/shellTurnMarker.js';
 
 // Stable empty array for hooks that accept MCPServerConnection[] — avoids
 // creating a new [] literal on every render in remote mode, which would
@@ -2965,6 +2966,11 @@ export function REPL({
         // Notify bridge clients that the turn is complete so mobile apps
         // can stop the spark animation and show post-turn UI.
         sendBridgeResultRef.current();
+
+        // Same semantic, different consumer: the Electron shell's PTY scans
+        // this marker to raise a background "task completed" balloon (no-op
+        // unless DOGE_APP_TURN_MARKER=1 — see shellTurnMarker.ts).
+        emitShellTurnMarker(abortController.signal.aborted);
 
         // Auto-hide tungsten panel content at turn end (ant-only), but keep
         // tungstenActiveSession set so the pill stays in the footer and the user
