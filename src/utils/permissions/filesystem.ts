@@ -8,8 +8,10 @@ import { hasAutoMemPathOverride, isAutoMemPath } from 'src/memdir/paths.js'
 import { isAgentMemoryPath } from 'src/tools/AgentTool/agentMemory.js'
 import {
   CLAUDE_FOLDER_PERMISSION_PATTERN,
+  DOGE_FOLDER_PERMISSION_PATTERN,
   FILE_EDIT_TOOL_NAME,
   GLOBAL_CLAUDE_FOLDER_PERMISSION_PATTERN,
+  GLOBAL_DOGE_FOLDER_PERMISSION_PATTERN,
 } from 'src/tools/FileEditTool/constants.js'
 import type { z } from 'zod/v4'
 import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
@@ -77,6 +79,7 @@ export const DANGEROUS_DIRECTORIES = [
   '.vscode',
   '.idea',
   '.claude',
+  '.doge',
 ] as const
 
 /**
@@ -458,17 +461,19 @@ function isDangerousFilePathToAutoEdit(path: string): boolean {
         continue
       }
 
-      // Special case: .claude/worktrees/ is a structural path (where Claude stores
-      // git worktrees), not a user-created dangerous directory. Skip the .claude
-      // segment when it's followed by 'worktrees'. Any nested .claude directories
-      // within the worktree (not followed by 'worktrees') are still blocked.
-      if (dir === '.claude') {
+      // Special case: .doge/worktrees/ is a structural path (where doge code
+      // stores git worktrees), not a user-created dangerous directory — the
+      // whole point of a worktree is editing the checked-out project inside
+      // it. Skip the .doge segment when it's followed by 'worktrees'. Any
+      // nested .doge directories within the worktree (not followed by
+      // 'worktrees') are still blocked.
+      if (dir === '.doge') {
         const nextSegment = pathSegments[i + 1]
         if (
           nextSegment &&
           normalizeCaseForComparison(nextSegment) === 'worktrees'
         ) {
-          break // Skip this .claude, continue checking other segments
+          break // Skip this .doge, continue checking other segments
         }
       }
 
@@ -1207,6 +1212,35 @@ export function checkReadPermissionForTool(
  *   re-derived internally for error messages and internal-path checks, so a
  *   stale value would silently check deny rules for the wrong path.
  */
+// Session-scoped edit rules that may bypass the config-folder safety checks
+// in step 1.6 below. Covers the official .claude/ folder and this fork's
+// .doge/ config dir — getClaudeSkillScope suggests narrowed rules under
+// .doge/skills/, and without .doge prefixes here those suggestions would
+// dead-loop (suggested → still blocked by the safety check → suggested
+// again). Broad patterns ('/.claude/**') and narrowed ones
+// ('/.doge/skills/my-skill/**') are both accepted.
+const CONFIG_FOLDER_SESSION_RULE_PREFIXES = [
+  CLAUDE_FOLDER_PERMISSION_PATTERN.slice(0, -2), // '/.claude/'
+  GLOBAL_CLAUDE_FOLDER_PERMISSION_PATTERN.slice(0, -2), // '~/.claude/'
+  DOGE_FOLDER_PERMISSION_PATTERN.slice(0, -2), // '/.doge/'
+  GLOBAL_DOGE_FOLDER_PERMISSION_PATTERN.slice(0, -2), // '~/.doge/'
+] as const
+
+/**
+ * True when a session allow-rule's content is scoped to a config folder
+ * subtree ('/.claude/**', '~/.doge/skills/x/**', …). Rejects '..' traversal
+ * and non-wildcard rules so the bypass cannot leak outside the folders.
+ */
+export function isConfigFolderSessionEditRule(ruleContent: string): boolean {
+  return (
+    CONFIG_FOLDER_SESSION_RULE_PREFIXES.some(prefix =>
+      ruleContent.startsWith(prefix),
+    ) &&
+    !ruleContent.includes('..') &&
+    ruleContent.endsWith('/**')
+  )
+}
+
 export function checkWritePermissionForTool<Input extends AnyObject>(
   tool: Tool<Input>,
   input: z.infer<Input>,
@@ -1276,23 +1310,15 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
     'allow',
   )
   if (claudeFolderAllowRule) {
-    // Check if this rule is scoped under .claude/ (project or global).
-    // Accepts both the broad patterns ('/.claude/**', '~/.claude/**') and
-    // narrowed ones like '/.claude/skills/my-skill/**' so users can grant
-    // session access to a single skill without also exposing settings.json
-    // or hooks/. The rule already matched the path via matchingRuleForInput;
-    // this is an additional scope check. Reject '..' to prevent a rule like
-    // '/.claude/../**' from leaking this bypass outside .claude/.
+    // Check if this rule is scoped under a config folder (.claude/ or
+    // .doge/, project or global). Accepts both the broad patterns
+    // ('/.claude/**', '/.doge/**') and narrowed ones like
+    // '/.doge/skills/my-skill/**' so users can grant session access to a
+    // single skill without also exposing settings.json or hooks/. The rule
+    // already matched the path via matchingRuleForInput; this is an
+    // additional scope check that rejects '..' escapes.
     const ruleContent = claudeFolderAllowRule.ruleValue.ruleContent
-    if (
-      ruleContent &&
-      (ruleContent.startsWith(CLAUDE_FOLDER_PERMISSION_PATTERN.slice(0, -2)) ||
-        ruleContent.startsWith(
-          GLOBAL_CLAUDE_FOLDER_PERMISSION_PATTERN.slice(0, -2),
-        )) &&
-      !ruleContent.includes('..') &&
-      ruleContent.endsWith('/**')
-    ) {
+    if (ruleContent && isConfigFolderSessionEditRule(ruleContent)) {
       return {
         behavior: 'allow',
         updatedInput: input,

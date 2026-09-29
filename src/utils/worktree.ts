@@ -1,4 +1,3 @@
-import { feature } from 'bun:bundle'
 import chalk from 'chalk'
 import { spawnSync } from 'child_process'
 import {
@@ -587,40 +586,12 @@ async function performPostCreationSetup(
   // Copy gitignored files specified in .worktreeinclude (best-effort)
   await copyWorktreeIncludeFiles(repoRoot, worktreePath)
 
-  // The core.hooksPath config-set above is fragile: husky's prepare script
-  // (`git config core.hooksPath .husky`) runs on every `bun install` and
-  // resets the SHARED .git/config value back to relative, causing each
-  // worktree to resolve to its OWN .husky/ again. The attribution hook
-  // file isn't tracked (it's in .git/info/exclude), so fresh worktrees
-  // don't have it. Install it directly into the worktree's .husky/ —
-  // husky won't delete it (husky install is additive-only), and for
-  // non-husky repos this resolves to the shared .git/hooks/ (idempotent).
-  //
-  // Pass the worktree-local .husky explicitly: getHooksDir would return
-  // the absolute core.hooksPath we just set above (main repo's .husky),
-  // not the worktree's — `git rev-parse --git-path hooks` echoes the config
-  // value verbatim when it's absolute.
-  if (feature('COMMIT_ATTRIBUTION')) {
-    const worktreeHooksDir =
-      hooksPath === huskyPath ? join(worktreePath, '.husky') : undefined
-    void import('./postCommitAttribution.js')
-      .then(m =>
-        m
-          .installPrepareCommitMsgHook(worktreePath, worktreeHooksDir)
-          .catch(error => {
-            logForDebugging(
-              `Failed to install attribution hook in worktree: ${error}`,
-            )
-          }),
-      )
-      .catch(error => {
-        // Dynamic import() itself rejected (module load failure). The inner
-        // .catch above only handles installPrepareCommitMsgHook rejection —
-        // without this outer handler an import failure would surface as an
-        // unhandled promise rejection.
-        logForDebugging(`Failed to load postCommitAttribution module: ${error}`)
-      })
-  }
+  // Upstream installed a prepare-commit-msg attribution hook into each
+  // worktree here (guarded by the COMMIT_ATTRIBUTION feature flag). The
+  // flag is never enabled in this fork and the module it imports
+  // ('./postCommitAttribution.js') does not exist here, so this branch never
+  // ran and could only ever fail — removed rather than kept as a dangling
+  // reference.
 }
 
 /**
@@ -893,6 +864,125 @@ export async function cleanupWorktree(): Promise<void> {
   }
 }
 
+export type WorktreeChangeSummary = {
+  changedFiles: number
+  commits: number
+}
+
+/**
+ * Counts uncommitted files and commits past the baseline in a worktree.
+ *
+ * Returns null when state cannot be reliably determined — callers using this
+ * as a safety gate must treat null as "unknown, assume unsafe" (fail-closed).
+ * A silent 0/0 would let cleanupWorktree destroy real work.
+ *
+ * Null is returned when:
+ * - git status or rev-list exit non-zero (lock file, corrupt index, bad ref,
+ *   or the path is not a git repository at all)
+ * - originalHeadCommit is undefined but git status succeeded — this is the
+ *   hook-based-worktree-wrapping-git case (createWorktreeForSession doesn't
+ *   set originalHeadCommit there). We can see the working tree is git, but
+ *   cannot count commits without a baseline, so we cannot prove it is clean.
+ */
+export async function countWorktreeChanges(
+  worktreePath: string,
+  originalHeadCommit: string | undefined,
+): Promise<WorktreeChangeSummary | null> {
+  const status = await execFileNoThrow('git', [
+    '-C',
+    worktreePath,
+    'status',
+    '--porcelain',
+  ])
+  if (status.code !== 0) {
+    return null
+  }
+  const changedFiles = status.stdout
+    .split('\n')
+    .filter(line => line.trim() !== '').length
+
+  if (!originalHeadCommit) {
+    // git status succeeded → this is a git repo, but without a baseline
+    // commit we cannot count commits. Fail-closed rather than claim 0.
+    return null
+  }
+
+  const revList = await execFileNoThrow('git', [
+    '-C',
+    worktreePath,
+    'rev-list',
+    '--count',
+    `${originalHeadCommit}..HEAD`,
+  ])
+  if (revList.code !== 0) {
+    return null
+  }
+  const commits = parseInt(revList.stdout.trim(), 10) || 0
+
+  return { changedFiles, commits }
+}
+
+export type HeadlessWorktreeOutcome = {
+  /** true → worktree preserved on disk; false → worktree and branch removed. */
+  kept: boolean
+  worktreePath: string
+  worktreeBranch?: string
+  changedFiles?: number
+  commits?: number
+}
+
+/**
+ * Settles the active worktree session when a headless (-p/--print) run ends.
+ *
+ * The interactive REPL asks the user via WorktreeExitDialog; headless mode has
+ * no prompt, so without this the worktree and its branch are orphaned forever
+ * (cleanupStaleAgentWorktrees only matches agent-/wf_/bridge-/job- slugs).
+ * Mirrors the dialog's semantics:
+ * - verifiably clean (0 files, 0 commits since creation) → remove worktree + branch
+ * - dirty, resumed, or state cannot be verified → keep, and report so the
+ *   caller can tell the user where their work lives
+ *
+ * Resumed worktrees (created in a previous session) are ALWAYS kept: the
+ * fast-resume path records the current HEAD as the baseline, so commits made
+ * by the earlier session are invisible to countWorktreeChanges — a "clean"
+ * verdict there cannot be trusted and would silently discard real work.
+ */
+export async function finalizeHeadlessWorktree(): Promise<HeadlessWorktreeOutcome | null> {
+  const session = currentWorktreeSession
+  if (!session) {
+    return null
+  }
+
+  const { worktreePath, worktreeBranch } = session
+  // creationDurationMs is only set on fresh creation (see
+  // createWorktreeForSession); undefined means fast-resume of an existing
+  // worktree. Hook-based sessions also leave it unset but already resolve to
+  // keep below (no originalHeadCommit → null summary).
+  const resumed = session.creationDurationMs === undefined
+  const summary = resumed
+    ? null
+    : await countWorktreeChanges(worktreePath, session.originalHeadCommit)
+
+  if (summary === null || summary.changedFiles > 0 || summary.commits > 0) {
+    await keepWorktree()
+    return {
+      kept: true,
+      worktreePath,
+      worktreeBranch,
+      ...(summary ?? {}),
+    }
+  }
+
+  await cleanupWorktree()
+  return {
+    kept: false,
+    worktreePath,
+    worktreeBranch,
+    changedFiles: 0,
+    commits: 0,
+  }
+}
+
 /**
  * Create a lightweight worktree for a subagent.
  * Reuses getOrCreateWorktree/performPostCreationSetup but does NOT touch
@@ -920,8 +1010,8 @@ export async function createAgentWorktree(slug: string): Promise<{
 
   // Fall back to git worktree
   // findCanonicalGitRoot (not findGitRoot) so agent worktrees always land in
-  // the main repo's .claude/worktrees/ even when spawned from inside a session
-  // worktree — otherwise they nest at <worktree>/.claude/worktrees/ and the
+  // the main repo's .doge/worktrees/ even when spawned from inside a session
+  // worktree — otherwise they nest at <worktree>/.doge/worktrees/ and the
   // periodic cleanup (which scans the canonical root) never finds them.
   const gitRoot = findCanonicalGitRoot(getCwd())
   if (!gitRoot) {

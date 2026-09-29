@@ -108,6 +108,10 @@ import {
   isShuttingDown,
 } from 'src/utils/gracefulShutdown.js'
 import { registerCleanup } from 'src/utils/cleanupRegistry.js'
+import {
+  finalizeHeadlessWorktree,
+  getCurrentWorktreeSession,
+} from 'src/utils/worktree.js'
 import { createIdleTimeoutManager } from 'src/utils/idleTimeout.js'
 import type {
   SDKStatus,
@@ -1038,6 +1042,30 @@ function runHeadlessStreaming(
     void gracefulShutdown(0)
   }
   process.on('SIGINT', sigintHandler)
+
+  // Settle a --worktree session at shutdown. The interactive REPL asks via
+  // WorktreeExitDialog; headless mode has no prompt, so without this the
+  // worktree and its branch are orphaned forever (the 30-day stale sweep only
+  // matches agent-/wf_/bridge-/job- slugs). Verifiably clean → removed; dirty,
+  // resumed, or unverifiable → kept, with a stderr pointer to the preserved
+  // work. Note: this runs inside gracefulShutdown's cleanup phase, which is
+  // raced against a 2s budget — on huge repos `git worktree remove` may be
+  // cut off mid-flight (kept-path outcomes are unaffected; the protective
+  // direction never loses work).
+  registerCleanup(async () => {
+    if (!getCurrentWorktreeSession()) return
+    const outcome = await finalizeHeadlessWorktree()
+    if (outcome?.kept) {
+      const detail =
+        outcome.changedFiles || outcome.commits
+          ? 'uncommitted changes or commits present'
+          : 'resumed from a previous session or state could not be verified'
+      process.stderr.write(
+        `Worktree kept at ${outcome.worktreePath}` +
+          `${outcome.worktreeBranch ? ` on branch ${outcome.worktreeBranch}` : ''} (${detail}).\n`,
+      )
+    }
+  })
 
   // Dump run()'s state at SIGTERM so a stuck session's healthsweep can name
   // the do/while(waitingForAgents) poll without reading the transcript.
