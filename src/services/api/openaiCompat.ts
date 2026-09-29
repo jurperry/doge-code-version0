@@ -97,7 +97,31 @@ type OpenAIStreamChunk = {
     prompt_tokens?: number
     completion_tokens?: number
     total_tokens?: number
+    // Cache-hit fields across OpenAI-compatible vendors (all subsets of
+    // prompt_tokens): prompt_tokens_details.cached_tokens (OpenAI/GLM/Qwen/
+    // DeepSeek details form), top-level prompt_cache_hit_tokens (DeepSeek),
+    // top-level cached_tokens (Kimi legacy). Writes: cache_write_tokens (Kimi)
+    // / cache_creation_input_tokens (Qwen explicit cache).
+    prompt_cache_hit_tokens?: number
+    cached_tokens?: number
+    prompt_tokens_details?: {
+      cached_tokens?: number
+      cache_write_tokens?: number
+      cache_creation_input_tokens?: number
+    }
   }
+}
+
+/** Vendor cache fields → anthropic-shape pair. cached ⊆ prompt_tokens, so
+ *  input_tokens must exclude the cached/written parts to keep the input-side
+ *  total (= prompt_tokens) unchanged for updateUsage/cost tracking. */
+function openaiUsageCache(usage: OpenAIStreamChunk['usage']): { cacheRead: number; cacheWrite: number } {
+  if (!usage) return { cacheRead: 0, cacheWrite: 0 }
+  const details = usage.prompt_tokens_details
+  const read = details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? usage.cached_tokens
+  const write = details?.cache_write_tokens ?? details?.cache_creation_input_tokens
+  const pos = (v: unknown): number => (typeof v === 'number' && v > 0 ? v : 0)
+  return { cacheRead: pos(read), cacheWrite: pos(write) }
 }
 
 export function joinBaseUrl(baseURL: string, path: string): string {
@@ -502,6 +526,10 @@ export async function* createAnthropicStreamFromOpenAI(input: {
   let nextContentIndex = 0
   let promptTokens = 0
   let completionTokens = 0
+  // Vendor cache fields (DeepSeek/GLM/Kimi/Qwen) mapped into the anthropic
+  // usage shape — zero until a chunk reports them.
+  let cacheReadTokens = 0
+  let cacheWriteTokens = 0
   let emittedAnyContent = false
   // DeepSeek reasoning_content tracking
   let reasoningStarted = false
@@ -553,6 +581,9 @@ export async function* createAnthropicStreamFromOpenAI(input: {
         if (chunk.usage?.completion_tokens !== undefined && chunk.usage.completion_tokens > 0) {
           completionTokens = chunk.usage.completion_tokens
         }
+        const cache = openaiUsageCache(chunk.usage)
+        if (cache.cacheRead > 0) cacheReadTokens = cache.cacheRead
+        if (cache.cacheWrite > 0) cacheWriteTokens = cache.cacheWrite
 
         // Collect web search citations (gpt-4o-search-preview style) so a
         // web_search_tool_result block can be synthesized at stream end.
@@ -797,8 +828,13 @@ export async function* createAnthropicStreamFromOpenAI(input: {
               // Include input_tokens here so updateUsage() in claude.ts can
               // correct the initial 0 from message_start. This is critical for
               // APIs like DeepSeek that only report usage in the final chunk.
-              input_tokens: promptTokens,
+              // Cache-hit mapping (desktop-app 0.2.78): cached ⊆ prompt_tokens,
+              // so input_tokens excludes the cached/written parts while the
+              // input-side total still equals prompt_tokens.
+              input_tokens: Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens),
               output_tokens: completionTokens,
+              ...(cacheReadTokens > 0 ? { cache_read_input_tokens: cacheReadTokens } : {}),
+              ...(cacheWriteTokens > 0 ? { cache_creation_input_tokens: cacheWriteTokens } : {}),
               ...(webSearchRequests > 0
                 ? { server_tool_use: { web_search_requests: webSearchRequests } }
                 : {}),
@@ -818,8 +854,10 @@ export async function* createAnthropicStreamFromOpenAI(input: {
             stop_reason: mapFinishReason(choice.finish_reason),
             stop_sequence: null,
             usage: {
-              input_tokens: promptTokens,
+              input_tokens: Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens),
               output_tokens: completionTokens,
+              ...(cacheReadTokens > 0 ? { cache_read_input_tokens: cacheReadTokens } : {}),
+              ...(cacheWriteTokens > 0 ? { cache_creation_input_tokens: cacheWriteTokens } : {}),
             },
           } as BetaMessage
         }

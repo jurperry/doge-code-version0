@@ -206,6 +206,39 @@ test('text then tool calls keeps the historical index assignment (text=0, tools 
   expect(toolStarts.map(e => e.index)).toEqual([1, 2])
 })
 
+// --- Vendor cache-hit usage mapping (desktop-app 0.2.78 cache hit rate) ---
+// cached ⊆ prompt_tokens across OpenAI-compatible vendors; the anthropic-shape
+// output keeps the input-side total equal to prompt_tokens.
+
+test('vendor cache fields map into anthropic usage (details / DeepSeek / Kimi forms)', async () => {
+  const cases: Array<{ usage: Record<string, unknown>; input: number; read: number; write: number }> = [
+    // OpenAI / GLM / Qwen details form
+    { usage: { prompt_tokens: 1075, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 1024 } }, input: 51, read: 1024, write: 0 },
+    // DeepSeek top-level hit/miss (prompt = hit + miss)
+    { usage: { prompt_tokens: 100, completion_tokens: 4, prompt_cache_hit_tokens: 80, prompt_cache_miss_tokens: 20 }, input: 20, read: 80, write: 0 },
+    // Kimi legacy top-level cached_tokens + explicit write
+    { usage: { prompt_tokens: 40, completion_tokens: 4, cached_tokens: 10, prompt_tokens_details: { cached_tokens: 10, cache_write_tokens: 5 } }, input: 25, read: 10, write: 5 },
+    // No cache data → untouched totals, no cache fields
+    { usage: { prompt_tokens: 30, completion_tokens: 4 }, input: 30, read: 0, write: 0 },
+  ]
+  for (const c of cases) {
+    const events = await collectStreamEvents(
+      sseOf([{ choices: [{ index: 0, delta: { content: 'hi' }, finish_reason: null }] },
+        { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: c.usage }]),
+    )
+    const delta = events.find(e => e.type === 'message_delta') as { usage?: Record<string, unknown> }
+    expect(delta.usage?.input_tokens).toBe(c.input)
+    expect(delta.usage?.output_tokens).toBe(4)
+    if (c.read > 0) expect(delta.usage?.cache_read_input_tokens).toBe(c.read)
+    else expect(delta.usage?.cache_read_input_tokens).toBeUndefined()
+    if (c.write > 0) expect(delta.usage?.cache_creation_input_tokens).toBe(c.write)
+    else expect(delta.usage?.cache_creation_input_tokens).toBeUndefined()
+    // Input-side total stays equal to the vendor's prompt_tokens
+    const total = (delta.usage?.input_tokens as number) + (delta.usage?.cache_read_input_tokens as number ?? 0) + (delta.usage?.cache_creation_input_tokens as number ?? 0)
+    expect(total).toBe(c.usage.prompt_tokens)
+  }
+})
+
 test('zero-argument tool call survives — no synthetic empty-text block clobbers it', async () => {
   const events = await collectStreamEvents(
     sseOf([
