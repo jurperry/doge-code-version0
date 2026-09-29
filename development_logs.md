@@ -255,6 +255,33 @@
 2. 解决：三处调用点改为等待完成（`await Promise.all(...map)` 或直接 `await`），快照落盘后 query 循环/初始消息派发才开始；makeSnapshot 签名不动。mtime 捷径核查：`compareStatsAndContent` 的 size 短路（`size` 不等即判已变、进入新建备份）自初始提交起就排在 mtime 捷径之前，无需新增，仅以单测钉住。补聚焦单测钉「await 返回即备份已落盘」契约 + size 短路回归。
 3. 位置：`src/QueryEngine.ts`（headless/SDK）、`src/utils/handlePromptSubmit.ts`（TUI）、`src/screens/REPL.tsx`（初始消息 processInitialMessage）三处调用点；测试 `src/utils/fileHistory.test.ts`（2 项）
 
+## 十、2026-09-29 git worktree 功能修复批次
+
+### 48. 退出对话框 fail-open 静默强删用户工作（数据丢失风险）
+1. 问题：WorktreeExitDialog 退出时 `git status`/`rev-list` 失败（或 hook 型 worktree 无 originalHeadCommit）都误判 0 变更 0 提交 → 静默 `cleanupWorktree()`（`worktree remove --force` + `branch -D`）丢弃真实工作；且 git 命令依赖隐式 cwd（模型 cd 过即数错目录），与 ExitWorktreeTool 的 fail-closed 哲学相反。
+2. 解决：countWorktreeChanges 提升为 worktree.ts 共享导出（显式 `git -C worktreePath`，git 失败/无基线返回 null）；Dialog 与 ExitWorktreeTool 共用；Dialog 收到 null 时不再静默删，显示对话框+「无法验证」警告文案；resumed worktree（fast-resume 基线漂移，上一会话提交不可见）永不静默删。
+3. 位置：`src/utils/worktree.ts`（countWorktreeChanges/finalizeHeadlessWorktree）、`src/components/WorktreeExitDialog.tsx`、`src/tools/ExitWorktreeTool/ExitWorktreeTool.ts`；测试 `src/utils/worktree.test.ts`
+
+### 49. headless `-p -w` 退出无收尾（worktree 与分支永久孤儿）
+1. 问题：cleanupWorktree/keepWorktree 只有 TUI 的 WorktreeExitDialog 调用；headless `-p -w` 结束后 worktree+分支永久残留，30 天陈旧清理的 pattern（agent-/wf_/bridge-/job-）不覆盖会话级 slug。
+2. 解决：print.ts runHeadless 经 registerCleanup 挂 finalizeHeadlessWorktree：可验证干净（创建起 0 文件 0 提交）→ 删 worktree+分支；dirty/resumed/不可验证 → 保留并向 stderr 报告路径与原因（注释写明 gracefulShutdown 2s 清理预算的截断语义）。
+3. 位置：`src/cli/print.ts`、`src/utils/worktree.ts`；e2e `test/e2e-worktree-headless.ts`（本地 mock SSE server 三场景）
+
+### 50. filePersistence types 丢失运行时常量 → print.ts 动态 import 全灭（headless -p 在 Windows 挂死根因）
+1. 问题：逆向还原快照的 `filePersistence/types.ts` 只剩类型，filePersistence.ts 具名 import 的 DEFAULT_UPLOAD_CONCURRENCY 等 3 常量在 ESM 链接期报 "Export not found"——所有 `import('./cli/print.js')`（main.tsx 里被 void 吞掉 rejection）静默失败，headless `-p`（含 `-p -w`）进程悬空挂死；main.tsx:2907 注释误诊为「Bun on Windows 模块解析挂起」。
+2. 解决：types.ts 补回 3 常量（保守值，BYOC 远程模式专用、非 byoc 环境恒 no-op）与 3 类型；链接契约以单测钉住防再次静默回归。
+3. 位置：`src/utils/filePersistence/types.ts`；测试 `src/utils/filePersistence/types.test.ts`
+
+### 51. `.doge` 目录绕过危险目录保护 + skills 编辑建议死循环
+1. 问题：DANGEROUS_DIRECTORIES 有 `.claude` 无 `.doge`——本项目 fork 的 settings/hooks/skills 全在 `.doge/` 下可被自动编辑（hooks 是可执行脚本）；`.claude/worktrees/` 特判指向本 fork 不存在的死路径。补 `.doge` 后又暴露既有断裂：getClaudeSkillScope 建议的 `/.doge/skills/<name>/**` session 规则被 step 1.6 只认 `.claude` 前缀的检查拒绝 → 建议死循环。
+2. 解决：DANGEROUS_DIRECTORIES 加 `.doge`；worktrees 特判迁至 `.doge`（`.doge/worktrees/<slug>` 内可编辑、嵌套 `.doge` 仍拦）；step 1.6 前缀判定抽成 isConfigFolderSessionEditRule 纯函数并接受 `.claude`/`.doge` 双前缀（拒绝 `..` 逃逸）。
+3. 位置：`src/utils/permissions/filesystem.ts`、`src/tools/FileEditTool/constants.ts`；测试 `src/utils/permissions/filesystem.test.ts`
+
+### 52. worktree.ts 悬空 import 死代码（postCommitAttribution）
+1. 问题：`import('./postCommitAttribution.js')` 引用的模块在本 fork 不存在（COMMIT_ATTRIBUTION flag 运行时恒关，该分支从未执行也无从成功）。
+2. 解决：删除该块，留注释说明上游遗留与删除理由；`feature` import 一并清理。
+3. 位置：`src/utils/worktree.ts`（performPostCreationSetup 尾部）
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。

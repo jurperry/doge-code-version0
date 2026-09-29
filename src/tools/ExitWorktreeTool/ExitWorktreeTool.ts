@@ -9,9 +9,7 @@ import { clearSystemPromptSections } from '../../constants/systemPromptSections.
 import { logEvent } from '../../services/analytics/index.js'
 import type { Tool } from '../../Tool.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
-import { count } from '../../utils/array.js'
 import { clearMemoryFileCaches } from '../../utils/claudemd.js'
-import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
 import { updateHooksConfigSnapshot } from '../../utils/hooks/hooksConfigSnapshot.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { getPlansDirectory } from '../../utils/plans.js'
@@ -19,6 +17,7 @@ import { setCwd } from '../../utils/Shell.js'
 import { saveWorktreeState } from '../../utils/sessionStorage.js'
 import {
   cleanupWorktree,
+  countWorktreeChanges,
   getCurrentWorktreeSession,
   keepWorktree,
   killTmuxSession,
@@ -58,59 +57,6 @@ const outputSchema = lazySchema(() =>
 )
 type OutputSchema = ReturnType<typeof outputSchema>
 export type Output = z.infer<OutputSchema>
-
-type ChangeSummary = {
-  changedFiles: number
-  commits: number
-}
-
-/**
- * Returns null when state cannot be reliably determined — callers that use
- * this as a safety gate must treat null as "unknown, assume unsafe"
- * (fail-closed). A silent 0/0 would let cleanupWorktree destroy real work.
- *
- * Null is returned when:
- * - git status or rev-list exit non-zero (lock file, corrupt index, bad ref)
- * - originalHeadCommit is undefined but git status succeeded — this is the
- *   hook-based-worktree-wrapping-git case (worktree.ts:525-532 doesn't set
- *   originalHeadCommit). We can see the working tree is git, but cannot count
- *   commits without a baseline, so we cannot prove the branch is clean.
- */
-async function countWorktreeChanges(
-  worktreePath: string,
-  originalHeadCommit: string | undefined,
-): Promise<ChangeSummary | null> {
-  const status = await execFileNoThrow('git', [
-    '-C',
-    worktreePath,
-    'status',
-    '--porcelain',
-  ])
-  if (status.code !== 0) {
-    return null
-  }
-  const changedFiles = count(status.stdout.split('\n'), l => l.trim() !== '')
-
-  if (!originalHeadCommit) {
-    // git status succeeded → this is a git repo, but without a baseline
-    // commit we cannot count commits. Fail-closed rather than claim 0.
-    return null
-  }
-
-  const revList = await execFileNoThrow('git', [
-    '-C',
-    worktreePath,
-    'rev-list',
-    '--count',
-    `${originalHeadCommit}..HEAD`,
-  ])
-  if (revList.code !== 0) {
-    return null
-  }
-  const commits = parseInt(revList.stdout.trim(), 10) || 0
-
-  return { changedFiles, commits }
-}
 
 /**
  * Restore session state to reflect the original directory.
