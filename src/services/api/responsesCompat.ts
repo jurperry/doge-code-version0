@@ -104,6 +104,12 @@ type ResponsesUsage = {
   input_tokens?: number
   output_tokens?: number
   total_tokens?: number
+  // Responses API cache fields (subset of input_tokens): cached_tokens =
+  // cache hits, cache_write_tokens = explicit writes (GPT-5.6+).
+  input_tokens_details?: {
+    cached_tokens?: number
+    cache_write_tokens?: number
+  }
 }
 
 type ResponsesAnnotation = {
@@ -510,12 +516,19 @@ function getUsage(event: ResponsesStreamEvent): ResponsesUsage | undefined {
   return event.usage ?? event.response?.usage
 }
 
-function mapUsageToAnthropic(usage: ResponsesUsage): BetaUsage {
+function mapUsageToAnthropic(
+  usage: ResponsesUsage,
+  cache: { read: number; write: number } = { read: 0, write: 0 },
+): BetaUsage {
+  // cached ⊆ input_tokens (Responses semantics): keep the input-side total
+  // equal to input_tokens while splitting the cached/written parts out.
+  const read = cache.read > 0 ? cache.read : 0
+  const write = cache.write > 0 ? cache.write : 0
   return {
-    input_tokens: usage.input_tokens ?? 0,
+    input_tokens: Math.max(0, (usage.input_tokens ?? 0) - read - write),
     output_tokens: usage.output_tokens ?? 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: write,
+    cache_read_input_tokens: read,
   } as BetaUsage
 }
 
@@ -525,6 +538,7 @@ function makeBetaMessage(params: {
   inputTokens: number
   outputTokens: number
   stopReason: BetaMessage['stop_reason']
+  cache?: { read: number; write: number }
 }): BetaMessage {
   return {
     id: params.id,
@@ -534,10 +548,10 @@ function makeBetaMessage(params: {
     content: [],
     stop_reason: params.stopReason,
     stop_sequence: null,
-    usage: {
-      input_tokens: params.inputTokens,
-      output_tokens: params.outputTokens,
-    },
+    usage: mapUsageToAnthropic(
+      { input_tokens: params.inputTokens, output_tokens: params.outputTokens },
+      params.cache,
+    ),
   } as BetaMessage
 }
 
@@ -573,6 +587,8 @@ export async function* createAnthropicStreamFromResponses(input: {
   let nextContentIndex = 1
   let promptTokens = 0
   let completionTokens = 0
+  let cacheReadTokens = 0
+  let cacheWriteTokens = 0
   let emittedAnyContent = false
   let responseId = 'responses-compat'
   let finalStopReason: BetaMessage['stop_reason'] = 'end_turn'
@@ -656,16 +672,19 @@ export async function* createAnthropicStreamFromResponses(input: {
               content: [],
               stop_reason: null,
               stop_sequence: null,
-              usage: mapUsageToAnthropic({
-                input_tokens: promptTokens,
-                output_tokens: 0,
-              }),
+              usage: mapUsageToAnthropic(
+                { input_tokens: promptTokens, output_tokens: 0 },
+                { read: cacheReadTokens, write: cacheWriteTokens },
+              ),
             },
           } as BetaRawMessageStreamEvent
         }
 
         if (usage?.input_tokens !== undefined) promptTokens = usage.input_tokens
         if (usage?.output_tokens !== undefined) completionTokens = usage.output_tokens
+        const details = usage?.input_tokens_details
+        if (details?.cached_tokens !== undefined && details.cached_tokens > 0) cacheReadTokens = details.cached_tokens
+        if (details?.cache_write_tokens !== undefined && details.cache_write_tokens > 0) cacheWriteTokens = details.cache_write_tokens
 
         if (eventType === 'response.output_text.annotation.added') {
           // Streamed url_citation annotations (OpenAI-style). Collected
@@ -979,10 +998,10 @@ export async function* createAnthropicStreamFromResponses(input: {
               stop_sequence: null,
             },
             usage: {
-              ...mapUsageToAnthropic({
-                input_tokens: promptTokens,
-                output_tokens: completionTokens,
-              }),
+              ...mapUsageToAnthropic(
+                { input_tokens: promptTokens, output_tokens: completionTokens },
+                { read: cacheReadTokens, write: cacheWriteTokens },
+              ),
               // Best effort: Responses usage has no server-tool breakdown, but
               // consumers expect it once a search was synthesized.
               ...(webSearchStates.size > 0 || citations.length > 0
@@ -1006,6 +1025,7 @@ export async function* createAnthropicStreamFromResponses(input: {
             inputTokens: promptTokens,
             outputTokens: completionTokens,
             stopReason: finalStopReason,
+            cache: { read: cacheReadTokens, write: cacheWriteTokens },
           })
         }
       }

@@ -273,6 +273,46 @@ test('web_search_call + url citations synthesize server_tool_use and web_search_
   expect(events[events.length - 1].type).toBe('message_stop')
 })
 
+test('input_tokens_details cache fields map into anthropic usage (cached subset of input_tokens)', async () => {
+  const sse = [
+    'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1500,"output_tokens":5,"input_tokens_details":{"cached_tokens":1200,"cache_write_tokens":100}}}}\n\n',
+  ].join('')
+
+  const events: Array<Record<string, unknown>> = []
+  const stream = createAnthropicStreamFromResponses({
+    reader: streamFromText(sse),
+    model: 'gpt-5.1',
+  })
+  let finalMessage: Record<string, unknown> | undefined
+  while (true) {
+    const { done, value } = await stream.next()
+    if (done) {
+      finalMessage = value as unknown as Record<string, unknown>
+      break
+    }
+    events.push(value as unknown as Record<string, unknown>)
+  }
+
+  const delta = events.find(e => e.type === 'message_delta') as
+    | { usage?: Record<string, unknown> }
+    | undefined
+  expect(delta?.usage?.input_tokens).toBe(200)
+  expect(delta?.usage?.cache_read_input_tokens).toBe(1200)
+  expect(delta?.usage?.cache_creation_input_tokens).toBe(100)
+  // Input-side total stays equal to the vendor's input_tokens
+  const total =
+    Number(delta?.usage?.input_tokens) +
+    Number(delta?.usage?.cache_read_input_tokens) +
+    Number(delta?.usage?.cache_creation_input_tokens)
+  expect(total).toBe(1500)
+
+  const finalUsage = (finalMessage as { usage?: Record<string, unknown> })?.usage
+  expect(finalUsage?.input_tokens).toBe(200)
+  expect(finalUsage?.cache_read_input_tokens).toBe(1200)
+  expect(finalUsage?.cache_creation_input_tokens).toBe(100)
+})
+
 async function collectStreamEvents(
   sse: string,
 ): Promise<Array<Record<string, unknown>>> {
