@@ -22,6 +22,9 @@ import type { SettingSource } from 'src/utils/settings/constants.js'
 import { resetSettingsCache } from 'src/utils/settings/settingsCache.js'
 import type { PluginHookMatcher } from 'src/utils/settings/types.js'
 import { createSignal } from 'src/utils/signal.js'
+// Pure leaf notification, no bootstrap dependency.
+// eslint-disable-next-line custom-rules/bootstrap-isolation
+import { emitShellWorkspaceMarker } from 'src/utils/shellWorkspaceMarker.js'
 
 // Union type for registered hooks - can be SDK callbacks or native plugin hooks
 type RegisteredHookMatcher = HookCallbackMatcher | PluginHookMatcher
@@ -446,6 +449,7 @@ export function regenerateSessionId(
   // null so getTranscriptPath() derives from originalCwd.
   STATE.sessionId = randomUUID() as SessionId
   STATE.sessionProjectDir = null
+  emitShellWorkspaceMarker(STATE.cwd, STATE.sessionId)
   return STATE.sessionId
 }
 
@@ -475,6 +479,7 @@ export function switchSession(
   STATE.planSlugCache.delete(STATE.sessionId)
   STATE.sessionId = sessionId
   STATE.sessionProjectDir = projectDir
+  emitShellWorkspaceMarker(STATE.cwd, STATE.sessionId)
   sessionSwitched.emit(sessionId)
 }
 
@@ -530,6 +535,7 @@ export function getCwdState(): string {
 
 export function setCwdState(cwd: string): void {
   STATE.cwd = cwd.normalize('NFC')
+  emitShellWorkspaceMarker(STATE.cwd, STATE.sessionId)
 }
 
 export function getDirectConnectServerUrl(): string | undefined {

@@ -110,6 +110,7 @@ import {
 import { registerCleanup } from 'src/utils/cleanupRegistry.js'
 import {
   finalizeHeadlessWorktree,
+  keepWorktree,
   getCurrentWorktreeSession,
 } from 'src/utils/worktree.js'
 import { createIdleTimeoutManager } from 'src/utils/idleTimeout.js'
@@ -1052,8 +1053,12 @@ function runHeadlessStreaming(
   // raced against a 2s budget — on huge repos `git worktree remove` may be
   // cut off mid-flight (kept-path outcomes are unaffected; the protective
   // direction never loses work).
+  let preserveWorktreeOnShutdown = false
   registerCleanup(async () => {
     if (!getCurrentWorktreeSession()) return
+    // App /clear and reconnect replace the process while continuing in its cwd.
+    // Replacements must not remove a clean tree underneath the next process.
+    if (preserveWorktreeOnShutdown) { await keepWorktree(); return }
     const outcome = await finalizeHeadlessWorktree()
     if (outcome?.kept) {
       const detail =
@@ -2886,6 +2891,7 @@ function runHeadlessStreaming(
           suggestionState.pendingSuggestion = null
           sendControlResponseSuccess(message)
         } else if (message.request.subtype === 'end_session') {
+          preserveWorktreeOnShutdown = message.request.reason === 'app_replace'
           logForDebugging(
             `[print.ts] end_session received, reason=${message.request.reason ?? 'unspecified'}`,
           )
