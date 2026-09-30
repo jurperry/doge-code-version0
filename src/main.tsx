@@ -4445,6 +4445,14 @@ async function run(): Promise<CommanderCommand> {
     });
   }
 
+  // IM remote-control bridge daemon — internalized Telegram/Feishu relay
+  // (`~/.doge/im-remote.json`, configured from the desktop app's settings
+  // page or by hand). Sessions attach automatically when it runs.
+  program.command('im').description('Run the IM remote-control bridge daemon (Telegram/Feishu). Configure via the desktop app settings or ~/.doge/im-remote.json.').action(async () => {
+    const { runImRemoteDaemon } = await import('./utils/imRemote/daemon.js');
+    process.exitCode = await runImRemoteDaemon();
+  });
+
   // Doctor command - check installation health
   program.command('doctor').description('Check the health of your Claude Code auto-updater. Note: The workspace trust dialog is skipped and stdio servers from .mcp.json are spawned for health checks. Only use this command in directories you trust.').action(async () => {
     const [{

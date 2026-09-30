@@ -74,7 +74,17 @@ export type SdkEvent =
 const MAX_QUEUE_SIZE = 1000
 const queue: SdkEvent[] = []
 
+// Optional out-of-band tap for task_* events. The IM remote-control
+// client registers one so agent start/completion reaches the bridge in
+// BOTH modes — the queue below is headless-only, the tap is not.
+let sdkEventTap: ((event: SdkEvent) => void) | undefined
+
+export function setSdkEventTap(tap: ((event: SdkEvent) => void) | undefined): void {
+  sdkEventTap = tap
+}
+
 export function enqueueSdkEvent(event: SdkEvent): void {
+  sdkEventTap?.(event)
   // SDK events are only consumed (drained) in headless/streaming mode.
   // In TUI mode they would accumulate up to the cap and never be read.
   if (!getIsNonInteractiveSession()) {

@@ -445,6 +445,10 @@ export type AppState = DeepImmutable<{
   isUltraplanMode?: boolean
   // Always-on bridge: permission callbacks for bidirectional permission checks
   replBridgePermissionCallbacks?: BridgePermissionCallbacks
+  // IM remote-control relay — same racer contract as the bridge callbacks
+  // above, but answers come from the paired IM user via the local `doge im`
+  // daemon. Set by the REPL when the session attaches.
+  imRemotePermissionCallbacks?: BridgePermissionCallbacks
   // Channel permission callbacks — permission prompts over Telegram/iMessage/etc.
   // Races against local UI + bridge + hooks + classifier via claim() in
   // interactiveHandler.ts. Constructed once in useManageMCPConnections.

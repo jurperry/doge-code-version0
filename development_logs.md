@@ -255,6 +255,28 @@
 2. 解决：三处调用点改为等待完成（`await Promise.all(...map)` 或直接 `await`），快照落盘后 query 循环/初始消息派发才开始；makeSnapshot 签名不动。mtime 捷径核查：`compareStatsAndContent` 的 size 短路（`size` 不等即判已变、进入新建备份）自初始提交起就排在 mtime 捷径之前，无需新增，仅以单测钉住。补聚焦单测钉「await 返回即备份已落盘」契约 + size 短路回归。
 3. 位置：`src/QueryEngine.ts`（headless/SDK）、`src/utils/handlePromptSubmit.ts`（TUI）、`src/screens/REPL.tsx`（初始消息 processInitialMessage）三处调用点；测试 `src/utils/fileHistory.test.ts`（2 项）
 
+### 52. IM 远程控制审查修复批（随 app 0.2.88/0.2.89，CLI 2.1.263→2.1.264）
+1. 问题：子代理审查揪出 9 项 P1——适配器 stop() 置空 abort 令 `!abort?.signal.aborted` 恒真轮询复活（macOS 退出泄漏进程）；Telegram observeChatId 在 allow 校验前，陌生人首条消息即可锁定出站 chat 劫持全部回复；daemon 内存副本整份回写覆盖设置页刚改的凭据；会话断开 pending 不清致 IM 假确认；十余处 `void adapter.sendText` 无 catch 成 unhandled rejection；空 token 过 `?token=` 等值校验；Telegram 启动积压 update 重放进路由；client attach 的 attaching 清空 finally 挂内层 try，「配置不存在」早退不清空——重试与后续 attach 全拿旧已决 false promise（会话永不接入的真根因）。
+2. 解决：适配器加 stopped 布尔（stop 不再置空 abort）＋启动 getMe 后丢弃积压批；observeChatId 移入 allow 校验之后；persistDaemonKeys 只写 pair/allowedUsers 两键（'pair' in patch 判定，undefined=清除）；handleSocketClose 清该会话 pending 并提示；safeSend/safeOptions 统一吞错；token<16 拒绝启动；attach finally 提到全 body；重试定时器 unref（防钉死一次性 `doge -p`）＋未配置机器探测上限 20 次；IM fetch 全部 10s 硬超时（AbortSignal.any/??）；runImRemoteDaemon 失败路径 process.exit 硬退（exitCode 穿不透引导期驻留任务，形成「spawn 成功全静默」假挂起）；daemon 生命周期日志落 im-remote-daemon.log（stdio ignore 下管道日志不可靠）。
+3. 位置：`src/utils/imRemote/adapters/{telegram,feishu}.ts`、`src/utils/imRemote/{client,daemon,types}.ts`；测试 test/e2e-im-remote.ts 18 项 + src/utils/imRemote/*.test.ts 24 项全绿。
+
+## 十一、2026-09-30 IM 远程控制批次（doge im）
+
+### 49. 壳/独立双环境 spawn 守护进程缺 git-bash env 秒退（stdio ignore 全静默）
+1. 问题：`doge im` 守护进程由 Electron 壳 spawn 时直接退 1——CLI bootstrap 在 Windows 要求 git-bash（PTY/headless 两条路靠壳注入 `CLAUDE_CODE_GIT_BASH_PATH`），新 spawn 路径只传了 `...process.env`；且 stdio ignore 时错误文案全被吞，表现为「spawn 成功但无状态文件、无退出日志」的假挂起。
+2. 解决：守护进程 spawn env 必须并 `cliBaseEnv()`（壳侧 src/main/imRemoteManager.ts，与 PTY/headless 同源）；子进程 stdio 用管道并把 stdout/stderr 逐行转日志（`[im-remote] daemon:`），排障不再靠猜。
+3. 位置：doge-code-app `src/main/imRemoteManager.ts`（startImRemoteDaemon）。
+
+### 50. 会话客户端 attaching 承诺不清空——重试与后续 attach 全拿旧已决 promise
+1. 问题：`attach()` 的 `finally { this.attaching = null }` 挂在 connect 段的内层 try 上，「配置不存在/未启用」早退路径不经过它；首启时远程未配置的会话（绝大多数）attach 一次后 attaching 永远非空，8s 重试与一切后续 attach 都 `return this.attaching` 拿回旧 false——会话永不接入，且无任何报错。
+2. 解决：try/finally 提到整个异步体外层（所有出口都清 attaching）；重试定时器 `unref()`（否则一次性 `doge -p` 进程被探活定时器钉住不退出）；配置缺失也排程低频重试（用户后开远程时已开会话能接上）。回归钉在 test/im-retry-probe.ts（无配置→补配置+起 daemon→应最终 isConnected）。
+3. 位置：`src/utils/imRemote/client.ts`（attach/scheduleRetry/destroy）。
+
+### 51. TUI 会话挂载点在 REPL——首启三连弹（信任/API key/登录）会令远程接入静默失效
+1. 问题：黑盒里 boot TUI 永不接入；排查发现 attach effect 在 REPL.tsx，而 TUI 首启可能停在项目信任对话、custom API key 批准（`customApiKeyResponses.approved`，存 key 末 20 字符）、未登录引导——REPL 未挂载 effect 不运行，且进程被「No, exit」杀掉后 xterm 只剩分隔线，极易误判为客户端 bug。
+2. 解决：种子侧修（黑盒沙箱需 onboarding+信任+approved 三件套，且 boot cwd 取自会话列表首个项目——须种会话 jsonl 而非只钉 lastCwd）；产品侧无改（模态属预期引导）。诊断通道=env `DOGE_IM_REMOTE_DEBUG=1` 打开 client 的 ws/attach 诊断行。
+3. 位置：doge-code-app `tools/verify-im-remote.mjs`（setupSandbox）；`src/utils/imRemote/client.ts`（env 门控诊断）。
+
 ## 十、2026-09-29 git worktree 功能修复批次
 
 ### 48. 退出对话框 fail-open 静默强删用户工作（数据丢失风险）
