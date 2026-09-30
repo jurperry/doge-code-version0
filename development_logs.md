@@ -282,6 +282,13 @@
 2. 解决：删除该块，留注释说明上游遗留与删除理由；`feature` import 一并清理。
 3. 位置：`src/utils/worktree.ts`（performPostCreationSetup 尾部）
 
+## 十一、2026-09-30 App 工作树通知配套
+
+### 53. App 运行目录与会话身份同步、干净树替换保留
+1. 问题：App 不能从 TUI 可靠识别 Enter/ExitWorktree 与 /clear 后的 cwd/session ID，hooks 被关闭时钩子通知无效；headless 替换会话的旧进程原生清理会删除新进程继续使用的干净工作树。
+2. 解决：纯叶模块 shellWorkspaceMarker 在 DOGE_APP_WORKSPACE_MARKER=1 时向 stderr 写私有 OSC 帧，含 PID、cwd、session ID（UTF-8 JSON/base64），闭管道不阻塞状态更新；用 node:fs writeSync 直写 fd 绕过 Ink 对 stream.write 的接管（真实 /clear 黑盒发现旧写法被吞）。setCwdState/regenerateSessionId/switchSession 三入口通知，普通 CLI 不输出。headless end_session 的 app_replace 原因只保留树，其余退出仍沿用 finalizeHeadlessWorktree；壳解析过滤子进程、避免跨管道 init 乱序，并在恢复确认前保留请求 ID。配套 App 0.2.84 重编内置 CLI，0.2.86 沿用该二进制；用户已于 2026-09-30 确认提交、合并 main 并删除已合并功能分支。
+3. 位置：src/utils/shellWorkspaceMarker.ts（纯叶）、src/bootstrap/state.ts、src/cli/print.ts；worktree + shellWorkspaceMarker.test.ts 19/19（47 断言）、bun run version 通过；App tools/check-worktree.mjs 与安装版 verify-worktree.mjs 32/32 真实 Git+CLI 集成，含 hooks 禁用、TUI Enter/Exit 与 /clear、headless 恢复/替换；会话恢复 29/29。所有临时测试数据清理，CLI 原有 .zcode/ 两份计划未修改、不纳入本轮。
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。
