@@ -358,6 +358,11 @@
 2. 解决：webChat 监听 0.0.0.0→::（绑定失败回退，v4-mapped 兼容回环/局域网）；新增 publicV6UrlCandidates(port, token, nics) 纯函数——只收全局单播（首 hextet & 0xe000 === 0x2000，天然排除 fe80 链路本地与 fd/fc ULA），虚拟网卡名沿用 VIRTUAL_NIC_RE；URL 用方括号字面量 http://[v6]:port/#t=。daemon status 帧/状态文件新增 webUrl6（web 频道在跑且有全局 v6 才有值）。
 3. 位置：src/utils/imRemote/adapters/webChat.ts、daemon.ts、types.ts；webChat.test.ts（全局入选/本地排除/无 v6 空数组 +2 测）。验证随 app 0.2.98 verify-im-remote R11v6（条件断言）。
 
+### 62. 配对按平台隔离：每平台一份码 + 授权表分键 + 广播只发已配对平台 + 出站绑定持久化（随 app 0.2.99，CLI 2.1.274）
+1. 问题：配对态全局单份——`pair` 一份码、`allowedUsers` 一份授权表；配了企微+飞书时扫码卡两平台显示同一个码、任一平台配对后全局放行（用户实测「微信和飞书都收到消息」）；且 broadcastIm 对所有在跑频道无条件群发，与是否配对无关。附带缺陷：飞书 takeInbound / 企微 handleCallback 在配对门之前就把首个入站者绑为出站会话（陌生人一条消息即抢占通知通道，Telegram 则一直是门后 observeChatId）；适配器绑定纯内存态，daemon 每次重启（改任一频道键的设置保存都会重启）即丢，重启后广播静默黑洞到该平台来下一条入站。
+2. 解决：① config 改 `pairs?: Partial<Record<ImPlatform, ImRemotePairState>>` + `allowedUsersByPlatform` + `outboundChats`（daemon 属主）；normalize 迁移 legacy 键——单平台凭据时 allowedUsers 无损归到该平台、多平台作废（属主不可判）、legacy 全局 pair 恒作废（启动即按平台重铸）；新键优先。② 自动铸码/regen（monitor 帧带 platform，缺省重铸全部在跑平台）/消耗均按平台各管各的；/pair 按来源平台验码（跨平台码互斥）。③ broadcastIm 过滤：零配对用户的 bot 平台不发（web 令牌门恒放行）。④ ImAdapter 新增 `bindChat(chatId,{force}): boolean`（配置 chatId 恒最高优先、常规 first-wins、配对 force 接管、返回是否变更）；daemon `applyChatBinding` 统一门后绑定，变更持久化 outboundChats、启动 restoreChatBindings 恢复——重启不再黑洞。⑤ persistDaemonKeys 三键 patch + 串行队列（每调用独立兑现、队列尾巴自愈），配对路径 force 绑定与码消耗/授权增员合并一次持久化。⑥ status 帧顶层 pairCode/allowedUsers 降级占位（null/并集，无消费方），真实数据在 bots[] 每平台条目。平台前置查证：企微官方要求 aibot_send_msg 前用户须先发过消息、Telegram bot 不能主动发起会话——配对消息本身即满足，force 绑定合规。
+3. 位置：src/utils/imRemote/{types,config,format,daemon}.ts、adapters/{telegram,feishu,wecom}.ts；config.test.ts（迁移三分支/pairs 归一/outboundChats，+3 测）、format.test.ts（isPairCodeValid 改收平台配对态）。验证随 app 0.2.99 verify-im-remote R6d2–R6d4/R7c 系/R11b2（码不同/未配对零推送/按平台消耗/跨平台互斥/配对后恢复接收）。
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。

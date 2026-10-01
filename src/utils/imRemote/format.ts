@@ -1,4 +1,4 @@
-import type { ImPlatform, ImRemoteConfig } from './types.js'
+import type { ImPlatform, ImRemotePairState } from './types.js'
 
 /**
  * Pure helpers shared by the daemon and adapters: IM command parsing,
@@ -101,11 +101,17 @@ export function buildBotDeepLink(
   return /^https?:\/\//i.test(link) ? link : null
 }
 
-export function isPairCodeValid(config: ImRemoteConfig, code: string, now: number): boolean {
-  if (!config.pair) return false
+/** Validate a /pair code against ONE platform's pair state (2.1.274: codes
+ *  are per-platform — a Feishu code never validates on WeCom and vice versa). */
+export function isPairCodeValid(
+  pair: ImRemotePairState | null | undefined,
+  code: string,
+  now: number,
+): boolean {
+  if (!pair) return false
   return (
-    config.pair.code === code.toLowerCase() &&
-    config.pair.expires > now &&
+    pair.code === code.toLowerCase() &&
+    pair.expires > now &&
     /^[a-z0-9]{6}$/.test(code.toLowerCase())
   )
 }

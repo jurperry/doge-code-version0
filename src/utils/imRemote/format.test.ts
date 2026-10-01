@@ -15,7 +15,6 @@ import {
   summaryDue,
   truncateText,
 } from './format.js'
-import type { ImRemoteConfig } from './types.js'
 
 describe('parseImCommand', () => {
   test('plain text is a prompt, not a command', () => {
@@ -54,24 +53,16 @@ describe('parseImCommand', () => {
 })
 
 describe('pairing', () => {
-  const config = (pair?: { code: string; expires: number }): ImRemoteConfig => ({
-    version: 1,
-    enabled: true,
-    platform: 'telegram',
-    allowedUsers: [],
-    autoMode: true,
-    summaryEvery: 10,
-    port: 4763,
-    token: 'x'.repeat(24),
-    pair,
-  })
-
-  test('requires matching unexpired code', () => {
+  test('requires matching unexpired code against the PLATFORM-OWN pair state', () => {
     const now = Date.now()
-    expect(isPairCodeValid(config({ code: 'ab3x9k', expires: now + 1000 }), 'ab3x9k', now)).toBeTrue()
-    expect(isPairCodeValid(config({ code: 'ab3x9k', expires: now - 1 }), 'ab3x9k', now)).toBeFalse()
-    expect(isPairCodeValid(config({ code: 'ab3x9k', expires: now + 1000 }), 'zzzz99', now)).toBeFalse()
-    expect(isPairCodeValid(config(), 'ab3x9k', now)).toBeFalse()
+    // 2.1.274：isPairCodeValid 收平台自己的配对态——不同平台的码互不通用
+    const feishuPair = { code: 'ab3x9k', expires: now + 1000 }
+    expect(isPairCodeValid(feishuPair, 'ab3x9k', now)).toBeTrue()
+    expect(isPairCodeValid(feishuPair, 'ab3x9k', now - 1)).toBeTrue()
+    expect(isPairCodeValid({ code: 'ab3x9k', expires: now - 1 }, 'ab3x9k', now)).toBeFalse()
+    expect(isPairCodeValid(feishuPair, 'zzzz99', now)).toBeFalse()
+    expect(isPairCodeValid(undefined, 'ab3x9k', now)).toBeFalse()
+    expect(isPairCodeValid(null, 'ab3x9k', now)).toBeFalse()
   })
 
   test('allowlist membership', () => {

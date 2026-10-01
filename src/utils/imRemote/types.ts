@@ -49,6 +49,17 @@ export type ImRemotePairState = {
   expires: number
 }
 
+/**
+ * Per-platform auth tables (2.1.274). Pairing is per-platform BY DESIGN: each
+ * running bot platform mints its OWN code, and a code sent via platform A is
+ * validated against (and consumed from) platform A only. Likewise the
+ * allowlist is keyed per platform — pairing on WeCom grants WeCom, never
+ * Feishu. Legacy global `pair`/`allowedUsers` keys are migrated (or dropped
+ * when ambiguous) by normalizeImRemoteConfig — see config.ts.
+ */
+export type ImPlatformPairs = Partial<Record<ImPlatform, ImRemotePairState>>
+export type ImPlatformAllowedUsers = Partial<Record<ImPlatform, string[]>>
+
 export type ImRemoteConfig = {
   version: 1
   /** Master switch for the CUSTOM IM bot channels. When false, sessions never
@@ -63,8 +74,8 @@ export type ImRemoteConfig = {
   telegram?: ImRemoteTelegramConfig
   feishu?: ImRemoteFeishuConfig
   wecom?: ImRemoteWecomConfig
-  /** Paired IM user ids allowed to control sessions. */
-  allowedUsers: string[]
+  /** Paired IM user ids allowed to control sessions, PER PLATFORM (2.1.274). */
+  allowedUsersByPlatform?: ImPlatformAllowedUsers
   /** Switch to bypassPermissions ("Auto") when a session attaches. */
   autoMode: boolean
   /** Send a summary notification every N tool calls. */
@@ -73,7 +84,16 @@ export type ImRemoteConfig = {
   port: number
   /** Localhost auth token (generated on first save). */
   token: string
-  pair?: ImRemotePairState
+  /** One pairing code per bot platform (2.1.274) — see ImPlatformPairs. */
+  pairs?: ImPlatformPairs
+  /**
+   * Per-platform outbound chat binding (2.1.274, daemon-owned). Adapter chat
+   * targets are in-memory and die with the daemon — without persisting them
+   * every daemon restart (every channel-keys settings save!) silently
+   * black-holes broadcasts until the next inbound message re-binds. Pairing
+   * force-takes ownership; ordinary paired inbounds are first-wins.
+   */
+  outboundChats?: Partial<Record<ImPlatform, string>>
 }
 
 /**
@@ -138,7 +158,12 @@ export type ImRemoteMonitorFrame =
    */
   | { t: 'set_active'; sessionId: string }
   | { t: 'get_status' }
-  | { t: 'regen_pair' }
+  /**
+   * Mint a fresh pairing code. With `platform` only that platform's code is
+   * regenerated; without it (legacy clients / hand-typed frames) every
+   * RUNNING bot platform gets a fresh code.
+   */
+  | { t: 'regen_pair'; platform?: ImPlatform }
 
 // ---------------------------------------------------------------------------
 // Wire protocol (daemon -> client/monitor)
@@ -186,7 +211,10 @@ export type ImRemoteDaemonFrame =
       active: string | null
       toolCount: number
       pendingAsk: boolean
+      /** Legacy placeholder (2.1.274): pairing is per-platform — real codes
+       *  live in `bots[].pairCode`; this stays null for shape compat. */
       pairCode: string | null
+      /** Legacy placeholder (2.1.274): union of all platforms' allowlists. */
       allowedUsers: string[]
       /** QR web channel — primary LAN URL for the embedded chat page. */
       webUrl?: string | null
@@ -249,5 +277,15 @@ export interface ImAdapter {
   sendOptions(text: string, options: ImOption[]): Promise<void>
   /** Acknowledge a callback selection (clears the Telegram button spinner). */
   answerCallback?(callbackId: string, text: string): Promise<void>
+  /**
+   * Claim `chatId` as the adapter's outbound target (2.1.274). Called by the
+   * daemon ONLY for senders that passed the pairing gate — an unpaired
+   * stranger's first message must not hijack the notification channel
+   * (Telegram always worked this way; Feishu/WeCom now align). Returns true
+   * when this call changed the target (first bind, or a force re-bind from
+   * a fresh pairing — the daemon persists those). Ordinary inbounds are
+   * first-wins; a configured chatId always outranks any binding.
+   */
+  bindChat?(chatId: string, opts?: { force?: boolean }): boolean
   stop(): void
 }

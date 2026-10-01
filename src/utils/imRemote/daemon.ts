@@ -12,9 +12,13 @@ import {
   imRemoteConfigPath,
   imRemoteConfigReady,
   selectBotPlatforms,
+  allowedUsersFor,
+  BOT_PLATFORMS,
+  canConsumePair,
   loadImRemoteConfig,
   loadImRemoteWebConfig,
   imRemoteWebReady,
+  pairCodeFor,
   PAIR_CODE_TTL_MS,
   generatePairCode,
   saveImRemoteConfig,
@@ -27,7 +31,6 @@ import {
   formatToolSummary,
   formatTurnMessage,
   IM_HELP_TEXT,
-  isPairCodeValid,
   isUserAllowed,
   parseImCommand,
   summaryDue,
@@ -35,12 +38,14 @@ import {
 import type {
   ImAdapter,
   ImInboundMessage,
+  ImPlatform,
   ImRemoteBotChannelStatus,
   ImOption,
   ImRemoteClientFrame,
   ImRemoteConfig,
   ImRemoteDaemonFrame,
   ImRemoteMonitorFrame,
+  ImRemotePairState,
   ImRemoteWebConfig,
 } from './types.js'
 
@@ -86,6 +91,8 @@ type HeldPrompt = {
 }
 
 const HELD_PROMPT_TTL_MS = 90_000
+
+const BOT_PLATFORM_SET = new Set<ImPlatform>(BOT_PLATFORMS)
 
 function statusFilePath(): string {
   return process.env.DOGE_IM_REMOTE_STATUS ?? join(getClaudeConfigHomeDir(), 'im-remote-status.json')
@@ -196,6 +203,9 @@ class ImRemoteDaemon {
   private startedAt = new Date().toISOString()
   private shutdownResolve: (() => void) | null = null
   private unpairedWarnAt = new Map<string, number>()
+  /** 本进程已消耗的配对码（platform:code）——封「验码与持久化之间隔 await」
+   *  的同批双 /pair 双配对 TOCTOU；容量有界（码每次重铸随机，旧 key 无用）。 */
+  private consumedPairCodes = new Set<string>()
   private heldPrompt: HeldPrompt | null = null
 
   constructor(config: ImRemoteConfig | null, web: ImRemoteWebConfig | null) {
@@ -311,20 +321,31 @@ class ImRemoteDaemon {
     const botsInfo = this.botsChannelInfo()
     // 深链里的 start=<配对码> 与同行已明文打印的「配对码=」同源同级——此处不
     // 额外脱敏；若日后收紧配对码日志，这里要同步处理
+    const pairNote = this.botChannels()
+      .filter(c => c.running)
+      .map(c => `${c.id}=${this.pairCode(c.id as ImPlatform) ?? '未生成'}`)
+      .join(' ')
     await logLine(
       `远程控制守护进程已启动：channels=${channelNote} port=${this.localhostPort()} ` +
-        `配对码=${this.currentPairCode() ?? '未生成'}` +
+        (pairNote ? `配对码：${pairNote}` : '') +
         (botsInfo.length > 0 ? ` 跨网络扫码=${botsInfo.map(b => b.platform).join('/')}` : '') +
         (this.primaryWebUrl() ? ' web=' + redactWebUrl(this.primaryWebUrl()) : ''),
     )
     await this.writeStatus()
 
-    // 自动铸配对码（2.1.271）：custom 频道在跑而码为空/过期时启动即铸一个——
-    // 扫码卡的跨网络二维码（Telegram start=<码>）开箱即扫即配对，不再要求
-    // 用户先到设置页点「生成配对码」。已配对消耗/手动重铸路径不受影响。
-    if (this.botChannels().some(c => c.running) && !this.currentPairCode()) {
-      await this.regeneratePairCode()
+    // 自动铸配对码（2.1.271，2.1.274 起每平台一份）：在跑的 bot 平台各自的
+    // 码为空/过期时启动即铸——扫码卡的跨网络二维码（Telegram start=<码>）
+    // 开箱即扫即配对，不再要求用户先到设置页点「生成配对码」。已配对消耗/
+    // 手动重铸路径不受影响。
+    for (const ch of this.botChannels()) {
+      if (ch.running && !this.pairCode(ch.id as ImPlatform)) {
+        await this.regeneratePairCode(ch.id as ImPlatform)
+      }
     }
+    // 恢复持久化的出站会话绑定：适配器绑定是内存态，daemon 重启即丢——
+    // 不恢复则重启后（改任一频道键的设置保存都会重启）已配对平台的广播
+    // 静默黑洞，直到该平台来下一条入站
+    this.restoreChatBindings()
 
     const heartbeat = setInterval(() => {
       this.reapDeadSessions()
@@ -361,11 +382,9 @@ class ImRemoteDaemon {
     this.shutdownResolve?.()
   }
 
-  private currentPairCode(): string | null {
-    if (this.config?.pair && this.config.pair.expires > Date.now()) {
-      return this.config.pair.code
-    }
-    return null
+  /** 该平台当前有效配对码（2.1.274 每平台一份；过期/未铸 → null）。 */
+  private pairCode(platform: ImPlatform): string | null {
+    return this.config ? pairCodeFor(this.config, platform) : null
   }
 
   // -----------------------------------------------------------------
@@ -383,10 +402,23 @@ class ImRemoteDaemon {
     })
   }
 
-  /** Push a notification to every running channel (turn/summary/perm...). */
+  /**
+   * Push a notification to every eligible channel (turn/summary/perm...).
+   * Bot platforms are PAIRED-ONLY (2.1.274): a platform with zero paired
+   * users receives nothing — configuring WeCom + Feishu credentials no
+   * longer makes both buzz on every turn; each is silent until its own user
+   * pairs on it. The QR web channel is token-gated (the link IS the
+   * authorization) and always passes.
+   */
   private broadcastIm(text: string, options?: ImOption[]): void {
     for (const ch of this.channels) {
       if (!ch.running) continue
+      if (
+        ch.id !== 'web' &&
+        (!this.config || allowedUsersFor(this.config, ch.id as ImPlatform).length === 0)
+      ) {
+        continue
+      }
       const p = options ? ch.adapter.sendOptions(text, options) : ch.adapter.sendText(text)
       void p.catch(err => {
         void logLine(`broadcast(${ch.id}) 发送失败：${String(err)}`)
@@ -571,7 +603,14 @@ class ImRemoteDaemon {
         this.broadcastStatus()
         break
       case 'regen_pair':
-        void this.regeneratePairCode()
+        // 指定平台只重铸该平台；缺省（旧客户端/手敲帧）重铸全部在跑平台
+        if (frame.platform && BOT_PLATFORM_SET.has(frame.platform)) {
+          void this.regeneratePairCode(frame.platform)
+        } else {
+          for (const ch of this.botChannels()) {
+            if (ch.running) void this.regeneratePairCode(ch.id as ImPlatform)
+          }
+        }
         break
       default:
         break
@@ -644,19 +683,40 @@ class ImRemoteDaemon {
   // -----------------------------------------------------------------
 
   /**
-   * Re-read the keys the APP may have written since startup (pair code,
-   * allowed users, knobs). The daemon loads config once at boot — without
-   * this, a pair code generated in the settings page after the daemon
-   * started is invisible and every /pair fails as "invalid".
+   * Re-read the keys the APP may have written since startup (pair codes,
+   * per-platform allowlists, knobs). The daemon loads config once at boot —
+   * without this, a pair code generated in the settings page after the
+   * daemon started is invisible and every /pair fails as "invalid".
    */
   private async refreshAuthState(): Promise<void> {
     if (!this.config) return
     const disk = await loadImRemoteConfig()
     if (!disk) return
-    this.config.pair = disk.pair
-    this.config.allowedUsers = disk.allowedUsers
+    this.config.pairs = disk.pairs
+    this.config.allowedUsersByPlatform = disk.allowedUsersByPlatform
+    this.config.outboundChats = disk.outboundChats
     this.config.summaryEvery = disk.summaryEvery
     this.config.autoMode = disk.autoMode
+  }
+
+  /**
+   * 门后绑定出站会话（三平台统一入口）：配对门通过、或配对成功时由
+   * onImMessage 调用——未配对者的消息不能抢占广播通道。返回本次调用是否
+   * 变更了绑定（变更要持久化：适配器绑定是内存态，daemon 重启即丢，
+   * 不落盘则每次重启后广播静默黑洞到下一条入站）。
+   */
+  private applyChatBinding(platform: ImPlatform, chatId: string, force: boolean): boolean {
+    if (!chatId) return false
+    const adapter = this.runningAdapter(platform)
+    return adapter?.bindChat?.(chatId, { force }) ?? false
+  }
+
+  /** daemon 重启后恢复各平台持久化的出站会话绑定（run() 末尾调用）。 */
+  private restoreChatBindings(): void {
+    for (const ch of this.botChannels()) {
+      const saved = this.config?.outboundChats?.[ch.id as ImPlatform]
+      if (ch.running && saved) ch.adapter.bindChat?.(saved)
+    }
   }
 
   private async onImMessage(msg: ImInboundMessage, channelId: string): Promise<void> {
@@ -669,42 +729,61 @@ class ImRemoteDaemon {
     await this.refreshAuthState()
 
     // The web channel is token-gated (the QR link IS the authorization) —
-    // allowedUsers only governs the custom IM bot.
-    const gated = channelId !== 'web'
-    if (gated && !isUserAllowed(msg.userId, this.config?.allowedUsers ?? [])) {
+    // the per-platform allowlists only govern the custom IM bots.
+    const platform = channelId as ImPlatform
+    const platformAllowed = this.config ? allowedUsersFor(this.config, platform) : []
+    if (channelId !== 'web' && !isUserAllowed(msg.userId, platformAllowed)) {
       const cmd = parseImCommand(msg.text)
       if (cmd?.kind === 'pair') {
-        if (this.config && isPairCodeValid(this.config, cmd.code, Date.now())) {
-          await logLine(`IM 配对成功：user=${msg.userId}`)
-          if (this.config) {
-            this.config.allowedUsers = [...this.config.allowedUsers, msg.userId]
-            this.config.pair = undefined
+        // 2.1.274：码按平台各铸各的——飞书的码在飞书验、企微的码在企微验，
+        // 消耗与授权也只落在本平台，跨平台互不可见。验码+耗码必须是同一
+        // 同步块（canConsumePair 判定即入 consumedPairCodes 集合）——中间
+        // 隔着任何 await 都会让同批第二条同码 /pair 双双过关
+        const pairState = this.config?.pairs?.[platform]
+        if (this.config && canConsumePair(pairState, platform, cmd.code, this.consumedPairCodes)) {
+          const consumedKey = platform + ':' + cmd.code.toLowerCase()
+          this.consumedPairCodes.add(consumedKey)
+          if (this.consumedPairCodes.size > 100) {
+            this.consumedPairCodes.delete(this.consumedPairCodes.values().next().value!)
           }
-          await this.persistDaemonKeys({ pair: undefined, addAllowedUser: msg.userId })
+          // 内存立即耗码（磁盘由持久化队列补写）：后续任何磁盘重读都复活不了它
+          if (this.config.pairs) delete this.config.pairs[platform]
+          await logLine(`IM 配对成功：platform=${platform} user=${msg.userId}`)
+          // 配对即接管出站会话（force）：全新 daemon 的首条消息就是配对指令，
+          // 不绑则「配对成功」回执无处可去（配对消息本身已满足各平台「用户
+          // 先发过消息才能收推送」的前置，绑定为平台规则所允许）
+          const tookChat = this.applyChatBinding(platform, msg.chatId, true)
+          await this.persistDaemonKeys({
+            pairs: { [platform]: undefined },
+            addAllowedUser: { platform, userId: msg.userId },
+            ...(tookChat ? { outboundChats: { [platform]: msg.chatId } } : {}),
+          })
           await this.reply(channelId, '🔗 配对成功！现在可以直接发消息控制会话。发送 /help 查看指令。')
           this.broadcastStatus()
         } else {
-          await logLine('IM 配对失败：配对码无效或已过期')
-          await this.reply(channelId, '❌ 配对码无效或已过期（60 分钟有效），请在设置页重新生成。')
+          await logLine(`IM 配对失败（${platform}）：配对码无效或已过期`)
+          await this.reply(channelId, '❌ 配对码无效或已过期（60 分钟有效，各平台独立），请在设置页重新生成本平台的配对码。')
         }
         return
       }
-      // Throttle the warning per user — a chatty group must not turn the
-      // bot into an unpaired-warning spammer.
-      const last = this.unpairedWarnAt.get(msg.userId) ?? 0
+      // Throttle the warning per user+platform — a chatty group must not turn
+      // the bot into an unpaired-warning spammer.
+      const warnKey = channelId + ':' + msg.userId
+      const last = this.unpairedWarnAt.get(warnKey) ?? 0
       if (Date.now() - last > 10 * 60_000) {
-        this.unpairedWarnAt.set(msg.userId, Date.now())
+        this.unpairedWarnAt.set(warnKey, Date.now())
         await this.reply(
           channelId,
-          '⚠️ 本账号未配对。请在桌面端「设置 → 远程控制」生成配对码后发送 /pair <配对码>。',
+          '⚠️ 本账号未配对。请在桌面端「设置 → 远程控制」生成本平台配对码后发送 /pair <配对码>。',
         )
       }
       return
     }
 
-    if (channelId === 'telegram') {
-      const tg = this.runningAdapter('telegram')
-      if (tg instanceof TelegramAdapter) tg.observeChatId(msg.chatId)
+    // 已配对用户的首条入站若改变了绑定（重启后恢复前），持久化之——
+    // fire-and-forget：persistDaemonKeys 内部写串行，不会撕裂
+    if (this.applyChatBinding(platform, msg.chatId, false)) {
+      void this.persistDaemonKeys({ outboundChats: { [platform]: msg.chatId } })
     }
     const cmd = parseImCommand(msg.text)
     if (!cmd) {
@@ -896,18 +975,21 @@ class ImRemoteDaemon {
 
   private broadcastStatus(): void {
     const webUrl = this.primaryWebUrl()
+    const cfg = this.config
     this.broadcastToMonitors({
       t: 'status',
       running: true,
-      platform: this.config?.platform ?? 'none',
+      platform: cfg?.platform ?? 'none',
       attached: this.sessions.size,
       active: this.activeSessionId,
       toolCount: this.activeSessionId
         ? (this.sessions.get(this.activeSessionId)?.toolCount ?? 0)
         : 0,
       pendingAsk: this.pending.some(p => p.ask),
-      pairCode: this.currentPairCode(),
-      allowedUsers: this.config?.allowedUsers ?? [],
+      // 2.1.274 起配对按平台分键——真实码在 bots[].pairCode；顶层两字段是
+      // 旧帧形状的占位（无消费方），保持结构不变以防旧端解帧炸裂
+      pairCode: null,
+      allowedUsers: cfg ? BOT_PLATFORMS.flatMap(p => allowedUsersFor(cfg, p)) : [],
       webUrl,
       webUrls: webUrl
         ? webUrlCandidates(this.webConfig!.port, this.webConfig!.token)
@@ -922,29 +1004,32 @@ class ImRemoteDaemon {
   /**
    * Cross-network scan entries (2.1.272): one per RUNNING bot platform — the
    * settings page renders a QR for each so the user scans with whichever app
-   * they have. Entries whose deepLink can't be built (e.g. WeCom without the
-   * user-supplied bot link) still appear with deepLink null so the UI can
-   * show the per-platform fix-up form.
+   * they have. Pair codes and paired counts are PER-PLATFORM (2.1.274) —
+   * each entry reads only its own platform's auth state. Entries whose
+   * deepLink can't be built (e.g. WeCom without the user-supplied bot link)
+   * still appear with deepLink null so the UI can show the per-platform
+   * fix-up form.
    */
   private botsChannelInfo(): ImRemoteBotChannelStatus[] {
-    if (!this.config) return []
-    const pair = this.currentPairCode() ? this.config.pair : undefined
-    const pairExpires = pair && pair.expires > Date.now() ? pair.expires : null
-    const base = {
-      pairCode: this.currentPairCode(),
-      pairExpires,
-      paired: this.config.allowedUsers.length,
-    }
+    const cfg = this.config
+    if (!cfg) return []
     return this.botChannels()
       .filter(ch => ch.running)
       .map(ch => {
         const platform = ch.id as ImPlatform
+        const pairCode = pairCodeFor(cfg, platform)
+        const pairState = cfg.pairs?.[platform]
+        const base = {
+          pairCode,
+          pairExpires: pairCode && pairState ? pairState.expires : null,
+          paired: allowedUsersFor(cfg, platform).length,
+        }
         if (platform === 'telegram') {
           const a = ch.adapter instanceof TelegramAdapter ? ch.adapter : null
           return {
             platform,
             botName: a?.botName || null,
-            deepLink: buildBotDeepLink('telegram', { botUsername: a?.botUsername, pairCode: base.pairCode }),
+            deepLink: buildBotDeepLink('telegram', { botUsername: a?.botUsername, pairCode }),
             ...base,
           }
         }
@@ -952,49 +1037,87 @@ class ImRemoteDaemon {
           return {
             platform,
             botName: null,
-            deepLink: buildBotDeepLink('feishu', { appId: this.config!.feishu?.appId }),
+            deepLink: buildBotDeepLink('feishu', { appId: cfg.feishu?.appId }),
             ...base,
           }
         }
         return {
           platform,
           botName: null,
-          deepLink: buildBotDeepLink('wecom', { botLink: this.config!.wecom?.botLink }),
+          deepLink: buildBotDeepLink('wecom', { botLink: cfg.wecom?.botLink }),
           ...base,
         }
       })
   }
 
-  private async regeneratePairCode(): Promise<void> {
+  /** 为指定平台重铸配对码（持久化 + 广播）。 */
+  private async regeneratePairCode(platform: ImPlatform): Promise<void> {
     if (!this.config) return
-    this.config.pair = { code: generatePairCode(), expires: Date.now() + PAIR_CODE_TTL_MS }
-    await this.persistDaemonKeys({ pair: this.config.pair })
+    await this.persistDaemonKeys({
+      pairs: { [platform]: { code: generatePairCode(), expires: Date.now() + PAIR_CODE_TTL_MS } },
+    })
     this.broadcastStatus()
   }
 
   /**
-   * Persist ONLY the keys the daemon owns (pair / allowedUsers), re-reading
-   * the file first — a full-config writeback would clobber credentials the
-   * user just changed in the app settings page.
+   * Persist ONLY the keys the daemon owns (pairs / per-platform allowlists /
+   * outbound chat bindings), re-reading the file first — a full-config
+   * writeback would clobber credentials the user just changed in the app
+   * settings page. The merged result becomes the daemon's live config
+   * (single assignment, callers never mutate this.config around it).
+   * Serialized: overlapping read-merge-write invocations would lose updates.
    */
-  private async persistDaemonKeys(patch: {
-    pair?: ImRemoteConfig['pair'] | undefined
-    addAllowedUser?: string
+  private persistQueue: Promise<void> = Promise.resolve()
+
+  private persistDaemonKeys(patch: {
+    /** Per-platform pair-state patch; `undefined` consumes (deletes) a code. */
+    pairs?: Partial<Record<ImPlatform, ImRemotePairState | undefined>>
+    addAllowedUser?: { platform: ImPlatform; userId: string }
+    /** Per-platform outbound chat bindings to upsert. */
+    outboundChats?: Partial<Record<ImPlatform, string>>
   }): Promise<void> {
-    const disk = await loadImRemoteConfig()
-    const base = disk ?? this.config
-    if (!base) return
-    const next: ImRemoteConfig = {
-      ...base,
-      // 'pair' in patch 才动 pair —— pair: undefined 表示「清除配对码」，
-      // 不能用 !== undefined 三元（会把清除误当保留）
-      pair: 'pair' in patch ? patch.pair : base.pair,
-      allowedUsers: patch.addAllowedUser
-        ? [...base.allowedUsers, patch.addAllowedUser]
-        : base.allowedUsers,
+    const apply = async (): Promise<void> => {
+      const disk = await loadImRemoteConfig()
+      const base = disk ?? this.config
+      if (!base) return
+      const next: ImRemoteConfig = {
+        ...base,
+        pairs: { ...(base.pairs ?? {}) },
+        allowedUsersByPlatform: { ...(base.allowedUsersByPlatform ?? {}) },
+        outboundChats: { ...(base.outboundChats ?? {}) },
+      }
+      if (patch.pairs) {
+        for (const p of BOT_PLATFORMS) {
+          if (!(p in patch.pairs)) continue
+          const st = patch.pairs[p]
+          if (st) next.pairs![p] = st
+          else delete next.pairs![p]
+        }
+      }
+      if (patch.addAllowedUser) {
+        const { platform, userId } = patch.addAllowedUser
+        const list = next.allowedUsersByPlatform![platform] ?? []
+        if (!list.includes(userId)) {
+          next.allowedUsersByPlatform![platform] = [...list, userId]
+        }
+      }
+      if (patch.outboundChats) {
+        for (const p of BOT_PLATFORMS) {
+          if (p in patch.outboundChats) {
+            next.outboundChats![p] = patch.outboundChats[p]
+          }
+        }
+      }
+      await saveImRemoteConfig(next)
+      this.config = next
     }
-    await saveImRemoteConfig(next)
-    this.config = next
+    // 每调用独立兑现：失败要让调用方（如配对路径）看见——否则落盘失败仍回
+    // 「配对成功」；队列尾巴只自愈不外抛，后续持久化不被一次失败堵死
+    const run = this.persistQueue.catch(() => {}).then(apply)
+    this.persistQueue = run.catch(err => {
+      void logLine(`daemon 键持久化失败（已跳过）：${String(err)}`)
+    })
+    return run
   }
 
   /** Belt-and-braces: reap sessions whose OS process died without a close. */

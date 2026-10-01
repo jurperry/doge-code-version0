@@ -240,8 +240,20 @@ export class WecomAdapter implements ImAdapter {
     if (!text) return
     this.recentCallbacks.set(chatId, { reqId, chatId, at: Date.now() })
     this.pruneCallbacks()
-    if (!this.outboundChat) this.outboundChat = chatId
+    // 出站会话绑定不在此处——未配对者的首条消息不能抢占广播通道，绑定由
+    // daemon 在配对门之后调 bindChat（recentCallbacks 无条件记录：它只是
+    // 24h 回执窗的地址簿，/pair 应答回执仍需按 req_id 直答回来源）。
     this.handlers?.onMessage({ userId, userName: '企微用户', chatId, text })
+  }
+
+  /** Claim the outbound chat. Ordinary binds are first-wins, force (fresh
+   *  pairing) takes ownership. Returns whether this call changed the target. */
+  bindChat(chatId: string, opts?: { force?: boolean }): boolean {
+    if (!chatId) return false
+    if (this.outboundChat && !opts?.force) return false
+    if (this.outboundChat === chatId) return false
+    this.outboundChat = chatId
+    return true
   }
 
   private pruneCallbacks(): void {

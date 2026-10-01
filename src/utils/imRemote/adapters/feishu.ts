@@ -122,7 +122,7 @@ export class FeishuAdapter implements ImAdapter {
     if (!message?.message_id || !message.chat_id) return
     if (sender?.sender_type === 'app') return // our own sends
     if (message.message_type !== 'text') return
-    const inbound = this.takeInbound(message.message_id, message.chat_id, message.content)
+    const inbound = this.takeInbound(message.message_id, message.content)
     if (!inbound) return
     const userId = sender?.sender_id?.open_id ?? sender?.sender_id?.user_id ?? ''
     this.handlers?.onMessage({
@@ -134,14 +134,15 @@ export class FeishuAdapter implements ImAdapter {
   }
 
   /**
-   * Dedup + parse shared by both receive paths. Records the chat, strips
-   * @-mention placeholder keys the protocol leaves in the text, and returns
-   * the plain text (or null when it's a duplicate / non-text / empty).
+   * Dedup + parse shared by both receive paths. Strips @-mention placeholder
+   * keys the protocol leaves in the text, and returns the plain text (or
+   * null when it's a duplicate / non-text / empty). The inbound chat is NOT
+   * recorded here — binding is the daemon's call (post-pairing-gate), so an
+   * unpaired stranger cannot hijack the outbound target.
    */
-  private takeInbound(messageId: string, chatId: string, rawContent?: string): string | null {
+  private takeInbound(messageId: string, rawContent?: string): string | null {
     if (this.seen.has(messageId)) return null
     this.seen.add(messageId)
-    if (chatId) this.lastInboundChat = chatId
     let text = ''
     try {
       text = String(JSON.parse(rawContent ?? '{}').text ?? '')
@@ -151,6 +152,17 @@ export class FeishuAdapter implements ImAdapter {
     // "@_user_N" placeholder tokens (bot mentions) are not user input.
     text = text.replace(/@_user_\d+/g, ' ').replace(/\s+/g, ' ').trim()
     return text || null
+  }
+
+  /** Claim the outbound chat. Configured chatId always wins; ordinary binds
+   *  are first-wins, force (fresh pairing) takes ownership. Returns whether
+   *  this call changed the target. */
+  bindChat(chatId: string, opts?: { force?: boolean }): boolean {
+    if (!chatId || this.cfg.chatId) return false
+    if (this.lastInboundChat && !opts?.force) return false
+    if (this.lastInboundChat === chatId) return false
+    this.lastInboundChat = chatId
+    return true
   }
 
   private async pollLoop(): Promise<void> {
@@ -204,7 +216,7 @@ export class FeishuAdapter implements ImAdapter {
         // Skip anything the app itself sent.
         if (item.sender?.type === 'app') continue
         if (item.msg_type !== 'text') continue
-        const text = this.takeInbound(item.message_id, item.chat_id, item.body.content)
+        const text = this.takeInbound(item.message_id, item.body.content)
         if (!text) continue
         this.handlers?.onMessage({
           userId: item.sender?.id ?? '',

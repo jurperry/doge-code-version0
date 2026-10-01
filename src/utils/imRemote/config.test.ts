@@ -2,9 +2,12 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { rm } from 'fs/promises'
 import { join } from 'path'
 import {
+  allowedUsersFor,
+  canConsumePair,
   feishuReady,
   generatePairCode,
   imRemoteConfigReady,
+  pairCodeFor,
   selectBotPlatforms,
   imRemoteWebReady,
   normalizeImRemoteConfig,
@@ -42,7 +45,7 @@ describe('normalizeImRemoteConfig', () => {
     const cfg = normalizeImRemoteConfig({
       platform: 'feishu',
       enabled: true,
-      allowedUsers: ['u1', 42, null],
+      allowedUsersByPlatform: { telegram: ['u1', 42, null], feishu: [] },
       summaryEvery: 'bogus',
       port: 99999,
       nope: 'dropped',
@@ -51,7 +54,7 @@ describe('normalizeImRemoteConfig', () => {
     expect(cfg).not.toBeNull()
     expect(cfg!.summaryEvery).toBe(10)
     expect(cfg!.port).toBe(4763)
-    expect(cfg!.allowedUsers).toEqual(['u1'])
+    expect(cfg!.allowedUsersByPlatform).toEqual({ telegram: ['u1'] })
     expect(cfg!.autoMode).toBeTrue()
     expect(cfg!.feishu?.apiBase).toBe('http://x/')
     expect('nope' in cfg!).toBeFalse()
@@ -91,6 +94,105 @@ describe('normalizeImRemoteConfig', () => {
     ).toBeFalse()
     // 未知平台值回落 telegram，不误入 wecom 分支
     expect(normalizeImRemoteConfig({ platform: 'qq' })!.platform).toBe('telegram')
+  })
+})
+
+describe('per-platform pairing state (2.1.274)', () => {
+  test('pairs normalize per platform; junk codes/shapes dropped', () => {
+    const now = Date.now()
+    const cfg = normalizeImRemoteConfig({
+      telegram: { botToken: 't' },
+      feishu: { appId: 'a', appSecret: 's' },
+      pairs: {
+        telegram: { code: 'ab3x9k', expires: now + 1000 },
+        feishu: { code: 'TOOLONG7', expires: now + 1000 },
+        wecom: { code: 'cd34gh', expires: 'bogus' },
+        nonsense: { code: 'zzzz99', expires: now + 1000 },
+      },
+    })!
+    // 非平台键与非法码被丢；expires 归一为 0（过期）但条目保留——过期判定
+    // 归 pairCodeFor（读取时），归一化层不改写数据
+    expect(Object.keys(cfg.pairs ?? {}).sort()).toEqual(['telegram', 'wecom'])
+    expect(cfg.pairs?.telegram?.code).toBe('ab3x9k')
+    expect(cfg.pairs?.wecom?.expires).toBe(0)
+    expect(pairCodeFor(cfg, 'telegram')).toBe('ab3x9k')
+    expect(pairCodeFor(cfg, 'wecom')).toBeNull()
+    // 过期 → null；未铸 → null
+    const expired = normalizeImRemoteConfig({
+      telegram: { botToken: 't' },
+      pairs: { telegram: { code: 'ab3x9k', expires: now - 1 } },
+    })!
+    expect(pairCodeFor(expired, 'telegram')).toBeNull()
+    expect(pairCodeFor(cfg, 'wecom')).toBeNull()
+  })
+
+  test('legacy global allowedUsers migrates only when exactly ONE platform is credentialed', () => {
+    // 单平台（绝大多数用户）：无歧义，无损迁移
+    const single = normalizeImRemoteConfig({
+      telegram: { botToken: 't' },
+      allowedUsers: ['4242', 42],
+    })!
+    expect(single.allowedUsersByPlatform).toEqual({ telegram: ['4242'] })
+    // 多平台：属主无法推断 → 作废（重新配对一次）
+    const multi = normalizeImRemoteConfig({
+      telegram: { botToken: 't' },
+      feishu: { appId: 'a', appSecret: 's' },
+      allowedUsers: ['4242'],
+    })!
+    expect(multi.allowedUsersByPlatform).toEqual({})
+    // 新键在场时 legacy 键被忽略（新键优先，勿叠加）
+    const preferred = normalizeImRemoteConfig({
+      telegram: { botToken: 't' },
+      allowedUsers: ['legacy-user'],
+      allowedUsersByPlatform: { telegram: ['new-user'] },
+    })!
+    expect(preferred.allowedUsersByPlatform).toEqual({ telegram: ['new-user'] })
+  })
+
+  test('legacy global pair is dropped outright; daemon re-mints per platform', () => {
+    const cfg = normalizeImRemoteConfig({
+      telegram: { botToken: 't' },
+      pair: { code: 'ab3x9k', expires: Date.now() + 1000 },
+    })!
+    expect(cfg.pairs).toEqual({})
+    expect(pairCodeFor(cfg, 'telegram')).toBeNull()
+  })
+
+  test('canConsumePair：验码即耗码的原子门（同码二次必拒，磁盘复活也拦住）', () => {
+    const now = Date.now()
+    const pair = { code: 'ab3x9k', expires: now + 1000 }
+    const consumed = new Set<string>()
+    // 首验通过；随后（调用方立即）入集合
+    expect(canConsumePair(pair, 'telegram', 'ab3x9k', consumed, now)).toBeTrue()
+    consumed.add('telegram:ab3x9k')
+    // 同码二次（哪怕磁盘重读把码复活回内存）必拒——TOCTOU 根修
+    expect(canConsumePair(pair, 'telegram', 'ab3x9k', consumed, now)).toBeFalse()
+    // 集合按平台分键：飞书的同值码不受 telegram 已耗影响
+    expect(canConsumePair(pair, 'feishu', 'ab3x9k', consumed, now)).toBeTrue()
+    // 码本身无效仍拒
+    expect(canConsumePair(pair, 'telegram', 'zzzz99', consumed, now)).toBeFalse()
+    expect(canConsumePair(undefined, 'telegram', 'ab3x9k', consumed, now)).toBeFalse()
+  })
+
+  test('allowedUsersFor reads per platform; save/load round-trips the new shape', async () => {
+    await withEnv(async () => {
+      const cfg = normalizeImRemoteConfig({
+        enabled: true,
+        telegram: { botToken: 't' },
+        wecom: { botId: 'b', secret: 's' },
+        allowedUsersByPlatform: { telegram: ['42'], wecom: ['wecom-user'] },
+        outboundChats: { telegram: '900', wecom: 42, nonsense: 'x' },
+      })!
+      expect(allowedUsersFor(cfg, 'telegram')).toEqual(['42'])
+      expect(allowedUsersFor(cfg, 'wecom')).toEqual(['wecom-user'])
+      expect(allowedUsersFor(cfg, 'feishu')).toEqual([])
+      // 出站绑定：字符串留、非字符串与非平台键丢
+      expect(cfg.outboundChats).toEqual({ telegram: '900' })
+      await saveImRemoteConfig(cfg)
+      const loaded = await loadImRemoteConfig()
+      expect(loaded!.allowedUsersByPlatform).toEqual({ telegram: ['42'], wecom: ['wecom-user'] })
+      expect(loaded!.outboundChats).toEqual({ telegram: '900' })
+    })
   })
 })
 

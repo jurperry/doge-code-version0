@@ -39,6 +39,8 @@ export class TelegramAdapter implements ImAdapter {
   private stopped = false
   private offset = 0
   private chatId: string
+  /** Explicitly configured chat outranks any runtime binding. */
+  private readonly configuredChat: boolean
   /** Bot identity from getMe — the settings page builds the cross-network
    *  deep-link QR (t.me/<username>?start=<pair>) from it. */
   private username = ''
@@ -50,6 +52,7 @@ export class TelegramAdapter implements ImAdapter {
   ) {
     this.cfg = cfg
     this.chatId = cfg.chatId ?? ''
+    this.configuredChat = !!cfg.chatId
   }
 
   private get api(): string {
@@ -157,11 +160,15 @@ export class TelegramAdapter implements ImAdapter {
     })
   }
 
-  /** First inbound chat wins when no explicit chatId was configured. */
-  observeChatId(chatId: string): void {
-    if (!this.chatId && chatId) {
-      this.chatId = chatId
-    }
+  /** Claim the outbound chat. Configured chatId always wins; ordinary binds
+   *  are first-wins, force (fresh pairing) takes ownership. Returns whether
+   *  this call changed the target. */
+  bindChat(chatId: string, opts?: { force?: boolean }): boolean {
+    if (!chatId || this.configuredChat) return false
+    if (this.chatId && !opts?.force) return false
+    if (this.chatId === chatId) return false
+    this.chatId = chatId
+    return true
   }
 
   /** Bot username without the leading @ (empty when getMe didn't provide one). */
