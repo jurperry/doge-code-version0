@@ -40,7 +40,10 @@ export class TelegramAdapter implements ImAdapter {
   private offset = 0
   private chatId: string
 
-  constructor(cfg: ImRemoteTelegramConfig) {
+  constructor(
+    cfg: ImRemoteTelegramConfig,
+    private readonly log: (line: string) => void = () => {},
+  ) {
     this.cfg = cfg
     this.chatId = cfg.chatId ?? ''
   }
@@ -109,7 +112,9 @@ export class TelegramAdapter implements ImAdapter {
       } catch (err) {
         if (this.abort?.signal.aborted) return
         // Long-poll aborts and transient network errors both land here;
-        // back off briefly instead of hammering the API.
+        // back off briefly instead of hammering the API. 429/断网要落
+        // daemon 日志——否则出站失败在日志里查无此事。
+        this.log(`telegram getUpdates 失败（3s 后重试）：${String(err)}`)
         await new Promise(r => setTimeout(r, 3000))
       }
     }

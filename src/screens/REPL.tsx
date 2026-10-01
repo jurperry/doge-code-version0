@@ -122,7 +122,7 @@ import useCanUseTool from '../hooks/useCanUseTool.js';
 import type { ToolPermissionContext, Tool } from '../Tool.js';
 import { applyPermissionUpdate, applyPermissionUpdates, persistPermissionUpdate } from '../utils/permissions/PermissionUpdate.js';
 import { buildPermissionUpdates } from '../components/permissions/ExitPlanModePermissionRequest/ExitPlanModePermissionRequest.js';
-import { stripDangerousPermissionsForAutoMode } from '../utils/permissions/permissionSetup.js';
+import { isBypassPermissionsModeDisabled, stripDangerousPermissionsForAutoMode } from '../utils/permissions/permissionSetup.js';
 import { getScratchpadDir, isScratchpadEnabled } from '../utils/permissions/filesystem.js';
 import { WEB_FETCH_TOOL_NAME } from '../tools/WebFetchTool/prompt.js';
 import { SLEEP_TOOL_NAME } from '../tools/SleepTool/prompt.js';
@@ -291,6 +291,7 @@ import type { ScrollBoxHandle } from '../ink/components/ScrollBox.js';
 import { createAttachmentMessage, getQueuedCommandAttachments } from '../utils/attachments.js';
 import { emitShellTurnMarker } from '../utils/shellTurnMarker.js';
 import { imRemote } from '../utils/imRemote/client.js';
+import { remoteAutoTargetMode } from '../utils/imRemote/autoMode.js';
 import { lastAssistantText, lastPathSegment } from '../utils/imRemote/format.js';
 
 // Stable empty array for hooks that accept MCPServerConnection[] — avoids
@@ -916,8 +917,31 @@ export function REPL({
   // aborts through the shared abortControllerRef.
   useEffect(() => {
     let cancelled = false;
+    // Remote control defaults to Auto (bypassPermissions) so unattended
+    // turns are never stuck on prompts the remote user cannot see. Decision
+    // rules live in imRemote/autoMode.ts (shared with the headless path) —
+    // bypass unless the settings killswitch explicitly disables it.
+    const enforceRemoteAuto = (prev: AppState): AppState => {
+      const next = remoteAutoTargetMode(
+        imRemote.getConfig()?.autoMode === true,
+        prev.toolPermissionContext.mode,
+        isBypassPermissionsModeDisabled(),
+      );
+      return next
+        ? {
+            ...prev,
+            toolPermissionContext: {
+              ...prev.toolPermissionContext,
+              mode: next,
+            },
+          }
+        : prev;
+    };
     imRemote.setHandlers({
       onPrompt: text => {
+        // attach() may land after this session's first turn started —
+        // re-assert Auto on every remote prompt so the turn never stalls.
+        setAppState(enforceRemoteAuto);
         enqueue({ value: text, mode: 'prompt' });
       },
       onInterrupt: () => {
@@ -926,26 +950,12 @@ export function REPL({
     });
     void imRemote.attach('tui', lastPathSegment(process.cwd())).then(ok => {
       if (!ok || cancelled) return;
-      setAppState(prev => {
-        const next: AppState = {
+      setAppState(prev =>
+        enforceRemoteAuto({
           ...prev,
           imRemotePermissionCallbacks: imRemote.buildPermissionCallbacks(),
-        };
-        // Remote control defaults to Auto (bypassPermissions) so unattended
-        // turns are never stuck on prompts the remote user cannot see.
-        const remoteConfig = imRemote.getConfig();
-        if (
-          remoteConfig?.autoMode &&
-          prev.toolPermissionContext.isBypassPermissionsModeAvailable &&
-          prev.toolPermissionContext.mode !== 'bypassPermissions'
-        ) {
-          next.toolPermissionContext = {
-            ...prev.toolPermissionContext,
-            mode: 'bypassPermissions',
-          };
-        }
-        return next;
-      });
+        }),
+      );
     });
     return () => {
       cancelled = true;

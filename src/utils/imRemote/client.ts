@@ -4,7 +4,7 @@ import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import { logForDebugging } from '../debug.js'
 import { buildAskAnswers, parseAskPayload, safeJsonPreview } from './format.js'
 import { setSdkEventTap } from '../sdkEventQueue.js'
-import { loadImRemoteConfig } from './config.js'
+import { loadImRemoteConfig, loadImRemoteWebConfig, normalizeImRemoteConfig } from './config.js'
 import type {
   ImRemoteClientFrame,
   ImRemoteConfig,
@@ -90,35 +90,53 @@ class ImRemoteClient {
       try {
         if (process.env.DOGE_IM_REMOTE_DISABLE) return false
         const config = await loadImRemoteConfig()
+        const web = await loadImRemoteWebConfig()
         if (process.env.DOGE_IM_REMOTE_DEBUG) {
           // Never log the full config — the first 160 chars would cover the
           // WS token and bot credentials.
           console.error(
             `[im-remote] attach config=${
-              config
-                ? JSON.stringify({ enabled: config.enabled, platform: config.platform, port: config.port, hasToken: !!config.token })
+              config || web
+                ? JSON.stringify({
+                    enabled: config?.enabled,
+                    platform: config?.platform,
+                    port: config?.port,
+                    hasToken: !!config?.token,
+                    webEnabled: web?.enabled,
+                    webPort: web?.port,
+                  })
                 : 'null'
             }`,
           )
         }
-        if (!config?.enabled || !config.token) {
+        // Either channel being on means the daemon may be listening; the
+        // localhost WS accepts the im token OR the web token.
+        const anyEnabled = config?.enabled === true || web?.enabled === true
+        const token = config?.token || web?.token
+        if (!anyEnabled || !token) {
           // Remote may be enabled AFTER this session started (settings page
           // or `doge im` coming up later) — keep a slow probe alive, but
           // cap it for never-configured machines so idle sessions aren't
           // stuck reading a nonexistent file forever.
-          if (config || this.missingConfigRetries < MISSING_CONFIG_RETRY_CAP) {
-            if (!config) this.missingConfigRetries++
+          if (config || web || this.missingConfigRetries < MISSING_CONFIG_RETRY_CAP) {
+            if (!config && !web) this.missingConfigRetries++
             this.scheduleRetry()
           }
           return false
         }
-        this.config = config
+        // Web-only machines have no im-remote.json — synthesize defaults so
+        // getConfig()?.autoMode still reads the default (true) for Auto mode.
+        this.config = config ?? normalizeImRemoteConfig({})
         try {
-          const ok = await this.connect(config, kind, label)
+          const ok = await this.connect(
+            { port: config?.port ?? 4763, token },
+            kind,
+            label,
+          )
           this.state = ok ? 'attached' : 'detached'
           if (ok) {
             this.registerSdkTap()
-            this.handlers.onConnected?.(config)
+            this.handlers.onConnected?.(this.config)
           } else {
             this.scheduleRetry()
           }
@@ -151,7 +169,11 @@ class ImRemoteClient {
     this.retryTimer.unref?.()
   }
 
-  private connect(config: ImRemoteConfig, kind: ImRemoteSessionKind, label: string): Promise<boolean> {
+  private connect(
+    endpoint: { port: number; token: string },
+    kind: ImRemoteSessionKind,
+    label: string,
+  ): Promise<boolean> {
     return new Promise(resolve => {
       let settled = false
       const finish = (ok: boolean) => {
@@ -168,7 +190,7 @@ class ImRemoteClient {
       }
       const url =
         process.env.DOGE_IM_REMOTE_WS ??
-        'ws://127.0.0.1:' + config.port + '/?token=' + encodeURIComponent(config.token)
+        'ws://127.0.0.1:' + endpoint.port + '/?token=' + encodeURIComponent(endpoint.token)
       let ws: WebSocket
       try {
         ws = new WebSocket(url)

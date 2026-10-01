@@ -54,8 +54,10 @@ const mockApi = Bun.serve({
 // --- Config + daemon --------------------------------------------------------
 const sandbox = await mkdtemp(join(tmpdir(), 'im-remote-e2e-'))
 const configPath = join(sandbox, 'im-remote.json')
+const webConfigPath = join(sandbox, 'im-remote-web.json')
 const statusPath = join(sandbox, 'im-remote-status.json')
 const daemonPort = 4700 + Math.floor(Math.random() * 200)
+const webPort = 4900 + Math.floor(Math.random() * 90)
 
 const config = {
   version: 1,
@@ -73,6 +75,13 @@ const config = {
 }
 await writeFile(configPath, JSON.stringify(config, null, 2))
 
+// QR web channel — separate file, token-gated (no pairing flow).
+const webToken = 'webtesttokenwebtesttoken'
+await writeFile(
+  webConfigPath,
+  JSON.stringify({ version: 1, enabled: true, port: webPort, token: webToken }, null, 2),
+)
+
 const daemon = spawn(
   process.execPath.includes('bun') ? process.execPath : 'bun',
   [join(ROOT, 'src/bootstrap-entry.ts'), 'im'],
@@ -80,6 +89,7 @@ const daemon = spawn(
     env: {
       ...process.env,
       DOGE_IM_REMOTE_CONFIG: configPath,
+      DOGE_IM_REMOTE_WEB_CONFIG: webConfigPath,
       DOGE_IM_REMOTE_STATUS: statusPath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -263,7 +273,98 @@ try {
   })
   check('bad token rejected by daemon', badRejected)
 
+  // --- QR web channel ---------------------------------------------------------
+  const page = await fetch(`http://127.0.0.1:${webPort}/`)
+  const pageHtml = await page.text()
+  check('web channel serves embedded chat page', pageHtml.includes('Doge Code 远程控制'), pageHtml.slice(0, 80))
+
+  const webWs = new WebSocket(`ws://127.0.0.1:${webPort}/?token=${webToken}`)
+  const webInbound: any[] = []
+  await new Promise<void>((resolve, reject) => {
+    webWs.onopen = () => resolve()
+    webWs.onerror = e => reject(e)
+    setTimeout(() => reject(new Error('web ws timeout')), 5000)
+  })
+  webWs.onmessage = ev => {
+    try {
+      webInbound.push(JSON.parse(String(ev.data)))
+    } catch {}
+  }
+  webWs.send(JSON.stringify({ t: 'hello', clientId: 'phone-1' }))
+  await waitFor(() => webInbound.some(f => f.t === 'im' && String(f.text).includes('已连接')))
+
+  // Token-gated: no pairing required — the page client drives directly.
+  webWs.send(JSON.stringify({ t: 'msg', text: '网页端发来的任务' }))
+  await waitFor(() => inbound.some(f => f.t === 'prompt' && f.text === '网页端发来的任务'))
+  check('web prompt routed without pairing', true)
+
+  // Dual-channel broadcast: turn results reach BOTH Telegram and the page.
+  ws.send(JSON.stringify({ t: 'turn', aborted: false, text: '双频道广播', durationMs: 100 }))
+  await waitFor(() => webInbound.some(f => f.t === 'im' && String(f.text).includes('双频道广播')))
+  check('turn broadcast reaches web page too', true)
+
+  // Permission options render as page buttons; a button click answers.
+  ws.send(
+    JSON.stringify({ t: 'perm_req', id: 'wp1', tool: 'Bash', title: 'rm tests', detail: 'rm -rf test' }),
+  )
+  await waitFor(() => webInbound.some(f => f.t === 'im' && Array.isArray(f.options) && f.options.length > 0))
+  const optFrame = webInbound.find(f => f.t === 'im' && Array.isArray(f.options))
+  check('permission options pushed to page', optFrame?.options?.some((o: any) => o.data === 'allow'))
+  // 按钮点击在页面侧映射回等价指令文本（/allow）——按协议同源验证
+  webWs.send(JSON.stringify({ t: 'msg', text: '/allow' }))
+  await waitFor(() => inbound.some(f => f.t === 'perm_res' && f.id === 'wp1' && f.behavior === 'allow'))
+  check('web /allow answers pending permission', true)
+
+  // no_session: prompt with no session held + monitor notified, then flushed
+  // to the first late-attaching session (remote wake-up chain).
   ws.close()
+  await new Promise(r => setTimeout(r, 400))
+  const wakeMonitor = new WebSocket(`ws://127.0.0.1:${daemonPort}/?token=${config.token}`)
+  const wakeMonitorInbound: any[] = []
+  await new Promise<void>(resolve => {
+    wakeMonitor.onopen = () => resolve()
+    setTimeout(resolve, 3000)
+  })
+  wakeMonitor.onmessage = ev => {
+    try {
+      wakeMonitorInbound.push(JSON.parse(String(ev.data)))
+    } catch {}
+  }
+  wakeMonitor.send(JSON.stringify({ t: 'hello', sessionId: 'mon3', kind: 'monitor', label: '', cwd: '', pid: 0 }))
+  await new Promise(r => setTimeout(r, 200))
+  webWs.send(JSON.stringify({ t: 'msg', text: '唤起我' }))
+  await waitFor(() => wakeMonitorInbound.some(f => f.t === 'no_session'))
+  check('monitor told no_session for wake-up', wakeMonitorInbound.find(f => f.t === 'no_session')?.text === '唤起我')
+  await waitFor(() => webInbound.some(f => f.t === 'im' && String(f.text).includes('没有已接入的会话')))
+  check('no-session reply explains wake-up', true)
+
+  const ws2 = new WebSocket(`ws://127.0.0.1:${daemonPort}/?token=${config.token}`)
+  const inbound2: any[] = []
+  await new Promise<void>(resolve => {
+    ws2.onopen = () => resolve()
+    setTimeout(resolve, 3000)
+  })
+  ws2.onmessage = ev => {
+    try {
+      inbound2.push(JSON.parse(String(ev.data)))
+    } catch {}
+  }
+  ws2.send(JSON.stringify({ t: 'hello', sessionId: 's2', kind: 'headless', label: 'woken', cwd: sandbox, pid: process.pid }))
+  await waitFor(() => inbound2.some(f => f.t === 'prompt' && f.text === '唤起我'))
+  check('held prompt flushed to late session', true)
+  await waitFor(() => webInbound.some(f => f.t === 'im' && String(f.text).includes('会话已接入')))
+  check('web told the held prompt is being handled', true)
+
+  // Monitor status frame carries the web channel URL (QR payload source).
+  const statusFrame = wakeMonitorInbound.find(f => f.t === 'status')
+  check(
+    'status frame carries webUrl',
+    typeof statusFrame?.webUrl === 'string' && statusFrame.webUrl.startsWith('http://') && statusFrame.webUrl.includes('#t='),
+    JSON.stringify(statusFrame?.webUrl),
+  )
+  wakeMonitor.close()
+  webWs.close()
+  ws2.close()
 } finally {
   daemon.kill()
   mockApi.stop(true)

@@ -246,7 +246,8 @@ export function safeJsonPreview(input: Record<string, unknown>, max = 400): stri
   }
 }
 
-/** Directory basename used as the session label shown in IM /status. */
+/** Directory basename used as the session label shown in IM /status.
+ * 双分隔符：Windows 的 process.cwd() 是反斜杠路径，只按 / 切会返回全路径。 */
 export function lastPathSegment(path: string): string {
-  return path.split(/[\/]/).pop() || 'doge'
+  return path.split(/[\\/]/).pop() || 'doge'
 }
