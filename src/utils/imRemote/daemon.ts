@@ -1,4 +1,5 @@
 import { appendFile, writeFile } from 'fs/promises'
+import { appendFileSync } from 'fs'
 import { join } from 'path'
 import { unlinkSync } from 'node:fs'
 import { getClaudeConfigHomeDir } from '../envUtils.js'
@@ -82,15 +83,27 @@ async function logLine(line: string): Promise<void> {
   await appendFile(daemonLogFile(), stamped + '\n').catch(() => {})
 }
 
+/** Crash-path variant — the process exits right after this call. */
+function logLineSync(line: string): void {
+  const stamped = `[${new Date().toISOString()}] ${line}`
+  try {
+    process.stdout.write(stamped + '\n')
+    appendFileSync(daemonLogFile(), stamped + '\n')
+  } catch {}
+}
+
+/** 失败硬退出：CLI 引导期驻留的 watcher/interval 会让只设 exitCode 的进程
+ * 永生（外部看就是「spawn 成功但全静默」的假挂起）。模块级——daemon 类
+ * 的 run() catch 也用它，放函数体内会 ReferenceError（曾令适配器连接失败
+ * 的退出路径二次抛错）。 */
+const fail = async (code: number, msg: string): Promise<number> => {
+  await logLine(msg)
+  setTimeout(() => process.exit(code), 100).unref?.()
+  return code
+}
+
 /** Entry point behind the `doge im` subcommand. Resolves the exit code. */
 export async function runImRemoteDaemon(): Promise<number> {
-  // 失败必须硬退出：CLI 引导期驻留的 watcher/interval 会让只设 exitCode 的
-  // 进程永生（外部看就是「spawn 成功但全静默」的假挂起）
-  const fail = async (code: number, msg: string): Promise<number> => {
-    await logLine(msg)
-    setTimeout(() => process.exit(code), 100).unref?.()
-    return code
-  }
   await logLine(`daemon entry pid=${process.pid} argvTail=${process.argv.slice(-3).join(' ')}`)
   const config = await loadImRemoteConfig()
   if (!config) {
@@ -106,6 +119,17 @@ export async function runImRemoteDaemon(): Promise<number> {
     // An empty token would pass the "?token=" equality check — auth by blank.
     return fail(1, '配置缺少 localhost 鉴权 token，退出')
   }
+  // 崩溃可见性：任何未接住的异常必须先落盘再死/继续——0.2.87 现场里
+  // daemon 被一个飞书发送失败的 rejection 静默击杀，之后所有消息石沉大海。
+  process.on('unhandledRejection', reason => {
+    void logLine(`未处理的异步 rejection（已忽略）：${String(reason)}`)
+  })
+  process.on('uncaughtException', err => {
+    logLineSync(
+      `未捕获异常，守护进程退出：${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    )
+    setTimeout(() => process.exit(1), 100).unref?.()
+  })
   return new ImRemoteDaemon(config).run()
 }
 
@@ -119,18 +143,24 @@ class ImRemoteDaemon {
   private server: ReturnType<typeof Bun.serve> | null = null
   private startedAt = new Date().toISOString()
   private shutdownResolve: (() => void) | null = null
+  private unpairedWarnAt = new Map<string, number>()
 
   constructor(config: ImRemoteConfig) {
     this.config = config
     this.adapter =
       config.platform === 'feishu' && config.feishu
-        ? new FeishuAdapter(config.feishu)
+        ? new FeishuAdapter(config.feishu, line => void logLine(`[feishu] ${line}`))
         : new TelegramAdapter(config.telegram!)
   }
 
   async run(): Promise<number> {
     try {
-      await this.adapter.start({ onMessage: msg => void this.onImMessage(msg) })
+      await this.adapter.start({
+        onMessage: msg =>
+          void this.onImMessage(msg).catch(err =>
+            logLine(`IM 消息处理异常（已忽略）：${String(err)}`),
+          ),
+      })
     } catch (err) {
       return fail(1, `IM 平台连接失败：${String(err)}`)
     }
@@ -401,6 +431,21 @@ class ImRemoteDaemon {
       })
   }
 
+  /**
+   * Re-read the keys the APP may have written since startup (pair code,
+   * allowed users, knobs). The daemon loads config once at boot — without
+   * this, a pair code generated in the settings page after the daemon
+   * started is invisible and every /pair fails as "invalid".
+   */
+  private async refreshAuthState(): Promise<void> {
+    const disk = await loadImRemoteConfig()
+    if (!disk) return
+    this.config.pair = disk.pair
+    this.config.allowedUsers = disk.allowedUsers
+    this.config.summaryEvery = disk.summaryEvery
+    this.config.autoMode = disk.autoMode
+  }
+
   private async onImMessage(msg: ImInboundMessage): Promise<void> {
     // Chat binding happens ONLY for allowed users (below) — letting a
     // stranger's first message lock the outbound chat would redirect all
@@ -410,24 +455,33 @@ class ImRemoteDaemon {
         await this.adapter.answerCallback(msg.callbackId, '已收到').catch(() => {})
       }
     }
+    await this.refreshAuthState()
 
     if (!isUserAllowed(msg.userId, this.config.allowedUsers)) {
       const cmd = parseImCommand(msg.text)
       if (cmd?.kind === 'pair') {
         if (isPairCodeValid(this.config, cmd.code, Date.now())) {
+          await logLine(`IM 配对成功：user=${msg.userId}`)
           this.config.allowedUsers = [...this.config.allowedUsers, msg.userId]
           this.config.pair = undefined
           await this.persistDaemonKeys({ pair: undefined, addAllowedUser: msg.userId })
           await this.adapter.sendText('🔗 配对成功！现在可以直接发消息控制会话。发送 /help 查看指令。')
           this.broadcastStatus()
         } else {
+          await logLine('IM 配对失败：配对码无效或已过期')
           await this.adapter.sendText('❌ 配对码无效或已过期（60 分钟有效），请在设置页重新生成。')
         }
         return
       }
-      await this.adapter.sendText(
-        '⚠️ 本账号未配对。请在桌面端「设置 → 远程控制」生成配对码后发送 /pair <配对码>。',
-      )
+      // Throttle the warning per user — a chatty group must not turn the
+      // bot into an unpaired-warning spammer.
+      const last = this.unpairedWarnAt.get(msg.userId) ?? 0
+      if (Date.now() - last > 10 * 60_000) {
+        this.unpairedWarnAt.set(msg.userId, Date.now())
+        await this.adapter.sendText(
+          '⚠️ 本账号未配对。请在桌面端「设置 → 远程控制」生成配对码后发送 /pair <配对码>。',
+        )
+      }
       return
     }
 

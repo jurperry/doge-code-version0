@@ -311,6 +311,14 @@
 2. 解决：纯叶模块 shellWorkspaceMarker 在 DOGE_APP_WORKSPACE_MARKER=1 时向 stderr 写私有 OSC 帧，含 PID、cwd、session ID（UTF-8 JSON/base64），闭管道不阻塞状态更新；用 node:fs writeSync 直写 fd 绕过 Ink 对 stream.write 的接管（真实 /clear 黑盒发现旧写法被吞）。setCwdState/regenerateSessionId/switchSession 三入口通知，普通 CLI 不输出。headless end_session 的 app_replace 原因只保留树，其余退出仍沿用 finalizeHeadlessWorktree；壳解析过滤子进程、避免跨管道 init 乱序，并在恢复确认前保留请求 ID。配套 App 0.2.84 重编内置 CLI，0.2.86 沿用该二进制；用户已于 2026-09-30 确认提交、合并 main 并删除已合并功能分支。
 3. 位置：src/utils/shellWorkspaceMarker.ts（纯叶）、src/bootstrap/state.ts、src/cli/print.ts；worktree + shellWorkspaceMarker.test.ts 19/19（47 断言）、bun run version 通过；App tools/check-worktree.mjs 与安装版 verify-worktree.mjs 32/32 真实 Git+CLI 集成，含 hooks 禁用、TUI Enter/Exit 与 /clear、headless 恢复/替换；会话恢复 29/29。所有临时测试数据清理，CLI 原有 .zcode/ 两份计划未修改、不纳入本轮。
 
+## 十二、2026-10-01 飞书长连接修复批次（随 app 0.2.90–0.2.91，CLI 2.1.265→2.1.266）
+
+### 54. 飞书实机三连环静默：配对码不可见 + 异常击杀进程 + 长连接缺失
+1. 问题：飞书实机（0.2.89 现场）三条叠加——① App 在 daemon 启动后生成配对码写盘，daemon 只认启动时的内存配置，`/pair` 恒判无效（日志铁证：23:55:54 启动「配对码=未生成」，c8vuza 直到 00:06:30 重启才被读到）；② `onMessage: msg => void this.onImMessage(msg)` 无 catch，任何一次 IM 发送失败（限流/网络抖动）的 rejection 直接击杀 Bun 进程且零日志——手机端「首条未配对警告后再无任何回应」的根因；③ 适配器走历史消息轮询、从未建立飞书官方长连接，开发者平台选「长连接模式」后控制台恒显「连接失败」。
+2. 解决：① daemon 每条入站消息前 refreshAuthState 重读磁盘 pair/allowedUsers/summaryEvery/autoMode；② onMessage 链路 catch 落日志 + 全局 unhandledRejection 落日志不退出、uncaughtException 落日志后再硬退出，未配对警告按用户 10 分钟节流防群聊刷屏；③ 飞书适配器接入官方长连接协议（POST /callback/ws/endpoint {AppID,AppSecret} 换连接 URL → pbbp2 protobuf 帧 WS：按 ClientConfig.PingInterval 发 ping 控制帧、pong 载荷刷新重连参数、事件帧按 message_id/sum/seq 重组后回 ACK 帧），历史轮询降级为保底、双路共享 message_id 去重、发送目标回退最近入站会话；协商 514/403/连接数超限判不可重试并注明「回退轮询」，appId 格式守卫对齐官方 cli_+16hex。**手写 pbbp2 编解码器的 `skip()` 存在 `this.pos += this.length()` 求值顺序 bug（+= 先读左值，长度前缀自己消费的字节被吞，每个未知字段恒差 1 字节）**——官方 d.ts 只声明到 field 9 而真实服务器发 10/11/12/14/20/21/22 扩展字段，mock 帧无未知字段所以探针全绿、实机必炸；靠实连抓包帧逐字段步进定位，修复后以真实帧固化回归夹具。
+2b. 补修（同轮，2.1.266）：`fail` 助手原定义在 runImRemoteDaemon 函数体内而 ImRemoteDaemon.run() 的 catch 也引用——适配器连接失败的退出路径二次抛 ReferenceError（旧版变僵尸进程，unhandledRejection 硬化令其显形），已提为模块级；App 侧守护进程拉起改经 wscript 隐藏启动器（GUI 子系统零控制台握手，vbs 随包分发），cmd start /b 仅兜底。
+3. 位置：src/utils/imRemote/adapters/feishuProto.ts（手写编解码，官方 golden 向量 + 真实抓包夹具双钉）、feishuLongconn.ts（长连接通道）、feishu.ts（双路接收/去重/发送兜底）、daemon.ts（refreshAuthState/崩溃硬化/节流/模块级 fail）；测试 test/feishu-ws-probe.ts（23 检查：golden 对拍、协商→ping/pong→事件→ACK→分片→双路去重→@占位符剥离→断线重连→不可重试降级→停机 + 真实帧夹具）、test/feishu-real-dump.ts（实连诊断工具）；回归 e2e-im-remote 18/18、im-retry-probe 通过；实机验证：真实凭据长连接 200-250ms 建立、25s 零帧错误（2.1.265 与 2.1.266 两轮）、配对/回复链路 mock 全绿。
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。
