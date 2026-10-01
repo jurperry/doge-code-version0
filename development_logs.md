@@ -255,6 +255,28 @@
 2. 解决：三处调用点改为等待完成（`await Promise.all(...map)` 或直接 `await`），快照落盘后 query 循环/初始消息派发才开始；makeSnapshot 签名不动。mtime 捷径核查：`compareStatsAndContent` 的 size 短路（`size` 不等即判已变、进入新建备份）自初始提交起就排在 mtime 捷径之前，无需新增，仅以单测钉住。补聚焦单测钉「await 返回即备份已落盘」契约 + size 短路回归。
 3. 位置：`src/QueryEngine.ts`（headless/SDK）、`src/utils/handlePromptSubmit.ts`（TUI）、`src/screens/REPL.tsx`（初始消息 processInitialMessage）三处调用点；测试 `src/utils/fileHistory.test.ts`（2 项）
 
+### 52. IM 远程控制审查修复批（随 app 0.2.88/0.2.89，CLI 2.1.263→2.1.264）
+1. 问题：子代理审查揪出 9 项 P1——适配器 stop() 置空 abort 令 `!abort?.signal.aborted` 恒真轮询复活（macOS 退出泄漏进程）；Telegram observeChatId 在 allow 校验前，陌生人首条消息即可锁定出站 chat 劫持全部回复；daemon 内存副本整份回写覆盖设置页刚改的凭据；会话断开 pending 不清致 IM 假确认；十余处 `void adapter.sendText` 无 catch 成 unhandled rejection；空 token 过 `?token=` 等值校验；Telegram 启动积压 update 重放进路由；client attach 的 attaching 清空 finally 挂内层 try，「配置不存在」早退不清空——重试与后续 attach 全拿旧已决 false promise（会话永不接入的真根因）。
+2. 解决：适配器加 stopped 布尔（stop 不再置空 abort）＋启动 getMe 后丢弃积压批；observeChatId 移入 allow 校验之后；persistDaemonKeys 只写 pair/allowedUsers 两键（'pair' in patch 判定，undefined=清除）；handleSocketClose 清该会话 pending 并提示；safeSend/safeOptions 统一吞错；token<16 拒绝启动；attach finally 提到全 body；重试定时器 unref（防钉死一次性 `doge -p`）＋未配置机器探测上限 20 次；IM fetch 全部 10s 硬超时（AbortSignal.any/??）；runImRemoteDaemon 失败路径 process.exit 硬退（exitCode 穿不透引导期驻留任务，形成「spawn 成功全静默」假挂起）；daemon 生命周期日志落 im-remote-daemon.log（stdio ignore 下管道日志不可靠）。
+3. 位置：`src/utils/imRemote/adapters/{telegram,feishu}.ts`、`src/utils/imRemote/{client,daemon,types}.ts`；测试 test/e2e-im-remote.ts 18 项 + src/utils/imRemote/*.test.ts 24 项全绿。
+
+## 十一、2026-09-30 IM 远程控制批次（doge im）
+
+### 49. 壳/独立双环境 spawn 守护进程缺 git-bash env 秒退（stdio ignore 全静默）
+1. 问题：`doge im` 守护进程由 Electron 壳 spawn 时直接退 1——CLI bootstrap 在 Windows 要求 git-bash（PTY/headless 两条路靠壳注入 `CLAUDE_CODE_GIT_BASH_PATH`），新 spawn 路径只传了 `...process.env`；且 stdio ignore 时错误文案全被吞，表现为「spawn 成功但无状态文件、无退出日志」的假挂起。
+2. 解决：守护进程 spawn env 必须并 `cliBaseEnv()`（壳侧 src/main/imRemoteManager.ts，与 PTY/headless 同源）；子进程 stdio 用管道并把 stdout/stderr 逐行转日志（`[im-remote] daemon:`），排障不再靠猜。
+3. 位置：doge-code-app `src/main/imRemoteManager.ts`（startImRemoteDaemon）。
+
+### 50. 会话客户端 attaching 承诺不清空——重试与后续 attach 全拿旧已决 promise
+1. 问题：`attach()` 的 `finally { this.attaching = null }` 挂在 connect 段的内层 try 上，「配置不存在/未启用」早退路径不经过它；首启时远程未配置的会话（绝大多数）attach 一次后 attaching 永远非空，8s 重试与一切后续 attach 都 `return this.attaching` 拿回旧 false——会话永不接入，且无任何报错。
+2. 解决：try/finally 提到整个异步体外层（所有出口都清 attaching）；重试定时器 `unref()`（否则一次性 `doge -p` 进程被探活定时器钉住不退出）；配置缺失也排程低频重试（用户后开远程时已开会话能接上）。回归钉在 test/im-retry-probe.ts（无配置→补配置+起 daemon→应最终 isConnected）。
+3. 位置：`src/utils/imRemote/client.ts`（attach/scheduleRetry/destroy）。
+
+### 51. TUI 会话挂载点在 REPL——首启三连弹（信任/API key/登录）会令远程接入静默失效
+1. 问题：黑盒里 boot TUI 永不接入；排查发现 attach effect 在 REPL.tsx，而 TUI 首启可能停在项目信任对话、custom API key 批准（`customApiKeyResponses.approved`，存 key 末 20 字符）、未登录引导——REPL 未挂载 effect 不运行，且进程被「No, exit」杀掉后 xterm 只剩分隔线，极易误判为客户端 bug。
+2. 解决：种子侧修（黑盒沙箱需 onboarding+信任+approved 三件套，且 boot cwd 取自会话列表首个项目——须种会话 jsonl 而非只钉 lastCwd）；产品侧无改（模态属预期引导）。诊断通道=env `DOGE_IM_REMOTE_DEBUG=1` 打开 client 的 ws/attach 诊断行。
+3. 位置：doge-code-app `tools/verify-im-remote.mjs`（setupSandbox）；`src/utils/imRemote/client.ts`（env 门控诊断）。
+
 ## 十、2026-09-29 git worktree 功能修复批次
 
 ### 48. 退出对话框 fail-open 静默强删用户工作（数据丢失风险）
@@ -288,6 +310,31 @@
 1. 问题：App 不能从 TUI 可靠识别 Enter/ExitWorktree 与 /clear 后的 cwd/session ID，hooks 被关闭时钩子通知无效；headless 替换会话的旧进程原生清理会删除新进程继续使用的干净工作树。
 2. 解决：纯叶模块 shellWorkspaceMarker 在 DOGE_APP_WORKSPACE_MARKER=1 时向 stderr 写私有 OSC 帧，含 PID、cwd、session ID（UTF-8 JSON/base64），闭管道不阻塞状态更新；用 node:fs writeSync 直写 fd 绕过 Ink 对 stream.write 的接管（真实 /clear 黑盒发现旧写法被吞）。setCwdState/regenerateSessionId/switchSession 三入口通知，普通 CLI 不输出。headless end_session 的 app_replace 原因只保留树，其余退出仍沿用 finalizeHeadlessWorktree；壳解析过滤子进程、避免跨管道 init 乱序，并在恢复确认前保留请求 ID。配套 App 0.2.84 重编内置 CLI，0.2.86 沿用该二进制；用户已于 2026-09-30 确认提交、合并 main 并删除已合并功能分支。
 3. 位置：src/utils/shellWorkspaceMarker.ts（纯叶）、src/bootstrap/state.ts、src/cli/print.ts；worktree + shellWorkspaceMarker.test.ts 19/19（47 断言）、bun run version 通过；App tools/check-worktree.mjs 与安装版 verify-worktree.mjs 32/32 真实 Git+CLI 集成，含 hooks 禁用、TUI Enter/Exit 与 /clear、headless 恢复/替换；会话恢复 29/29。所有临时测试数据清理，CLI 原有 .zcode/ 两份计划未修改、不纳入本轮。
+
+## 十二、2026-10-01 飞书长连接修复批次（随 app 0.2.90–0.2.91，CLI 2.1.265→2.1.266）
+
+### 54. 飞书实机三连环静默：配对码不可见 + 异常击杀进程 + 长连接缺失
+1. 问题：飞书实机（0.2.89 现场）三条叠加——① App 在 daemon 启动后生成配对码写盘，daemon 只认启动时的内存配置，`/pair` 恒判无效（日志铁证：23:55:54 启动「配对码=未生成」，c8vuza 直到 00:06:30 重启才被读到）；② `onMessage: msg => void this.onImMessage(msg)` 无 catch，任何一次 IM 发送失败（限流/网络抖动）的 rejection 直接击杀 Bun 进程且零日志——手机端「首条未配对警告后再无任何回应」的根因；③ 适配器走历史消息轮询、从未建立飞书官方长连接，开发者平台选「长连接模式」后控制台恒显「连接失败」。
+2. 解决：① daemon 每条入站消息前 refreshAuthState 重读磁盘 pair/allowedUsers/summaryEvery/autoMode；② onMessage 链路 catch 落日志 + 全局 unhandledRejection 落日志不退出、uncaughtException 落日志后再硬退出，未配对警告按用户 10 分钟节流防群聊刷屏；③ 飞书适配器接入官方长连接协议（POST /callback/ws/endpoint {AppID,AppSecret} 换连接 URL → pbbp2 protobuf 帧 WS：按 ClientConfig.PingInterval 发 ping 控制帧、pong 载荷刷新重连参数、事件帧按 message_id/sum/seq 重组后回 ACK 帧），历史轮询降级为保底、双路共享 message_id 去重、发送目标回退最近入站会话；协商 514/403/连接数超限判不可重试并注明「回退轮询」，appId 格式守卫对齐官方 cli_+16hex。**手写 pbbp2 编解码器的 `skip()` 存在 `this.pos += this.length()` 求值顺序 bug（+= 先读左值，长度前缀自己消费的字节被吞，每个未知字段恒差 1 字节）**——官方 d.ts 只声明到 field 9 而真实服务器发 10/11/12/14/20/21/22 扩展字段，mock 帧无未知字段所以探针全绿、实机必炸；靠实连抓包帧逐字段步进定位，修复后以真实帧固化回归夹具。
+2b. 补修（同轮，2.1.266）：`fail` 助手原定义在 runImRemoteDaemon 函数体内而 ImRemoteDaemon.run() 的 catch 也引用——适配器连接失败的退出路径二次抛 ReferenceError（旧版变僵尸进程，unhandledRejection 硬化令其显形），已提为模块级；App 侧守护进程拉起改经 wscript 隐藏启动器（GUI 子系统零控制台握手，vbs 随包分发），cmd start /b 仅兜底。
+3. 位置：src/utils/imRemote/adapters/feishuProto.ts（手写编解码，官方 golden 向量 + 真实抓包夹具双钉）、feishuLongconn.ts（长连接通道）、feishu.ts（双路接收/去重/发送兜底）、daemon.ts（refreshAuthState/崩溃硬化/节流/模块级 fail）；测试 test/feishu-ws-probe.ts（23 检查：golden 对拍、协商→ping/pong→事件→ACK→分片→双路去重→@占位符剥离→断线重连→不可重试降级→停机 + 真实帧夹具）、test/feishu-real-dump.ts（实连诊断工具）；回归 e2e-im-remote 18/18、im-retry-probe 通过；实机验证：真实凭据长连接 200-250ms 建立、25s 零帧错误（2.1.265 与 2.1.266 两轮）、配对/回复链路 mock 全绿。
+
+## 十三、2026-10-01 远程控制二轮（随 app 0.2.92，CLI 2.1.266→2.1.267）
+
+### 55. Auto 死开关 + 远程消息桌面不可见 + 多频道架构（扫码网页/企业微信/远程唤起）
+1. 问题：app 0.2.91 实测五类——① 接入即 Auto 的切换被 `toolPermissionContext.isBypassPermissionsModeAvailable` 门拦死：该旗标只有以 bypass/危险旗标启动的会话才为 true（permissionSetup L939 按 launch 形态计算），普通会话恒 false → 切换死代码，桌面照弹权限且早期请求不推远程；② headless 远程 prompt 走内部 enqueue，QueryEngine 只对本地命令 stdout 发 user 帧——壳的 ChatPane 无从渲染远程消息气泡；③ 无会话时远程消息只得到一句拒绝，无唤起；④ daemon 单适配器（this.adapter 唯一）无法承载新频道；⑤ 微信/二维码完全缺失。
+2. 解决：① attach 切换与每条远程 prompt 到达时都按 `!isBypassPermissionsModeDisabled()` 断言 bypass（对齐 print.ts handleSetPermissionMode 的 fork 语义——控制请求路径早已弃用该可用性门，两处语义本来矛盾）；② print.ts onPrompt 补发同 uuid 的 user 帧并带 `dogeRemote: true` 标记（壳的直播路径对无标记字符串 user 帧刻意不回显——本地输入由壳自 append；带标记帧按真实用户气泡渲染，与历史恢复 foldAgentConversation 同形）；③ daemon 重构多频道：channels[]（custom bot + web）各自启停、单频道失败仅跳过、广播出站 + 来源路由应答、新会话接入即广播通知（含 Auto 说明）；④ 新增扫码网页频道（im-remote-web.json 独立文件：enabled/port/token；0.0.0.0 HTTP+WS 下发内嵌聊天页 webPage.ts——纯字符串无外部资源、页面 30s 心跳对冲 idleTimeout、按钮点击映射回 /allow 等价指令；QR=`http://<LAN-IP>:<port>/#t=<token>`，多网卡给备选列表；令牌即门禁无配对流程）；⑤ 新增企业微信智能机器人频道（官方长连接 JSON over WSS wss://openws.work.weixin.qq.com，帧对照 @wecom/aibot-node-sdk 源码：aibot_subscribe{bot_id,secret}→errcode=0、cmd:'ping' 30s 心跳连续 2 次无应答判死、aibot_msg_callback 收信（msgid 去重/chattype single 时 chatid=userid）、aibot_respond_msg 透传回调 req_id（24h 窗口）否则 aibot_send_msg 主动推送、disconnected_event=被顶替不重连、req_id=`<cmd>_<ts>_<rand>`；30 条/分钟限频做 120ms 轻节流）；⑥ 无会话时 daemon 暂存 prompt（HELD_PROMPT_TTL 90s）并广播 no_session 监控帧（壳据此自动新建对话标签），新会话 hello 即 flush 投递；⑦ 会话客户端 attach 门改双配置：任一频道 enabled 且有 token 即探测（web-only 机器无 im-remote.json 时 localhost WS 用 web token + 默认口，getConfig 合成 autoMode 默认开的空配置）。
+3. 位置：src/utils/imRemote/daemon.ts（多频道重构/heldPrompt/接入通知）、adapters/webChat.ts + webPage.ts（新）、adapters/wecom.ts（新）、types.ts（wecom 平台/web 配置/webUrl·no_session 帧）、config.ts（imRemoteWebConfig 全家 + wecom 归一，端口清洗带各自 fallback 4763/4764）、client.ts（双配置门/endpoint 参数化）、print.ts、REPL.tsx、main.tsx（im 描述）；测试 config.test.ts（web 配置读写分离/wecom 就绪门 +9 检查）、test/e2e-im-remote.ts（双频道并存：网页令牌门/免配对直驱/双频道广播/按钮应答/no_session 唤醒 flush/状态帧 webUrl，28 断言全绿）。已知边界：wecom 适配器协议对照官方 SDK 实现但未经真实企业微信凭据实测（个人微信无合规本地方案——设置页引导用扫码频道覆盖）。
+
+### 56. 扫码打不开双根因：QR 主地址被虚拟网卡抢占（0.2.93）
+1. 问题：用户实测「微信/飞书扫码都打不开页面」，而 app 侧 E2E 全绿（netstat 证明 daemon 正常监听 0.0.0.0:4764）。根因在 webUrlCandidates：os.networkInterfaces() 原序无过滤无排序，多网卡机器上 VMware×2/vgate0/六块 169.254 链路本地地址把物理网卡挤出 QR 主位，二维码常是打不开的虚拟地址（另一根因=Windows 防火墙对 wscript 隐藏拉起的 daemon 自动生成入站 Block 规则，loopback 流量不过防火墙故工装恒绿——该侧修复在 app 仓 imRemoteManager）。本机真值：VMware 192.168.219.1/198.1、vgate0 172.30.250.122、169.254×6 抢位，真实「以太网 192.168.1.169」排不上第一。
+2. 解决：webChat.ts 导出纯函数 `nicPriority(name, address)`——虚拟网卡名（vEthernet/VMware/VirtualBox/Loopback/ZeroTier/Tailscale/Docker/WSL/vgate/蓝牙/本地连接*）与 127/8、169.254/16 一律返回 null 排除；其余按 192.168=0 → 10.=1 → 172.16-31=2 → 100.64-127（CGNAT）=3 → 其它=4 排序，webUrlCandidates 稳定排序后主地址即物理网卡、其余进备选列表（daemon 状态帧 webUrls 数组不变）。
+3. 位置：src/utils/imRemote/adapters/webChat.ts（nicPriority + webUrlCandidates 重写）、src/utils/imRemote/webChat.test.ts（新：物理网卡排序/虚拟网卡排除/链路本地排除/CGNAT 垫底 4 组断言）。e2e-im-remote 的 webUrl 断言宽松（http:// + #t=）不受排序影响。中文网卡名（蓝牙网络连接、本地连接* n）进正则——Wi-Fi Direct 与蓝牙 PAN 不是手机回传路径。
+
+### 57. 三路审查修复轮：daemon 双拉/僵尸/wecom 健壮性/heldPrompt 回音（0.2.94）
+1. 问题：app 侧发起三路子代理审查（主进程/渲染层/CLI 仓），CLI 侧实锤：① `lastPathSegment` 只按 `/` 切分——Windows 反斜杠 cwd 下 TUI 会话标签是全路径，print.ts:2928 另有一份正确的双分隔符实现（共享份坏、私有份对，纪律 7 反例）；② daemon 的 localhost `Bun.serve`(4763) 无 try/catch——本机实测 Bun 1.3.11 端口冲突**同步抛**，`run()` 抛出后落进 unhandledRejection 处理器被「已忽略」，适配器轮询钉住事件循环、状态文件停更（0.2.87「spawn 成功全静默」僵尸形态复活）；③ wecom 适配器四洞：subscribe 无 ack 超时（服务器收下 WSS 后挂起则永久吊着——心跳只在认证成功后启动）、`disconnected_event` 终态不回传 daemon（ChannelRuntime.running 谎报、/status 与状态文件照显在跑、出站静默黑洞）、并发 deliver 读同一 lastSendAt 突破 120ms 限频、网络级 onclose 退避恒 2s（attempt 只认 authFailures）；④ heldPrompt 单槽静默覆盖（第二条 prompt 顶掉第一条且第一条用户已被告知「接入后自动处理」）、TTL 过期/投递失败零回音；⑤ reply/broadcast 出站失败走 logForDebugging（非 --debug 即 no-op），且 TelegramAdapter 是唯一无 log 回调的适配器；⑥ daemon 日志与状态文件落完整 `#t=<token>` URL（报障分享泄漏钥匙）；⑦ Auto 强切判定在 REPL/print 三处两形态复制；⑧ 远程 user 帧 `as SDKUserMessageReplay` 掩盖缺 isReplay、dogeRemote 未在 schema 声明；⑨ 虚拟网卡正则漏英文 Windows 名（Bluetooth Network Connection / Local Area Connection* / Wi-Fi Direct——蓝牙 PAN 拿到可路由地址会以 192.168 优先级抢 QR 主位）。
+2. 解决：⑴ format.ts 正则改 `[\\/]` + print.ts 改用共享份；⑵ Bun.serve 包 try/catch → `fail(1, 'localhost 端口被占…退出')`（先 stopChannels 收尾适配器）；⑶ ImAdapterHandlers 加可选 `onStopped?(reason)`，daemon 侧 markChannelStopped（置停+IM 广播+状态文件），wecom 的 disconnected_event 调用之；⑷ wecom：`armHandshakeTimeout`（15s，收到 subscribe ack 清除，超时 close 走统一重连）+ 独立 networkFailures 计数（认证成功清零）参与退避 + `sendText` 串行 promise 链（节流不再被并发穿透）+ 出站 ack errcode≠0 落日志——**透传 req_id 无 aibot_ 前缀，不能按前缀识别**（wecom 探针抓出的真 bug：识别条件改为「无 cmd 且非 subscribe/ping 前缀即记」）；⑸ heldPrompt 覆盖/过期/投递失败三路径 reply 回音；⑹ 出站 catch 改 logLine + TelegramAdapter 构造器加 log 回调；⑺ daemon 日志 URL 经 `redactWebUrl`（#t=<redacted>；状态文件与 monitor 帧保留完整——App QR 数据源）；⑻ Auto 判定收敛 `utils/imRemote/autoMode.ts` 纯函数 `remoteAutoTargetMode(autoMode, currentMode, bypassDisabled)` + 单测（注意调用方传 `getConfig()?.autoMode === true`——null 无配置时不动，与旧语义一致）；⑼ 远程帧改 `satisfies SDKUserMessageReplay & { dogeRemote: boolean }` + 补 isReplay:true（壳不消费该键，已核实）；⑽ 正则补英文网卡名；⑪ webPage 删 esc() 死代码 + #log 300 条裁剪；⑫ types platform 收窄、configDirOf 用 dirname、writeStatus 链式串行化、logLine stdout 包 try。**测试**：test/wecom-probe.ts（mock-WSS 9 检查，Bun.serve 的 fetch 必须 `server.upgrade(req)` 否则 WS 握手根本不成立——首版探针 8/9 假红即此）+ webChat.test 补英文网卡与 webUrlCandidates 出货断言（注入网卡表参数）。
+3. 位置：src/utils/imRemote/{format,daemon,types,config,autoMode}.ts、adapters/{wecom,webChat,telegram}.ts、webPage.ts、print.ts、REPL.tsx；autoMode.test.ts（新）、webChat.test.ts、test/wecom-probe.ts（新）。单测 36 全绿 + wecom 探针 9/9 + e2e-im-remote 28 断言全绿 + tsc 干净。与 app 0.2.94（development_log 0.2.94 条）同轮联调。
 
 ## 演进注记（已剔除的失效记录去向）
 

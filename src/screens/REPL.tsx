@@ -122,7 +122,7 @@ import useCanUseTool from '../hooks/useCanUseTool.js';
 import type { ToolPermissionContext, Tool } from '../Tool.js';
 import { applyPermissionUpdate, applyPermissionUpdates, persistPermissionUpdate } from '../utils/permissions/PermissionUpdate.js';
 import { buildPermissionUpdates } from '../components/permissions/ExitPlanModePermissionRequest/ExitPlanModePermissionRequest.js';
-import { stripDangerousPermissionsForAutoMode } from '../utils/permissions/permissionSetup.js';
+import { isBypassPermissionsModeDisabled, stripDangerousPermissionsForAutoMode } from '../utils/permissions/permissionSetup.js';
 import { getScratchpadDir, isScratchpadEnabled } from '../utils/permissions/filesystem.js';
 import { WEB_FETCH_TOOL_NAME } from '../tools/WebFetchTool/prompt.js';
 import { SLEEP_TOOL_NAME } from '../tools/SleepTool/prompt.js';
@@ -168,6 +168,7 @@ import { resolveAgentTools } from '../tools/AgentTool/agentToolUtils.js';
 import { resumeAgentBackground } from '../tools/AgentTool/resumeAgent.js';
 import { useMainLoopModel } from '../hooks/useMainLoopModel.js';
 import { useAppState, useSetAppState, useAppStateStore } from '../state/AppState.js';
+import type { AppState } from '../state/AppStateStore.js';
 import type { ContentBlockParam, ImageBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs';
 import type { ProcessUserInputContext } from '../utils/processUserInput/processUserInput.js';
 import type { PastedContent } from '../utils/config.js';
@@ -289,6 +290,9 @@ import { setClipboard } from '../ink/termio/osc.js';
 import type { ScrollBoxHandle } from '../ink/components/ScrollBox.js';
 import { createAttachmentMessage, getQueuedCommandAttachments } from '../utils/attachments.js';
 import { emitShellTurnMarker } from '../utils/shellTurnMarker.js';
+import { imRemote } from '../utils/imRemote/client.js';
+import { remoteAutoTargetMode } from '../utils/imRemote/autoMode.js';
+import { lastAssistantText, lastPathSegment } from '../utils/imRemote/format.js';
 
 // Stable empty array for hooks that accept MCPServerConnection[] — avoids
 // creating a new [] literal on every render in remote mode, which would
@@ -905,6 +909,59 @@ export function REPL({
   // Ref for the bridge result callback — set after useReplBridge initializes,
   // read in the onQuery finally block to notify mobile clients that a turn ended.
   const sendBridgeResultRef = useRef<() => void>(() => {});
+
+  // IM remote-control: attach this TUI session to the local `doge im`
+  // bridge daemon when the user enabled it. Mirrors the claude.ai bridge
+  // wiring: inbound prompts enqueue like typed input, permission/ask
+  // requests race the local dialog via AppState callbacks, and /stop
+  // aborts through the shared abortControllerRef.
+  useEffect(() => {
+    let cancelled = false;
+    // Remote control defaults to Auto (bypassPermissions) so unattended
+    // turns are never stuck on prompts the remote user cannot see. Decision
+    // rules live in imRemote/autoMode.ts (shared with the headless path) —
+    // bypass unless the settings killswitch explicitly disables it.
+    const enforceRemoteAuto = (prev: AppState): AppState => {
+      const next = remoteAutoTargetMode(
+        imRemote.getConfig()?.autoMode === true,
+        prev.toolPermissionContext.mode,
+        isBypassPermissionsModeDisabled(),
+      );
+      return next
+        ? {
+            ...prev,
+            toolPermissionContext: {
+              ...prev.toolPermissionContext,
+              mode: next,
+            },
+          }
+        : prev;
+    };
+    imRemote.setHandlers({
+      onPrompt: text => {
+        // attach() may land after this session's first turn started —
+        // re-assert Auto on every remote prompt so the turn never stalls.
+        setAppState(enforceRemoteAuto);
+        enqueue({ value: text, mode: 'prompt' });
+      },
+      onInterrupt: () => {
+        abortControllerRef.current?.abort();
+      },
+    });
+    void imRemote.attach('tui', lastPathSegment(process.cwd())).then(ok => {
+      if (!ok || cancelled) return;
+      setAppState(prev =>
+        enforceRemoteAuto({
+          ...prev,
+          imRemotePermissionCallbacks: imRemote.buildPermissionCallbacks(),
+        }),
+      );
+    });
+    return () => {
+      cancelled = true;
+      imRemote.setHandlers({ onPrompt: undefined, onInterrupt: undefined });
+    };
+  }, []);
 
   // Ref for the synchronous restore callback — set after restoreMessageSync is
   // defined, read in the onQuery finally block for auto-restore on interrupt.
@@ -2971,6 +3028,15 @@ export function REPL({
         // this marker to raise a background "task completed" balloon (no-op
         // unless DOGE_APP_TURN_MARKER=1 — see shellTurnMarker.ts).
         emitShellTurnMarker(abortController.signal.aborted);
+
+        // Same consumer class again: the IM remote-control bridge forwards
+        // the turn's final assistant text to the paired IM user (no-op
+        // unless the session attached to `doge im`).
+        imRemote.reportTurn(
+          lastAssistantText(messagesRef.current),
+          abortController.signal.aborted,
+          Date.now() - loadingStartTimeRef.current - totalPausedMsRef.current,
+        );
 
         // Auto-hide tungsten panel content at turn end (ant-only), but keep
         // tungstenActiveSession set so the pill stays in the footer and the user

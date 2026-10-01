@@ -363,6 +363,9 @@ import { initializeGrowthBook } from '../services/analytics/growthbook.js'
 import { errorMessage, toError } from '../utils/errors.js'
 import { sleep } from '../utils/sleep.js'
 import { isExtractModeActive } from '../memdir/paths.js'
+import { imRemote } from '../utils/imRemote/client.js'
+import { remoteAutoTargetMode } from '../utils/imRemote/autoMode.js'
+import { lastAssistantText, lastPathSegment, parseAskPayload, safeJsonPreview } from '../utils/imRemote/format.js'
 
 // Dead code elimination: conditional imports
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -1906,6 +1909,7 @@ function runHeadlessStreaming(
       return
     }
 
+    const runStartedAt = Date.now()
     running = true
     runPhase = undefined
     notifySessionStateChanged('running')
@@ -2500,6 +2504,13 @@ function runHeadlessStreaming(
       runPhase = 'finally_post_flush'
       if (!isShuttingDown()) {
         notifySessionStateChanged('idle')
+        // IM remote-control: forward the turn's final reply to the bridge
+        // daemon (no-op unless attached). Mirrors the TUI's REPL finally.
+        imRemote.reportTurn(
+          lastAssistantText(mutableMessages),
+          abortController?.signal.aborted ?? false,
+          Date.now() - runStartedAt,
+        )
         // Drain so the idle session_state_changed SDK event (plus any
         // terminal task_notification bookends emitted during bg-agent
         // teardown) reach the output stream before we block on the next
@@ -2847,12 +2858,115 @@ function runHeadlessStreaming(
     flow: Promise<void>
   } | null = null
 
+  // IM remote-control: attach this headless session to the local `doge im`
+  // bridge daemon when the user enabled it. Same hooks the claude.ai bridge
+  // uses (see the initReplBridge wiring further down): inbound prompts
+  // enqueue, remote permission responses inject through structuredIO (which
+  // also cancels the SDK consumer's pending card), outgoing can_use_tool
+  // control_requests are mirrored to the daemon, and local wins cancel the
+  // remote prompt. Note: setOnControlRequestSent is a single slot — if the
+  // claude.ai bridge attaches later it takes over the mirroring.
+  const applyRemoteAuto = (prev: AppState): AppState => {
+    const next = remoteAutoTargetMode(
+      imRemote.getConfig()?.autoMode === true,
+      prev.toolPermissionContext.mode,
+      isBypassPermissionsModeDisabled(),
+    )
+    return next
+      ? {
+          ...prev,
+          toolPermissionContext: { ...prev.toolPermissionContext, mode: next },
+        }
+      : prev
+  }
+  imRemote.setHandlers({
+    onPrompt: text => {
+      // Re-assert Auto on every remote prompt — attach() may land after this
+      // session's first turn started. Decision rules: imRemote/autoMode.ts.
+      setAppState(prev => applyRemoteAuto(prev))
+      // Internal enqueues never emit a user frame (QueryEngine only replays
+      // local-command stdout), so the shell's ChatPane showed no bubble for
+      // remote prompts — emit one with the SAME uuid the queued command
+      // carries so transcript, replay and renderer all stay consistent.
+      // `dogeRemote` marks the origin: the shell's live path deliberately
+      // skips echoing locally-typed prompts (it appends its own bubble on
+      // send) — remote ones have no local append and must render as a real
+      // user bubble (history restore already renders them that way).
+      // isReplay 与兄弟帧一致（非本地 stdin 输入的重放语义）；dogeRemote
+      // 是本地超集键，schema 校验方（zod 默认忽略未知键）不受影响。
+      const remotePromptUuid = randomUUID()
+      enqueue({
+        value: text,
+        mode: 'prompt' as const,
+        uuid: remotePromptUuid,
+      })
+      const remoteFrame = {
+        type: 'user' as const,
+        message: { role: 'user' as const, content: text },
+        session_id: getSessionId(),
+        parent_tool_use_id: null,
+        uuid: remotePromptUuid,
+        isReplay: true,
+        dogeRemote: true,
+      } satisfies SDKUserMessageReplay & { dogeRemote: boolean }
+      output.enqueue(remoteFrame)
+      void run()
+    },
+    onInterrupt: () => {
+      abortController?.abort()
+    },
+    onPermissionResponse: (id, res) => {
+      structuredIO.injectControlResponse({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: id,
+          response: {
+            behavior: res.behavior,
+            ...(res.updatedInput ? { updatedInput: res.updatedInput } : {}),
+            ...(res.message ? { message: res.message } : {}),
+          },
+        },
+      } as Parameters<typeof structuredIO.injectControlResponse>[0])
+    },
+  })
+  void imRemote.attach('headless', lastPathSegment(process.cwd())).then(ok => {
+    if (!ok) return
+    structuredIO.setOnControlRequestSent(request => {
+      if (request.request.subtype !== 'can_use_tool') return
+      const req = request.request as {
+        tool_name: string
+        input: Record<string, unknown>
+        title?: string
+        description?: string
+      }
+      const ask =
+        req.tool_name === 'AskUserQuestion' ? (parseAskPayload(req.input) ?? undefined) : undefined
+      imRemote.permissionRequest({
+        id: request.request_id,
+        tool: req.tool_name,
+        title: ask ? ask.question : (req.title ?? req.description ?? req.tool_name),
+        detail: safeJsonPreview(req.input),
+        ask,
+        askInput: ask ? req.input : undefined,
+        onResponse: () => {},
+      })
+    })
+    structuredIO.setOnControlRequestResolved(requestId => {
+      imRemote.permissionCancel(requestId)
+    })
+    // Remote control defaults to Auto (bypassPermissions) so unattended
+    // turns are never stuck on prompts the remote user cannot see. Decision
+    // rules: imRemote/autoMode.ts (shared with the TUI path).
+    setAppState(prev => applyRemoteAuto(prev))
+  })
+
   // This is essentially spawning a parallel async task- we have two
   // running in parallel- one reading from stdin and adding to the
   // queue to be processed and another reading from the queue,
   // processing and returning the result of the generation.
-  // The process is complete when the input stream completes and
-  // the last generation of the queue has complete.
+  // The process is complete when the input stream completes and the
+  // last generation of the queue has complete.
   void (async () => {
     let initialized = false
     logForDiagnosticsNoPII('info', 'cli_message_loop_started')

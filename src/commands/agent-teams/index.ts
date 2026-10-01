@@ -17,6 +17,7 @@
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.js'
 import type { Command } from '../../commands.js'
 import { enableAgentSwarmsForSession } from '../../utils/agentSwarmsEnabled.js'
+import { imRemote } from '../../utils/imRemote/client.js'
 
 function buildAgentTeamsPrompt(requirement: string): string {
   const requirementBlock = requirement
@@ -52,6 +53,8 @@ const agentTeams: Command = {
   source: 'builtin',
   async getPromptForCommand(args): Promise<ContentBlockParam[]> {
     enableAgentSwarmsForSession()
+    // IM remote-control: tell the paired user agent-teams went live.
+    imRemote.agentEvent('teams_on')
     return [{ type: 'text', text: buildAgentTeamsPrompt(args.trim()) }]
   },
 }

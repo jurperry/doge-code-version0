@@ -4,6 +4,7 @@ import type {
   ToolUseBlock,
 } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { CanUseToolFn } from './hooks/useCanUseTool.js'
+import { wrapImRemoteToolCounter } from './utils/imRemote/client.js'
 import { FallbackTriggeredError } from './services/api/withRetry.js'
 import {
   calculateTokenWarningState,
@@ -254,13 +255,19 @@ async function* queryLoop(
     systemPrompt,
     userContext,
     systemContext,
-    canUseTool,
+    canUseTool: rawCanUseTool,
     fallbackModel,
     querySource,
     maxTurns,
     skipCacheWrite,
   } = params
   const deps = params.deps ?? productionDeps()
+
+  // IM remote-control: count every tool call so the bridge daemon can emit
+  // progress summaries (every N calls) to the paired IM user. Wrapping at
+  // this single permission gate covers both the TUI and headless modes.
+  // No-op unless the session attached to `doge im`.
+  const canUseTool = wrapImRemoteToolCounter(rawCanUseTool)
 
   // Mutable cross-iteration state. The loop body destructures this at the top
   // of each iteration so reads stay bare-name (`messages`, `toolUseContext`).

@@ -38,6 +38,8 @@ type InteractivePermissionParams = {
   awaitAutomatedChecksBeforeDialog: boolean | undefined
   bridgeCallbacks?: BridgePermissionCallbacks
   channelCallbacks?: ChannelPermissionCallbacks
+  /** IM remote-control relay (`doge im`); same racer contract as the bridge. */
+  imRemoteCallbacks?: BridgePermissionCallbacks
 }
 
 /**
@@ -65,6 +67,7 @@ function handleInteractivePermission(
     awaitAutomatedChecksBeforeDialog,
     bridgeCallbacks,
     channelCallbacks,
+    imRemoteCallbacks,
   } = params
 
   const { resolve: resolveOnce, isResolved, claim } = createResolveOnce(resolve)
@@ -74,6 +77,7 @@ function handleInteractivePermission(
   // remove the abort listener — not just the timer callback.
   let checkmarkAbortHandler: (() => void) | undefined
   const bridgeRequestId = bridgeCallbacks ? randomUUID() : undefined
+  const imRemoteRequestId = imRemoteCallbacks ? randomUUID() : undefined
   // Hoisted so local/hook/classifier wins can remove the pending channel
   // entry. No "tell remote to dismiss" equivalent — the text sits in your
   // phone, and a stale "yes abc123" after local-resolve falls through
@@ -143,6 +147,9 @@ function handleInteractivePermission(
         })
         bridgeCallbacks.cancelRequest(bridgeRequestId)
       }
+      if (imRemoteCallbacks && imRemoteRequestId) {
+        imRemoteCallbacks.cancelRequest(imRemoteRequestId)
+      }
       channelUnsubscribe?.()
       ctx.logCancelled()
       ctx.logDecision(
@@ -167,6 +174,9 @@ function handleInteractivePermission(
         })
         bridgeCallbacks.cancelRequest(bridgeRequestId)
       }
+      if (imRemoteCallbacks && imRemoteRequestId) {
+        imRemoteCallbacks.cancelRequest(imRemoteRequestId)
+      }
       channelUnsubscribe?.()
 
       resolveOnce(
@@ -189,6 +199,9 @@ function handleInteractivePermission(
           message: feedback ?? 'User denied permission',
         })
         bridgeCallbacks.cancelRequest(bridgeRequestId)
+      }
+      if (imRemoteCallbacks && imRemoteRequestId) {
+        imRemoteCallbacks.cancelRequest(imRemoteRequestId)
       }
       channelUnsubscribe?.()
 
@@ -223,9 +236,12 @@ function handleInteractivePermission(
         if (bridgeCallbacks && bridgeRequestId) {
           bridgeCallbacks.cancelRequest(bridgeRequestId)
         }
+        if (imRemoteCallbacks && imRemoteRequestId) {
+          imRemoteCallbacks.cancelRequest(imRemoteRequestId)
+        }
         channelUnsubscribe?.()
         ctx.removeFromQueue()
-        ctx.logDecision({ decision: 'accept', source: 'config' })
+        ctx.logDecision({ decision: 'accept', source: { type: 'config' } })
         resolveOnce(ctx.buildAllow(freshResult.updatedInput ?? ctx.input))
       }
     },
@@ -262,6 +278,10 @@ function handleInteractivePermission(
         clearClassifierIndicator()
         ctx.removeFromQueue()
         channelUnsubscribe?.()
+        // CCR won — dismiss the pending IM relay prompt too.
+        if (imRemoteCallbacks && imRemoteRequestId) {
+          imRemoteCallbacks.cancelRequest(imRemoteRequestId)
+        }
 
         if (response.behavior === 'allow') {
           if (response.updatedPermissions?.length) {
@@ -295,6 +315,66 @@ function handleInteractivePermission(
     )
 
     signal.addEventListener('abort', unsubscribe, { once: true })
+  }
+
+  // Race 5: IM remote-control relay (`doge im` daemon). The paired IM user
+  // answers over Telegram/Feishu. Allow responses may carry updatedInput —
+  // the client expands AskUserQuestion picks into `answers` — so interactive
+  // tools are fully answerable remotely, unlike the yes/no-only channels.
+  if (imRemoteCallbacks && imRemoteRequestId) {
+    imRemoteCallbacks.sendRequest(
+      imRemoteRequestId,
+      ctx.tool.name,
+      displayInput,
+      ctx.toolUseID,
+      description,
+      result.suggestions,
+      result.blockedPath,
+    )
+
+    const imSignal = ctx.toolUseContext.abortController.signal
+    const imUnsubscribe = imRemoteCallbacks.onResponse(
+      imRemoteRequestId,
+      response => {
+        if (!claim()) return // Another racer already won
+        imSignal.removeEventListener('abort', imUnsubscribe)
+        clearClassifierChecking(ctx.toolUseID)
+        clearClassifierIndicator()
+        ctx.removeFromQueue()
+        channelUnsubscribe?.()
+        if (bridgeCallbacks && bridgeRequestId) {
+          bridgeCallbacks.cancelRequest(bridgeRequestId)
+        }
+
+        if (response.behavior === 'allow') {
+          if (response.updatedPermissions?.length) {
+            void ctx.persistPermissions(response.updatedPermissions)
+          }
+          ctx.logDecision(
+            {
+              decision: 'accept',
+              source: {
+                type: 'user',
+                permanent: !!response.updatedPermissions?.length,
+              },
+            },
+            { permissionPromptStartTimeMs },
+          )
+          resolveOnce(ctx.buildAllow(response.updatedInput ?? displayInput))
+        } else {
+          ctx.logDecision(
+            {
+              decision: 'reject',
+              source: { type: 'user_reject', hasFeedback: !!response.message },
+            },
+            { permissionPromptStartTimeMs },
+          )
+          resolveOnce(ctx.cancelAndAbort(response.message))
+        }
+      },
+    )
+
+    imSignal.addEventListener('abort', imUnsubscribe, { once: true })
   }
 
   // Channel permission relay — races alongside the bridge block above. Send a
@@ -372,6 +452,10 @@ function handleInteractivePermission(
           if (bridgeCallbacks && bridgeRequestId) {
             bridgeCallbacks.cancelRequest(bridgeRequestId)
           }
+          // And the IM remote-control relay.
+          if (imRemoteCallbacks && imRemoteRequestId) {
+            imRemoteCallbacks.cancelRequest(imRemoteRequestId)
+          }
 
           if (response.behavior === 'allow') {
             ctx.logDecision(
@@ -424,6 +508,9 @@ function handleInteractivePermission(
       if (bridgeCallbacks && bridgeRequestId) {
         bridgeCallbacks.cancelRequest(bridgeRequestId)
       }
+      if (imRemoteCallbacks && imRemoteRequestId) {
+        imRemoteCallbacks.cancelRequest(imRemoteRequestId)
+      }
       channelUnsubscribe?.()
       ctx.removeFromQueue()
       resolveOnce(hookDecision)
@@ -455,6 +542,9 @@ function handleInteractivePermission(
           if (!claim()) return
           if (bridgeCallbacks && bridgeRequestId) {
             bridgeCallbacks.cancelRequest(bridgeRequestId)
+          }
+          if (imRemoteCallbacks && imRemoteRequestId) {
+            imRemoteCallbacks.cancelRequest(imRemoteRequestId)
           }
           channelUnsubscribe?.()
           clearClassifierChecking(ctx.toolUseID)
