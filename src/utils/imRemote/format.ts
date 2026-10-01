@@ -1,4 +1,4 @@
-import type { ImRemoteConfig } from './types.js'
+import type { ImPlatform, ImRemoteConfig } from './types.js'
 
 /**
  * Pure helpers shared by the daemon and adapters: IM command parsing,
@@ -25,6 +25,11 @@ export function parseImCommand(text: string): ImCommand | null {
   switch ((head ?? '').toLowerCase()) {
     case 'pair':
       return /^[a-z0-9]{6}$/i.test(arg) ? { kind: 'pair', code: arg.toLowerCase() } : null
+    // Telegram 的 START 按钮走深链 `t.me/<bot>?start=<配对码>`——把带有效
+    // 配对码的 /start 归一成 pair（扫码用户点一下就配对，无需手敲指令）；
+    // 没带码的裸 /start 回 help，指路设置页。
+    case 'start':
+      return /^[a-z0-9]{6}$/i.test(arg) ? { kind: 'pair', code: arg.toLowerCase() } : { kind: 'help' }
     case 'status':
     case '状态':
       return { kind: 'status' }
@@ -60,6 +65,40 @@ export function parseImCommand(text: string): ImCommand | null {
 
 export function isUserAllowed(userId: string, allowedUsers: string[]): boolean {
   return allowedUsers.includes(userId)
+}
+
+/**
+ * Cross-network scan entry (2.1.270): the deep link encoded into the
+ * settings-page QR. All three platforms are outbound connections from the
+ * daemon, so the link works from any network — no LAN required:
+ *  - telegram: `t.me/<bot>?start=<pairCode>` — tapping START auto-sends the
+ *    pairing command (bot username comes from getMe at adapter start);
+ *  - feishu: official applink opens the bot chat directly (pair manually
+ *    with `/pair <code>`);
+ *  - wecom: the user-supplied permanent bot link from the WeCom client.
+ */
+export function buildBotDeepLink(
+  platform: ImPlatform,
+  info: {
+    botUsername?: string | null
+    appId?: string | null
+    botLink?: string | null
+    pairCode?: string | null
+  },
+): string | null {
+  if (platform === 'telegram') {
+    const username = (info.botUsername ?? '').trim().replace(/^@/, '')
+    if (!username) return null
+    const bot = encodeURIComponent(username)
+    const code = (info.pairCode ?? '').trim()
+    return code ? `https://t.me/${bot}?start=${code}` : `https://t.me/${bot}`
+  }
+  if (platform === 'feishu') {
+    const appId = (info.appId ?? '').trim()
+    return appId ? `https://applink.feishu.cn/client/chat/open?appId=${encodeURIComponent(appId)}` : null
+  }
+  const link = (info.botLink ?? '').trim()
+  return /^https?:\/\//i.test(link) ? link : null
 }
 
 export function isPairCodeValid(config: ImRemoteConfig, code: string, now: number): boolean {
@@ -181,6 +220,7 @@ export function lastAssistantText(
 export const IM_HELP_TEXT = [
   'Doge Code 远程控制指令：',
   '/pair <配对码> — 绑定本账号（设置页获取配对码）',
+  '/start <配对码> — 同 /pair（Telegram 扫二维码点 START 时自动发送）',
   '/status — 查看会话与守护进程状态',
   '/stop — 中断当前运行中的回合',
   '/allow /deny — 应答权限请求',

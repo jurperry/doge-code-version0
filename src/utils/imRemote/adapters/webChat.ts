@@ -1,4 +1,4 @@
-import { networkInterfaces, type NetworkInterfaceInfoIPv4 } from 'os'
+import { networkInterfaces, type NetworkInterfaceInfo, type NetworkInterfaceInfoIPv4 } from 'os'
 import type {
   ImAdapter,
   ImAdapterHandlers,
@@ -37,41 +37,50 @@ export class WebChatAdapter implements ImAdapter {
 
   start(handlers: ImAdapterHandlers): Promise<void> {
     this.handlers = handlers
-    // 0.0.0.0：手机要跨设备访问。Windows 首次监听会弹防火墙授权——由
-    // 设置页提示用户允许。EADDRINUSE 由调用方捕获并降级为跳过该频道。
-    this.server = Bun.serve({
-      hostname: '0.0.0.0',
-      port: this.config.port,
-      idleTimeout: 120,
-      fetch: (req, server) => {
-        const url = new URL(req.url)
-        if (url.pathname === '/' || url.pathname === '/index.html') {
-          // 带 token 的请求升级为 WS；纯 GET / 下发聊天页（页面本身无
-          // 敏感性，令牌在 URL hash 里不会发到服务器）。
-          if (
-            url.searchParams.get('token') === this.config.token &&
-            server.upgrade(req, { data: { clientId: 'anon' } })
-          ) {
-            return undefined
+    // '::' 双栈监听（2.1.273）：公网 IPv6 直连的前提——手机流量网普遍
+    // IPv6-native，电脑有全局 v6 地址时跨网络也能直连本页（零配置）。
+    // v4-mapped 兼容 127.0.0.1/局域网 v4 访问；个别环境 '::' 绑定失败回退
+    // 0.0.0.0（仅 v4，IPv6 直连不可用）。EADDRINUSE 由调用方捕获并降级。
+    const serve = (hostname: string) =>
+      Bun.serve({
+        hostname,
+        port: this.config.port,
+        idleTimeout: 120,
+        fetch: (req, server) => {
+          const url = new URL(req.url)
+          if (url.pathname === '/' || url.pathname === '/index.html') {
+            // 带 token 的请求升级为 WS；纯 GET / 下发聊天页（页面本身无
+            // 敏感性，令牌在 URL hash 里不会发到服务器）。
+            if (
+              url.searchParams.get('token') === this.config.token &&
+              server.upgrade(req, { data: { clientId: 'anon' } })
+            ) {
+              return undefined
+            }
+            return new Response(WEB_CHAT_PAGE_HTML, {
+              headers: { 'content-type': 'text/html; charset=utf-8' },
+            })
           }
-          return new Response(WEB_CHAT_PAGE_HTML, {
-            headers: { 'content-type': 'text/html; charset=utf-8' },
-          })
-        }
-        return new Response('not found', { status: 404 })
-      },
-      websocket: {
-        message: (ws, raw) => this.handlePageFrame(ws, String(raw)),
-        open: ws => {
-          this.sockets.add(ws)
-          this.log(`web 频道页面已连接（当前 ${this.sockets.size} 个）`)
+          return new Response('not found', { status: 404 })
         },
-        close: ws => {
-          this.sockets.delete(ws)
+        websocket: {
+          message: (ws, raw) => this.handlePageFrame(ws, String(raw)),
+          open: ws => {
+            this.sockets.add(ws)
+            this.log(`web 频道页面已连接（当前 ${this.sockets.size} 个）`)
+          },
+          close: ws => {
+            this.sockets.delete(ws)
+          },
         },
-      },
-    })
-    this.log(`web 频道已监听 0.0.0.0:${this.config.port}`)
+      })
+    try {
+      this.server = serve('::')
+    } catch {
+      this.server = serve('0.0.0.0')
+      this.log('IPv6 双栈绑定失败，回退 0.0.0.0（仅 IPv4）')
+    }
+    this.log(`web 频道已监听 [::]/0.0.0.0:${this.config.port}（双栈）`)
     return Promise.resolve()
   }
 
@@ -175,4 +184,34 @@ export function webUrlCandidates(
     }
   }
   return ranked.sort((x, y) => x.key - y.key || x.seq - y.seq).map((r) => r.url)
+}
+
+/** IPv6 全局单播地址判定：2xxx::/3xxx::（首个 hextet 高 3 位 = 001）。
+ *  排除 fe80::/10 链路本地、fc00::/7 ULA（Tailscale/内网 v6，公网不可达）、
+ *  ::1 回环——公网直连二维码只放真正全球可路由的地址。 */
+function isGlobalV6(address: string): boolean {
+  const m = /^([0-9a-f]{1,4})/i.exec(address.replace(/^\[|\]$/g, ''))
+  if (!m) return false
+  const first = parseInt(m[1], 16)
+  return (first & 0xe000) === 0x2000
+}
+
+/** 公网 IPv6 直连候选（2.1.273）：电脑有全局 v6 且 web 频道在跑时，手机
+ *  流量（IPv6-native）可跨网络直连同一聊天页——零配置的跨网接入。
+ *  nics 参数仅供测试注入。 */
+export function publicV6UrlCandidates(
+  port: number,
+  token: string,
+  nics: Record<string, NetworkInterfaceInfo[]> = networkInterfaces(),
+): string[] {
+  const out: string[] = []
+  for (const [name, list] of Object.entries(nics)) {
+    if (VIRTUAL_NIC_RE.test(name)) continue
+    for (const nic of list ?? []) {
+      if (nic.family !== 'IPv6' || nic.internal) continue
+      if (!isGlobalV6(nic.address)) continue
+      out.push(`http://[${nic.address}]:${port}/#t=${token}`)
+    }
+  }
+  return out
 }

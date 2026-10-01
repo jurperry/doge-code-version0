@@ -2,7 +2,7 @@ import { randomBytes, randomInt } from 'crypto'
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { getClaudeConfigHomeDir } from '../envUtils.js'
-import type { ImRemoteConfig, ImRemoteWebConfig } from './types.js'
+import type { ImPlatform, ImRemoteConfig, ImRemoteWebConfig } from './types.js'
 
 const CONFIG_NAME = 'im-remote.json'
 const WEB_CONFIG_NAME = 'im-remote-web.json'
@@ -85,22 +85,49 @@ function feishuConfig(raw: Record<string, unknown>): ImRemoteConfig['feishu'] {
 }
 
 function wecomConfig(raw: Record<string, unknown>): ImRemoteConfig['wecom'] {
+  // 深链必须是可解析的 http(s) URL——手滑粘进的说明文字/带控制字符的串直接
+  // 丢掉，别渲染成坏二维码（new URL 比前缀正则多拦 URL 中部的非法字符）
+  let botLink: string | undefined
+  if (typeof raw.botLink === 'string' && /^https?:\/\//i.test(raw.botLink.trim())) {
+    try {
+      new URL(raw.botLink.trim())
+      botLink = raw.botLink.trim()
+    } catch {
+      botLink = undefined
+    }
+  }
   return {
     botId: String(raw.botId ?? ''),
     secret: String(raw.secret ?? ''),
     wsBase: typeof raw.wsBase === 'string' && raw.wsBase ? raw.wsBase : undefined,
+    botLink,
   }
 }
 
 /** Missing credentials for the selected platform (daemon refuses to start). */
 export function imRemoteConfigReady(config: ImRemoteConfig): boolean {
-  if (config.platform === 'telegram') {
-    return !!config.telegram?.botToken
-  }
-  if (config.platform === 'feishu') {
-    return !!(config.feishu?.appId && config.feishu?.appSecret && config.feishu?.chatId)
-  }
-  return !!(config.wecom?.botId && config.wecom?.secret)
+  return selectBotPlatforms(config).length > 0
+}
+
+/** 逐平台凭据就绪判定（2.1.272 多平台并发）：配了谁就跑谁。飞书不再强制
+ *  chatId——适配器对空 chatId 走「首条入站消息自动绑定」回退。 */
+export function telegramReady(c: ImRemoteConfig): boolean {
+  return !!c.telegram?.botToken
+}
+export function feishuReady(c: ImRemoteConfig): boolean {
+  return !!(c.feishu?.appId && c.feishu?.appSecret)
+}
+export function wecomReady(c: ImRemoteConfig): boolean {
+  return !!(c.wecom?.botId && c.wecom?.secret)
+}
+
+/** 凭据齐备、应当启动的 bot 平台列表（顺序稳定：TG → 飞书 → 企微）。 */
+export function selectBotPlatforms(c: ImRemoteConfig): ImPlatform[] {
+  const out: ImPlatform[] = []
+  if (telegramReady(c)) out.push('telegram')
+  if (feishuReady(c)) out.push('feishu')
+  if (wecomReady(c)) out.push('wecom')
+  return out
 }
 
 export async function loadImRemoteConfig(): Promise<ImRemoteConfig | null> {

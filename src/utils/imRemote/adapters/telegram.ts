@@ -39,6 +39,10 @@ export class TelegramAdapter implements ImAdapter {
   private stopped = false
   private offset = 0
   private chatId: string
+  /** Bot identity from getMe — the settings page builds the cross-network
+   *  deep-link QR (t.me/<username>?start=<pair>) from it. */
+  private username = ''
+  private displayName = ''
 
   constructor(
     cfg: ImRemoteTelegramConfig,
@@ -78,7 +82,9 @@ export class TelegramAdapter implements ImAdapter {
     this.stopped = false
     this.abort = new AbortController()
     // Fail fast on a bad token before the daemon reports "running".
-    await this.call('getMe', {})
+    const me = (await this.call('getMe', {})) as { username?: unknown; first_name?: unknown }
+    this.username = typeof me?.username === 'string' ? me.username : ''
+    this.displayName = typeof me?.first_name === 'string' ? me.first_name : ''
     // Drain the startup backlog so stale group chatter / old commands
     // queued while the daemon was down are not replayed into routing.
     try {
@@ -156,6 +162,16 @@ export class TelegramAdapter implements ImAdapter {
     if (!this.chatId && chatId) {
       this.chatId = chatId
     }
+  }
+
+  /** Bot username without the leading @ (empty when getMe didn't provide one). */
+  get botUsername(): string {
+    return this.username
+  }
+
+  /** Bot display name (may differ from the username). */
+  get botName(): string {
+    return this.displayName
   }
 
   get targetChatId(): string {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { nicPriority, webUrlCandidates } from './adapters/webChat.js'
+import {publicV6UrlCandidates,  nicPriority, webUrlCandidates } from './adapters/webChat.js'
 import type { NetworkInterfaceInfoIPv4 } from 'os'
 
 // 0.2.93：多网卡机器上 VMware/WSL/蓝牙 等虚拟地址会抢二维码主位置，
@@ -66,5 +66,26 @@ describe('webUrlCandidates 出货函数（注入网卡表）', () => {
       以太网: [nic('192.168.0.5')],
     })
     expect(urls).toEqual(['http://192.168.0.5:4764/#t=t'])
+  })
+})
+
+describe('publicV6UrlCandidates（公网 IPv6 直连候选，2.1.273）', () => {
+  const nics = (map: Record<string, Array<{ address: string; family?: string; internal?: boolean }>>) =>
+    Object.fromEntries(
+      Object.entries(map).map(([k, v]) => [k, v.map((x) => ({ address: x.address, family: x.family ?? 'IPv6', internal: x.internal ?? false, mac: '', cidr: '', scopeid: 0 }))]),
+    )
+
+  test('全局单播入选（2/3 开头）；链路本地/ULA/回环/internal/虚拟网卡排除', () => {
+    const injected = nics({
+      以太网: [{ address: '2408:845a:12::1' }, { address: '240e:888::ab' }, { address: 'fe80::1' }, { address: 'fd00::1' }, { address: '::1', internal: true }],
+      vEthernet: [{ address: '2409:1111::1' }],
+      本地环回: [{ address: '240a::9', internal: true }],
+    })
+    const out = publicV6UrlCandidates(4764, 'tok', injected as never)
+    expect(out).toEqual(['http://[2408:845a:12::1]:4764/#t=tok', 'http://[240e:888::ab]:4764/#t=tok'])
+  })
+
+  test('无全局 v6 时空数组（v4-only 机器）', () => {
+    expect(publicV6UrlCandidates(4764, 'tok', nics({ 以太网: [{ address: 'fe80::5' }, { address: 'fd12::1' }] }) as never)).toEqual([])
   })
 })

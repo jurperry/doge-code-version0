@@ -36,6 +36,10 @@ export type ImRemoteWecomConfig = {
   secret: string
   /** Override the official wss endpoint (tests point this at a local mock). */
   wsBase?: string
+  /** 智能机器人的「机器人链接」（企业微信客户端 → 智能机器人 → 分享/二维码
+   *  复制，永久有效）：设置页把它渲染成跨网络扫码入口——企微深链无法由
+   *  botId 推导，只能由用户从客户端带出。 */
+  botLink?: string
 }
 
 export type ImRemotePairState = {
@@ -47,10 +51,14 @@ export type ImRemotePairState = {
 
 export type ImRemoteConfig = {
   version: 1
-  /** Master switch for the CUSTOM IM bot channel. When false, sessions never
-   *  attach for the bot alone and the daemon refuses its adapter — but the
-   *  QR web channel (im-remote-web.json) is independent and may still run. */
+  /** Master switch for the CUSTOM IM bot channels. When false, sessions never
+   *  attach for the bots alone and the daemon refuses their adapters — but the
+   *  QR web channel (im-remote-web.json) is independent and may still run.
+   *  2.1.272: every platform with complete credentials runs CONCURRENTLY;
+   *  `platform` below is only a UI hint (last edited) — it no longer gates
+   *  which adapter starts. */
   enabled: boolean
+  /** UI hint only (2.1.272) — channel selection is per-platform credentials. */
   platform: ImPlatform
   telegram?: ImRemoteTelegramConfig
   feishu?: ImRemoteFeishuConfig
@@ -123,6 +131,11 @@ export type ImRemoteClientFrame =
 
 /** Monitor-only frames (App main process). */
 export type ImRemoteMonitorFrame =
+  /**
+   * Pin the routing target AND the remote binding to a session. An EMPTY
+   * sessionId releases the binding only (desktop-side "stop occupying") —
+   * the active routing target is untouched.
+   */
   | { t: 'set_active'; sessionId: string }
   | { t: 'get_status' }
   | { t: 'regen_pair' }
@@ -130,6 +143,20 @@ export type ImRemoteMonitorFrame =
 // ---------------------------------------------------------------------------
 // Wire protocol (daemon -> client/monitor)
 // ---------------------------------------------------------------------------
+
+/** 跨网络扫码块（status.bots 的元素，2.1.272）：一个在跑的 bot 平台一条。 */
+export type ImRemoteBotChannelStatus = {
+  platform: ImPlatform
+  /** Bot display name when the platform exposes one (Telegram getMe). */
+  botName: string | null
+  /** 扫码直达链接（TG 带 start=配对码 / 飞书 applink / 企微配置的机器人链接） */
+  deepLink: string | null
+  pairCode: string | null
+  /** Unix ms when the pair code expires (null = none/expired). */
+  pairExpires: number | null
+  /** Count of paired allowed users. */
+  paired: number
+}
 
 export type ImRemoteDaemonFrame =
   | { t: 'welcome'; sessionId: string }
@@ -167,6 +194,23 @@ export type ImRemoteDaemonFrame =
       webUrls?: string[]
       /** QR web channel port when running. */
       webPort?: number | null
+      /** 公网 IPv6 直连地址（web 频道在跑且有全局 v6 时；null = 不可用） */
+      webUrl6?: string | null
+      /**
+       * Remote binding (2.1.270): the session that last RECEIVED a remote
+       * prompt (or was pinned via set_active). The app locks that tab's
+       * close button — closing it would sever the remote link mid-use.
+       * Null when nothing is bound.
+       */
+      bound?: string | null
+      /**
+       * Cross-network scan entries (2.1.272): one item per RUNNING bot
+       * platform so the settings page can render a QR for each (Telegram
+       * t.me/<bot>?start=<pair>, Feishu applink, WeCom user-supplied bot
+       * link). Empty when no bot channel is running. (Supersedes the
+       * single-bot `bot` field of 2.1.270–2.1.271.)
+       */
+      bots?: ImRemoteBotChannelStatus[]
     }
   | ImRemoteClientFrame
 

@@ -336,6 +336,28 @@
 2. 解决：⑴ format.ts 正则改 `[\\/]` + print.ts 改用共享份；⑵ Bun.serve 包 try/catch → `fail(1, 'localhost 端口被占…退出')`（先 stopChannels 收尾适配器）；⑶ ImAdapterHandlers 加可选 `onStopped?(reason)`，daemon 侧 markChannelStopped（置停+IM 广播+状态文件），wecom 的 disconnected_event 调用之；⑷ wecom：`armHandshakeTimeout`（15s，收到 subscribe ack 清除，超时 close 走统一重连）+ 独立 networkFailures 计数（认证成功清零）参与退避 + `sendText` 串行 promise 链（节流不再被并发穿透）+ 出站 ack errcode≠0 落日志——**透传 req_id 无 aibot_ 前缀，不能按前缀识别**（wecom 探针抓出的真 bug：识别条件改为「无 cmd 且非 subscribe/ping 前缀即记」）；⑸ heldPrompt 覆盖/过期/投递失败三路径 reply 回音；⑹ 出站 catch 改 logLine + TelegramAdapter 构造器加 log 回调；⑺ daemon 日志 URL 经 `redactWebUrl`（#t=<redacted>；状态文件与 monitor 帧保留完整——App QR 数据源）；⑻ Auto 判定收敛 `utils/imRemote/autoMode.ts` 纯函数 `remoteAutoTargetMode(autoMode, currentMode, bypassDisabled)` + 单测（注意调用方传 `getConfig()?.autoMode === true`——null 无配置时不动，与旧语义一致）；⑼ 远程帧改 `satisfies SDKUserMessageReplay & { dogeRemote: boolean }` + 补 isReplay:true（壳不消费该键，已核实）；⑽ 正则补英文网卡名；⑪ webPage 删 esc() 死代码 + #log 300 条裁剪；⑫ types platform 收窄、configDirOf 用 dirname、writeStatus 链式串行化、logLine stdout 包 try。**测试**：test/wecom-probe.ts（mock-WSS 9 检查，Bun.serve 的 fetch 必须 `server.upgrade(req)` 否则 WS 握手根本不成立——首版探针 8/9 假红即此）+ webChat.test 补英文网卡与 webUrlCandidates 出货断言（注入网卡表参数）。
 3. 位置：src/utils/imRemote/{format,daemon,types,config,autoMode}.ts、adapters/{wecom,webChat,telegram}.ts、webPage.ts、print.ts、REPL.tsx；autoMode.test.ts（新）、webChat.test.ts、test/wecom-probe.ts（新）。单测 36 全绿 + wecom 探针 9/9 + e2e-im-remote 28 断言全绿 + tsc 干净。与 app 0.2.94（development_log 0.2.94 条）同轮联调。
 
+## 十四、2026-10-01 会话关闭锁 + 跨网络扫码深链（随 app 0.2.95，CLI 2.1.269→2.1.270）
+
+### 58. OSC 7770 turn:start 补回合起点；daemon 远程占用绑定 + Bot 深链
+1. 问题：① app 壳要「运行中的会话不能被 ✕ 关闭打断」，但 TUI 只有回合结束标记（turn:done/aborted），无起点信号，壳侧 busy 状态机无从建立；② 远程 prompt 送达的会话被用户关标签即断链（daemon 只知 active=最近接入者，无「占用」概念，App 无从锁）；③ app 扫码网页频道硬绑局域网（0.0.0.0 裸 HTTP + 网卡地址），出差/手机流量完全不可用，而 daemon 三频道（TG 长轮询/飞书长连接/企微 WSS）全是出站连接——跨网络能力其实就在 bot 通道里。
+2. 解决：① shellTurnMarker 新增 `emitShellTurnStart()`（同 env 门控 DOGE_APP_TURN_MARKER），REPL 在 query try 首行发射（onBeforeQueryCallback 早退 return 也经 finally 配对 done——勿挪到 try 外，排队路径在 try 前 return 不该发）；② daemon 新增 boundSessionId：routePrompt 成功送达即绑定（flushHeldPrompt 同）、set_active 空串=仅解除占用不动路由 / 非空=钉路由+占用、会话消失的顺延清空收敛 `demoteGoneSessions()`（socket close/bye/探活收割三处共用——勿复制顺延逻辑）；status 帧/状态文件新增 bound + bot 块，broadcastSessions 连带刷 status（会话集变化必牵动快照）；③ 跨网络深链纯函数 `buildBotDeepLink(platform, {botUsername, appId, botLink, pairCode})`：Telegram=`https://t.me/<getMe用户名>?start=<配对码>`（适配器 start 时缓存 getMe 的 username/first_name；parseImCommand 把 `/start <6位码>` 归一成 pair、裸 /start 回 help——Telegram 扫码点 START 的真实形态）、飞书=官方 applink `applink.feishu.cn/client/chat/open?appId=`（扫码直开机器人会话，手发 /pair）、企微=配置项 wecom.botLink（用户从企微客户端「智能机器人→分享」复制的永久链接；config.ts 归一只收可 `new URL()` 解析的 http(s)——官方不提供由 botId 推导深链，勿尝试）；wecom botLink 归一化注意整对象替换语义（留空即清除）。
+3. 位置：src/utils/shellTurnMarker.ts、src/screens/REPL.tsx（try 首行）、src/utils/imRemote/{daemon,format,config,types}.ts、adapters/telegram.ts（getMe 缓存）；format.test.ts（/start 归一 + buildBotDeepLink 三平台 8 断言）、config.test.ts（botLink URL 门）。与 app 0.2.95（development_log 0.2.95 条）同轮联调，app 侧 E2E verify-im-remote R6c/R7b/R13e–g 全绿。
+
+### 59. daemon 启动自动铸配对码（随 app 0.2.96，CLI 2.1.271）
+1. 问题：app 扫码卡的跨网络二维码（Telegram start=<配对码>）依赖配对码，而码只在用户手动点「生成配对码」后才存在——刚开频道时深链退化成裸 t.me/<bot>（扫码点 START 只能得到 help），「扫一下即连」体验断裂。
+2. 解决：run() 频道起来后、心跳前，custom 频道在跑且 currentPairCode() 为空/过期时自动 regeneratePairCode()（走既有持久化+广播路径）。配套（app 侧）：regenImRemotePair 必须「等码变化」再返回——盘上常态有码后，见码就返会把旧码当新码秒回（daemon 尚未重铸），调用方拿即将作废的码去配对必败。
+3. 位置：src/utils/imRemote/daemon.ts（run() 自动铸码）；验证随 app 0.2.96 verify-im-remote R5b/R6/R7b。
+
+### 60. 多平台并发：凭据齐备即启动，platform 降级为 UI 提示（随 app 0.2.97，CLI 2.1.272）
+1. 问题：daemon 的自定义 bot 频道是 platform 单选——config.platform 决定唯一 adapter，配了飞书就只有飞书码，Telegram/企微凭据即便在盘也不启动；app 扫码卡「跨网络」因此只呈现单一平台，与「三个 IM 都能扫」的产品预期不符。
+2. 解决：config.ts 新增 `selectBotPlatforms(c)`（telegramReady/feishuReady/wecomReady 逐平台判定，TG→飞书→企微稳定序；飞书就绪去掉 chatId 强制——适配器对空 chatId 走首条入站自动绑定），`imRemoteConfigReady` = 任一平台就绪；daemon buildChannels 逐平台建频道（channel id=平台名），原 `customChannel` 单取改为 `botChannels()/runningAdapter(id)`；onImMessage 的 Telegram 专调（answerCallback/observeChatId）改按 id='telegram' 取 adapter；status 帧与状态文件 `bot` 单块 → `bots` 数组（botsChannelInfo：每在跑平台一条 {platform,botName,deepLink,pairCode,pairExpires,paired}，企微缺 botLink 仍出现供 UI 补填）；启动自动铸码条件改「任一 bot 频道在跑」。
+3. 位置：src/utils/imRemote/{config,daemon,types}.ts；config.test.ts（selectBotPlatforms 多选/顺序/飞书免 chatId，+2 测）。验证随 app 0.2.97 verify-im-remote R6d（TG+飞书双码并列）。
+
+### 61. web 频道 IPv6 双栈 + 公网直连候选（随 app 0.2.98，CLI 2.1.273）
+1. 问题：跨网络接入此前只靠 IM 机器人中转（一次性配置）；用户预期「和同网一致零配置」。国内手机流量网普遍 IPv6-native、家用宽带可开 v6——电脑有全局 v6 时手机其实可以直连，不必中转。
+2. 解决：webChat 监听 0.0.0.0→::（绑定失败回退，v4-mapped 兼容回环/局域网）；新增 publicV6UrlCandidates(port, token, nics) 纯函数——只收全局单播（首 hextet & 0xe000 === 0x2000，天然排除 fe80 链路本地与 fd/fc ULA），虚拟网卡名沿用 VIRTUAL_NIC_RE；URL 用方括号字面量 http://[v6]:port/#t=。daemon status 帧/状态文件新增 webUrl6（web 频道在跑且有全局 v6 才有值）。
+3. 位置：src/utils/imRemote/adapters/webChat.ts、daemon.ts、types.ts；webChat.test.ts（全局入选/本地排除/无 v6 空数组 +2 测）。验证随 app 0.2.98 verify-im-remote R11v6（条件断言）。
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。

@@ -2,8 +2,10 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { rm } from 'fs/promises'
 import { join } from 'path'
 import {
+  feishuReady,
   generatePairCode,
   imRemoteConfigReady,
+  selectBotPlatforms,
   imRemoteWebReady,
   normalizeImRemoteConfig,
   normalizeImRemoteWebConfig,
@@ -145,5 +147,43 @@ describe('pair codes', () => {
     const code = generatePairCode()
     expect(code).toMatch(/^[a-z0-9]{6}$/)
     expect(PAIR_CODE_TTL_MS).toBe(60 * 60 * 1000)
+  })
+})
+
+describe('wecom botLink (cross-network scan entry)', () => {
+  test('http(s) URLs pass through trimmed; anything else drops to undefined', () => {
+    const cfg = normalizeImRemoteConfig({
+      platform: 'wecom',
+      wecom: { botId: 'b1', secret: 's1', botLink: '  https://work.weixin.qq.com/ca/abc  ' },
+    })!
+    expect(cfg.wecom?.botLink).toBe('https://work.weixin.qq.com/ca/abc')
+
+    expect(normalizeImRemoteConfig({ platform: 'wecom', wecom: { botId: 'b1', secret: 's1', botLink: 'work.weixin.qq.com/ca' } })!.wecom?.botLink).toBeUndefined()
+    expect(normalizeImRemoteConfig({ platform: 'wecom', wecom: { botId: 'b1', secret: 's1', botLink: 'ftp://x/y' } })!.wecom?.botLink).toBeUndefined()
+    expect(normalizeImRemoteConfig({ platform: 'wecom', wecom: { botId: 'b1', secret: 's1', botLink: 42 } })!.wecom?.botLink).toBeUndefined()
+  })
+})
+
+describe('selectBotPlatforms（2.1.272 多平台并发）', () => {
+  test('凭据齐备的平台全选、顺序稳定；platform 字段不再决定启停', () => {
+    const cfg = normalizeImRemoteConfig({
+      enabled: true,
+      platform: 'telegram',
+      telegram: { botToken: 't1' },
+      feishu: { appId: 'cli_x', appSecret: 's' },
+      wecom: { botId: 'b1', secret: 's1' },
+    })!
+    expect(selectBotPlatforms(cfg)).toEqual(['telegram', 'feishu', 'wecom'])
+    expect(imRemoteConfigReady(cfg)).toBeTrue()
+    // 单凭据也启动（只配飞书 + platform 字段还写着 telegram）
+    const fsOnly = normalizeImRemoteConfig({ platform: 'telegram', feishu: { appId: 'a', appSecret: 's' } })!
+    expect(selectBotPlatforms(fsOnly)).toEqual(['feishu'])
+  })
+
+  test('飞书不再强制 chatId（首条入站自动绑定）；不完整凭据不选', () => {
+    expect(feishuReady(normalizeImRemoteConfig({ feishu: { appId: 'a', appSecret: 's' } })!)).toBeTrue()
+    expect(selectBotPlatforms(normalizeImRemoteConfig({ feishu: { appId: 'a' } })!)).toEqual([])
+    expect(selectBotPlatforms(normalizeImRemoteConfig({ wecom: { botId: 'b' } })!)).toEqual([])
+    expect(imRemoteConfigReady(normalizeImRemoteConfig({})!)).toBeFalse()
   })
 })

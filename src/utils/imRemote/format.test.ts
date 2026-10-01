@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   buildAskAnswers,
+  buildBotDeepLink,
   formatAgentEvent,
   formatAskMessage,
   formatPermissionMessage,
@@ -178,5 +179,42 @@ describe('lastAssistantText', () => {
     ] as Parameters<typeof lastAssistantText>[0]
     expect(lastAssistantText(messages)).toBe('final')
     expect(lastAssistantText([])).toBe('')
+  })
+})
+
+describe('/start deep-link pairing', () => {
+  test('/start with a valid code pairs; bare or malformed /start falls back to help', () => {
+    expect(parseImCommand('/start ab3x9k')).toEqual({ kind: 'pair', code: 'ab3x9k' })
+    expect(parseImCommand('/START AB3X9K')).toEqual({ kind: 'pair', code: 'ab3x9k' })
+    expect(parseImCommand('/start')).toEqual({ kind: 'help' })
+    expect(parseImCommand('/start not-a-code')).toEqual({ kind: 'help' })
+  })
+})
+
+describe('buildBotDeepLink', () => {
+  test('telegram: username + live pair code -> start deep link; no code -> bare profile link', () => {
+    expect(buildBotDeepLink('telegram', { botUsername: 'doge_bot', pairCode: 'ab3x9k' })).toBe(
+      'https://t.me/doge_bot?start=ab3x9k',
+    )
+    expect(buildBotDeepLink('telegram', { botUsername: '@doge_bot' })).toBe('https://t.me/doge_bot')
+    expect(buildBotDeepLink('telegram', { pairCode: 'ab3x9k' })).toBeNull()
+  })
+
+  test('feishu: applink from appId, encoded', () => {
+    expect(buildBotDeepLink('feishu', { appId: 'cli_a1b2c3d4e5f6g7h8' })).toBe(
+      'https://applink.feishu.cn/client/chat/open?appId=cli_a1b2c3d4e5f6g7h8',
+    )
+    expect(buildBotDeepLink('feishu', { appId: 'cli a/b' })).toBe(
+      'https://applink.feishu.cn/client/chat/open?appId=cli%20a%2Fb',
+    )
+    expect(buildBotDeepLink('feishu', {})).toBeNull()
+  })
+
+  test('wecom: user-supplied bot link passes through only as http(s)', () => {
+    expect(buildBotDeepLink('wecom', { botLink: 'https://work.weixin.qq.com/ca/x' })).toBe(
+      'https://work.weixin.qq.com/ca/x',
+    )
+    expect(buildBotDeepLink('wecom', { botLink: 'javascript:alert(1)' })).toBeNull()
+    expect(buildBotDeepLink('wecom', {})).toBeNull()
   })
 })

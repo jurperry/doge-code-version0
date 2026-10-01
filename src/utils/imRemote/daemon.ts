@@ -7,10 +7,11 @@ import { logForDebugging } from '../debug.js'
 import { FeishuAdapter } from './adapters/feishu.js'
 import { TelegramAdapter } from './adapters/telegram.js'
 import { WecomAdapter } from './adapters/wecom.js'
-import { WebChatAdapter, webUrlCandidates } from './adapters/webChat.js'
+import { WebChatAdapter, publicV6UrlCandidates, webUrlCandidates } from './adapters/webChat.js'
 import {
   imRemoteConfigPath,
   imRemoteConfigReady,
+  selectBotPlatforms,
   loadImRemoteConfig,
   loadImRemoteWebConfig,
   imRemoteWebReady,
@@ -19,6 +20,7 @@ import {
   saveImRemoteConfig,
 } from './config.js'
 import {
+  buildBotDeepLink,
   formatAgentEvent,
   formatAskMessage,
   formatPermissionMessage,
@@ -33,9 +35,11 @@ import {
 import type {
   ImAdapter,
   ImInboundMessage,
+  ImRemoteBotChannelStatus,
   ImOption,
   ImRemoteClientFrame,
   ImRemoteConfig,
+  ImRemoteDaemonFrame,
   ImRemoteMonitorFrame,
   ImRemoteWebConfig,
 } from './types.js'
@@ -177,6 +181,16 @@ class ImRemoteDaemon {
   private sessions = new Map<string, SessionConn>() // keyed by sessionId
   private monitors = new Set<DaemonSocket>()
   private activeSessionId: string | null = null
+  /**
+   * Remote binding (2.1.270): the session that last RECEIVED a remote prompt
+   * (or was pinned via set_active). Distinct from activeSessionId — every
+   * new CLI attach overwrites "active" (last hello wins), but the binding
+   * only moves when remote traffic actually lands on another session. The
+   * app locks the bound tab's close button so the remote link can't be
+   * severed by closing its tab; a set_active with an empty sessionId
+   * releases it (desktop-side "stop occupying").
+   */
+  private boundSessionId: string | null = null
   private pending: PendingRelay[] = []
   private server: ReturnType<typeof Bun.serve> | null = null
   private startedAt = new Date().toISOString()
@@ -189,21 +203,22 @@ class ImRemoteDaemon {
     this.webConfig = web
   }
 
-  private get customChannel(): ChannelRuntime | undefined {
-    return this.channels.find(c => c.id === 'custom')
-  }
-
   private buildChannels(): ChannelRuntime[] {
     const out: ChannelRuntime[] = []
     const cfg = this.config
-    if (cfg && cfg.enabled && imRemoteConfigReady(cfg)) {
-      const adapter =
-        cfg.platform === 'feishu' && cfg.feishu
-          ? new FeishuAdapter(cfg.feishu, line => void logLine(`[feishu] ${line}`))
-          : cfg.platform === 'wecom' && cfg.wecom
-            ? new WecomAdapter(cfg.wecom, line => void logLine(`[wecom] ${line}`))
-            : new TelegramAdapter(cfg.telegram!, line => void logLine(`[telegram] ${line}`))
-      out.push({ id: 'custom', adapter, running: false })
+    // 2.1.272 多平台并发：凭据齐备的 bot 平台各起一个频道（channel id 即平台
+    // 名），扫码卡按平台逐一出二维码——用户手机上有什么就扫什么。`platform`
+    // 字段只是 UI 提示，不再决定哪个 adapter 启动。
+    if (cfg && cfg.enabled) {
+      for (const platform of selectBotPlatforms(cfg)) {
+        const adapter =
+          platform === 'feishu'
+            ? new FeishuAdapter(cfg.feishu!, line => void logLine(`[feishu] ${line}`))
+            : platform === 'wecom'
+              ? new WecomAdapter(cfg.wecom!, line => void logLine(`[wecom] ${line}`))
+              : new TelegramAdapter(cfg.telegram!, line => void logLine(`[telegram] ${line}`))
+        out.push({ id: platform, adapter, running: false })
+      }
     }
     if (this.webConfig && imRemoteWebReady(this.webConfig)) {
       const adapter = new WebChatAdapter(
@@ -214,6 +229,17 @@ class ImRemoteDaemon {
       out.push({ id: 'web', adapter, running: false })
     }
     return out
+  }
+
+  /** 在跑的 bot 平台频道（不含 web）。 */
+  private botChannels(): ChannelRuntime[] {
+    return this.channels.filter(c => c.id !== 'web')
+  }
+
+  /** 按 id 取在跑频道的 adapter（发指令性回执/记录用）。 */
+  private runningAdapter(id: string): ImAdapter | undefined {
+    const ch = this.channels.find(c => c.id === id)
+    return ch?.running ? ch.adapter : undefined
   }
 
   async run(): Promise<number> {
@@ -282,14 +308,27 @@ class ImRemoteDaemon {
     process.prependListener('SIGTERM', () => this.shutdown())
 
     const channelNote = this.channels.filter(c => c.running).map(c => c.id).join('+')
+    const botsInfo = this.botsChannelInfo()
+    // 深链里的 start=<配对码> 与同行已明文打印的「配对码=」同源同级——此处不
+    // 额外脱敏；若日后收紧配对码日志，这里要同步处理
     await logLine(
       `远程控制守护进程已启动：channels=${channelNote} port=${this.localhostPort()} ` +
-        `配对码=${this.currentPairCode() ?? '未生成'}${this.primaryWebUrl() ? ' web=' + redactWebUrl(this.primaryWebUrl()) : ''}`,
+        `配对码=${this.currentPairCode() ?? '未生成'}` +
+        (botsInfo.length > 0 ? ` 跨网络扫码=${botsInfo.map(b => b.platform).join('/')}` : '') +
+        (this.primaryWebUrl() ? ' web=' + redactWebUrl(this.primaryWebUrl()) : ''),
     )
     await this.writeStatus()
 
+    // 自动铸配对码（2.1.271）：custom 频道在跑而码为空/过期时启动即铸一个——
+    // 扫码卡的跨网络二维码（Telegram start=<码>）开箱即扫即配对，不再要求
+    // 用户先到设置页点「生成配对码」。已配对消耗/手动重铸路径不受影响。
+    if (this.botChannels().some(c => c.running) && !this.currentPairCode()) {
+      await this.regeneratePairCode()
+    }
+
     const heartbeat = setInterval(() => {
       this.reapDeadSessions()
+      this.broadcastStatus()
       void this.writeStatus()
     }, 5000)
 
@@ -464,6 +503,7 @@ class ImRemoteDaemon {
       return
     }
     if (this.sendToSession(sessionId, { t: 'prompt', text: held.text })) {
+      this.boundSessionId = sessionId
       void this.reply(held.channel, '✅ 会话已接入，正在处理你刚才的消息。')
     } else {
       // 发送失败也告知来源——「消息要么到、要么有回音」，不能静默丢
@@ -476,6 +516,18 @@ class ImRemoteDaemon {
       if (conn.socket === ws) return conn
     }
     return undefined
+  }
+
+  /** active/bound 指向的会话消失后的顺延规则（socket close / bye / 探活
+   *  收割三处共用）：active 顺延到剩余会话的迭代序第一个，bound 直接清空
+   *  ——占用随被占用会话的消失自然解除，不会拴到别的会话上。 */
+  private demoteGoneSessions(): void {
+    if (this.activeSessionId && !this.sessions.has(this.activeSessionId)) {
+      this.activeSessionId = this.sessions.keys().next().value ?? null
+    }
+    if (this.boundSessionId && !this.sessions.has(this.boundSessionId)) {
+      this.boundSessionId = null
+    }
   }
 
   private handleSocketClose(ws: DaemonSocket): void {
@@ -492,18 +544,27 @@ class ImRemoteDaemon {
         }
       }
     }
-    if (this.activeSessionId && !this.sessions.has(this.activeSessionId)) {
-      this.activeSessionId = this.sessions.keys().next().value ?? null
-    }
+    this.demoteGoneSessions()
     this.broadcastSessions()
   }
 
   private handleMonitorFrame(frame: ImRemoteClientFrame | ImRemoteMonitorFrame): void {
     switch (frame.t) {
       case 'set_active':
+        if (frame.sessionId === '') {
+          // Desktop-side "stop occupying": release the binding only — the
+          // routing target stays as-is (a running turn is not interrupted).
+          if (this.boundSessionId !== null) {
+            this.boundSessionId = null
+            this.broadcastStatus()
+          }
+          break
+        }
         if (this.sessions.has(frame.sessionId)) {
           this.activeSessionId = frame.sessionId
+          this.boundSessionId = frame.sessionId
           this.broadcastSessions()
+          this.broadcastStatus()
         }
         break
       case 'get_status':
@@ -548,9 +609,7 @@ class ImRemoteDaemon {
       }
       case 'bye':
         this.sessions.delete(conn.sessionId)
-        if (this.activeSessionId === conn.sessionId) {
-          this.activeSessionId = this.sessions.keys().next().value ?? null
-        }
+        this.demoteGoneSessions()
         this.broadcastSessions()
         break
       default:
@@ -601,10 +660,10 @@ class ImRemoteDaemon {
   }
 
   private async onImMessage(msg: ImInboundMessage, channelId: string): Promise<void> {
-    const custom = this.customChannel?.adapter
-    if (channelId === 'custom' && custom instanceof TelegramAdapter) {
-      if (msg.callbackId) {
-        await custom.answerCallback(msg.callbackId, '已收到').catch(() => {})
+    if (channelId === 'telegram') {
+      const tg = this.runningAdapter('telegram')
+      if (tg instanceof TelegramAdapter && msg.callbackId) {
+        await tg.answerCallback(msg.callbackId, '已收到').catch(() => {})
       }
     }
     await this.refreshAuthState()
@@ -643,8 +702,9 @@ class ImRemoteDaemon {
       return
     }
 
-    if (channelId === 'custom' && custom instanceof TelegramAdapter) {
-      custom.observeChatId(msg.chatId)
+    if (channelId === 'telegram') {
+      const tg = this.runningAdapter('telegram')
+      if (tg instanceof TelegramAdapter) tg.observeChatId(msg.chatId)
     }
     const cmd = parseImCommand(msg.text)
     if (!cmd) {
@@ -703,6 +763,12 @@ class ImRemoteDaemon {
           ? '📭 当前没有已接入的会话——已请求 App 唤起新会话，接入后会自动处理本条消息。'
           : '📭 当前没有已接入的会话——请先在电脑上打开 Doge Code（CLI 或对话），随后重发本条消息。',
       )
+      return
+    }
+    // 成功送达即形成远程占用：App 会锁住该会话标签的关闭按钮
+    if (this.boundSessionId !== target) {
+      this.boundSessionId = target
+      this.broadcastStatus()
     }
   }
 
@@ -767,10 +833,20 @@ class ImRemoteDaemon {
     return webUrlCandidates(this.webConfig.port, this.webConfig.token)[0] ?? null
   }
 
+  /** 公网 IPv6 直连地址（2.1.273）：web 频道在跑且有全局 v6 时给出——手机
+   *  流量可跨网络直连同一聊天页（零配置跨网）。可能为 null（无全局 v6）。 */
+  private publicV6WebUrl(): string | null {
+    if (!this.webAdapter || !this.webConfig || !this.channels.find(c => c.id === 'web')?.running) {
+      return null
+    }
+    return publicV6UrlCandidates(this.webConfig.port, this.webConfig.token)[0] ?? null
+  }
+
   private async sendStatusToIm(channelId: string): Promise<void> {
     const lines = ['📊 远程控制状态']
     if (this.config) {
-      lines.push('平台：' + this.config.platform)
+      const runningBots = this.botChannels().filter(c => c.running).map(c => c.id)
+      if (runningBots.length > 0) lines.push('平台：' + runningBots.join(' + '))
     }
     const webUrl = this.primaryWebUrl()
     if (webUrl) {
@@ -812,6 +888,9 @@ class ImRemoteDaemon {
         tools: s.toolCount,
       })),
     })
+    // 会话集变化必然牵动 status 快照（active/bound/attached）——monitor 侧
+    // 两个帧一起刷新，消费方不必猜先后
+    this.broadcastStatus()
     void this.writeStatus()
   }
 
@@ -834,7 +913,56 @@ class ImRemoteDaemon {
         ? webUrlCandidates(this.webConfig!.port, this.webConfig!.token)
         : [],
       webPort: webUrl ? this.webConfig!.port : null,
+      webUrl6: this.publicV6WebUrl(),
+      bound: this.boundSessionId,
+      bots: this.botsChannelInfo(),
     })
+  }
+
+  /**
+   * Cross-network scan entries (2.1.272): one per RUNNING bot platform — the
+   * settings page renders a QR for each so the user scans with whichever app
+   * they have. Entries whose deepLink can't be built (e.g. WeCom without the
+   * user-supplied bot link) still appear with deepLink null so the UI can
+   * show the per-platform fix-up form.
+   */
+  private botsChannelInfo(): ImRemoteBotChannelStatus[] {
+    if (!this.config) return []
+    const pair = this.currentPairCode() ? this.config.pair : undefined
+    const pairExpires = pair && pair.expires > Date.now() ? pair.expires : null
+    const base = {
+      pairCode: this.currentPairCode(),
+      pairExpires,
+      paired: this.config.allowedUsers.length,
+    }
+    return this.botChannels()
+      .filter(ch => ch.running)
+      .map(ch => {
+        const platform = ch.id as ImPlatform
+        if (platform === 'telegram') {
+          const a = ch.adapter instanceof TelegramAdapter ? ch.adapter : null
+          return {
+            platform,
+            botName: a?.botName || null,
+            deepLink: buildBotDeepLink('telegram', { botUsername: a?.botUsername, pairCode: base.pairCode }),
+            ...base,
+          }
+        }
+        if (platform === 'feishu') {
+          return {
+            platform,
+            botName: null,
+            deepLink: buildBotDeepLink('feishu', { appId: this.config!.feishu?.appId }),
+            ...base,
+          }
+        }
+        return {
+          platform,
+          botName: null,
+          deepLink: buildBotDeepLink('wecom', { botLink: this.config!.wecom?.botLink }),
+          ...base,
+        }
+      })
   }
 
   private async regeneratePairCode(): Promise<void> {
@@ -880,11 +1008,10 @@ class ImRemoteDaemon {
         changed = true
       }
     }
-    if (this.activeSessionId && !this.sessions.has(this.activeSessionId)) {
-      this.activeSessionId = this.sessions.keys().next().value ?? null
-      changed = true
-    }
-    if (changed) {
+    const prevActive = this.activeSessionId
+    const prevBound = this.boundSessionId
+    this.demoteGoneSessions()
+    if (changed || prevActive !== this.activeSessionId || prevBound !== this.boundSessionId) {
       this.broadcastSessions()
     }
   }
@@ -910,7 +1037,10 @@ class ImRemoteDaemon {
       web: webUrl
         ? { port: this.webConfig!.port, url: webUrl }
         : null,
+      webUrl6: this.publicV6WebUrl(),
       active: this.activeSessionId,
+      bound: this.boundSessionId,
+      bots: this.botsChannelInfo(),
       sessions: Array.from(this.sessions.values()).map(s => ({
         sessionId: s.sessionId,
         label: s.label,

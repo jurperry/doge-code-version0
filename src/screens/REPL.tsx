@@ -289,7 +289,7 @@ import { useMessageActions, MessageActionsKeybindings, MessageActionsBar, type M
 import { setClipboard } from '../ink/termio/osc.js';
 import type { ScrollBoxHandle } from '../ink/components/ScrollBox.js';
 import { createAttachmentMessage, getQueuedCommandAttachments } from '../utils/attachments.js';
-import { emitShellTurnMarker } from '../utils/shellTurnMarker.js';
+import { emitShellTurnMarker, emitShellTurnStart } from '../utils/shellTurnMarker.js';
 import { imRemote } from '../utils/imRemote/client.js';
 import { remoteAutoTargetMode } from '../utils/imRemote/autoMode.js';
 import { lastAssistantText, lastPathSegment } from '../utils/imRemote/format.js';
@@ -2979,6 +2979,11 @@ export function REPL({
       // isLoading is derived from queryGuard — tryStart() above already
       // transitioned dispatching→running, so no setter call needed here.
       resetTimingRefs();
+      // Turn-open marker (pairs with the turn:done/aborted in the finally
+      // below): the Electron shell uses it to lock the tab's close button
+      // for the whole turn window. Emitted before any early `return` inside
+      // this try can skip the query itself — the finally always balances it.
+      emitShellTurnStart();
       setMessages(oldMessages => [...oldMessages, ...newMessages]);
       responseLengthRef.current = 0;
       if (feature('TOKEN_BUDGET')) {
