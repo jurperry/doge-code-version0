@@ -292,6 +292,7 @@ import { createAttachmentMessage, getQueuedCommandAttachments } from '../utils/a
 import { emitShellTurnMarker, emitShellTurnStart } from '../utils/shellTurnMarker.js';
 import { imRemote } from '../utils/imRemote/client.js';
 import { remoteAutoTargetMode } from '../utils/imRemote/autoMode.js';
+import { prepareRemotePrompt } from '../utils/imRemote/prompt.js';
 import { lastAssistantText, lastPathSegment } from '../utils/imRemote/format.js';
 
 // Stable empty array for hooks that accept MCPServerConnection[] — avoids
@@ -942,7 +943,7 @@ export function REPL({
         // attach() may land after this session's first turn started —
         // re-assert Auto on every remote prompt so the turn never stalls.
         setAppState(enforceRemoteAuto);
-        enqueue({ value: text, mode: 'prompt' });
+        enqueue({ value: prepareRemotePrompt(text), mode: 'prompt' });
       },
       onInterrupt: () => {
         abortControllerRef.current?.abort();

@@ -117,6 +117,12 @@ async function main(): Promise<void> {
   await sleep(200)
   check('duplicate msgid dropped', messages.length === 1, `count=${messages.length}`)
 
+  // The daemon owns authorization; incoming callbacks alone cannot claim
+  // the outbound chat. Simulate its post-pair bind before testing replies.
+  await adapter.sendText('尚未配对')
+  check('unpaired inbound cannot receive outbound', !inbound.some(f => f.cmd === 'aibot_respond_msg'))
+  check('authorized bind claims outbound chat', adapter.bindChat(messages[0].chatId, { force: true }))
+
   // 4. sendText 透传回调 req_id（respond_msg，24h 窗口）
   await adapter.sendText('第一条回复')
   await sleep(150)

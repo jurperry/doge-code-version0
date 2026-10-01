@@ -365,6 +365,7 @@ import { sleep } from '../utils/sleep.js'
 import { isExtractModeActive } from '../memdir/paths.js'
 import { imRemote } from '../utils/imRemote/client.js'
 import { remoteAutoTargetMode } from '../utils/imRemote/autoMode.js'
+import { prepareRemotePrompt } from '../utils/imRemote/prompt.js'
 import { lastAssistantText, lastPathSegment, parseAskPayload, safeJsonPreview } from '../utils/imRemote/format.js'
 
 // Dead code elimination: conditional imports
@@ -2896,7 +2897,7 @@ function runHeadlessStreaming(
       // 是本地超集键，schema 校验方（zod 默认忽略未知键）不受影响。
       const remotePromptUuid = randomUUID()
       enqueue({
-        value: text,
+        value: prepareRemotePrompt(text),
         mode: 'prompt' as const,
         uuid: remotePromptUuid,
       })

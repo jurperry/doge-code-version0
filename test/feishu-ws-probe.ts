@@ -316,7 +316,13 @@ check(
 }
 check('event acked', await waitFor('ack', () => acks >= 1), `acks=${acks}`)
 
-// 发送目标回退（cfg.chatId 为空 → 用最近收到消息的 chat）
+// Inbound alone cannot claim the outbound chat. The daemon binds it only
+// after authorization; mirror that step in the adapter-only probe.
+let unpairedRejected = false
+try { await adapter.sendText('尚未配对') } catch { unpairedRejected = true }
+check('unpaired inbound cannot receive outbound', unpairedRejected && restSends.length === 0)
+check('authorized bind claims outbound chat', adapter.bindChat('oc_1', { force: true }))
+// 发送到已授权并绑定的会话（cfg.chatId 为空）
 try {
   await adapter.sendText('hello from probe')
 } catch (err) {
@@ -324,7 +330,7 @@ try {
 }
 console.log('    adapter logs:', JSON.stringify(logs))
 check(
-  'sendText falls back to last inbound chat',
+  'sendText targets authorized inbound chat',
   await waitFor('rest send', () => restSends.some(s => s.receive_id === 'oc_1')),
   JSON.stringify(restSends),
 )

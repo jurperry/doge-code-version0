@@ -363,6 +363,11 @@
 2. 解决：① config 改 `pairs?: Partial<Record<ImPlatform, ImRemotePairState>>` + `allowedUsersByPlatform` + `outboundChats`（daemon 属主）；normalize 迁移 legacy 键——单平台凭据时 allowedUsers 无损归到该平台、多平台作废（属主不可判）、legacy 全局 pair 恒作废（启动即按平台重铸）；新键优先。② 自动铸码/regen（monitor 帧带 platform，缺省重铸全部在跑平台）/消耗均按平台各管各的；/pair 按来源平台验码（跨平台码互斥）。③ broadcastIm 过滤：零配对用户的 bot 平台不发（web 令牌门恒放行）。④ ImAdapter 新增 `bindChat(chatId,{force}): boolean`（配置 chatId 恒最高优先、常规 first-wins、配对 force 接管、返回是否变更）；daemon `applyChatBinding` 统一门后绑定，变更持久化 outboundChats、启动 restoreChatBindings 恢复——重启不再黑洞。⑤ persistDaemonKeys 三键 patch + 串行队列（每调用独立兑现、队列尾巴自愈），配对路径 force 绑定与码消耗/授权增员合并一次持久化。⑥ status 帧顶层 pairCode/allowedUsers 降级占位（null/并集，无消费方），真实数据在 bots[] 每平台条目。平台前置查证：企微官方要求 aibot_send_msg 前用户须先发过消息、Telegram bot 不能主动发起会话——配对消息本身即满足，force 绑定合规。
 3. 位置：src/utils/imRemote/{types,config,format,daemon}.ts、adapters/{telegram,feishu,wecom}.ts；config.test.ts（迁移三分支/pairs 归一/outboundChats，+3 测）、format.test.ts（isPairCodeValid 改收平台配对态）。验证随 app 0.2.99 verify-im-remote R6d2–R6d4/R7c 系/R11b2（码不同/未配对零推送/按平台消耗/跨平台互斥/配对后恢复接收）。
 
+### 63. 远程团队意图绕开本地入口（随 app 0.2.100，CLI 2.1.275）
+1. 问题：TUI 的远程 onPrompt 直接 enqueue，未执行本地自然语言团队转投；headless 又在命令展开前已组装工具池，因此远程请求即使展开 /agent-teams，也可能没有 TeamCreate 等工具。已有团队会话再次请求协作也应逐次展开。带前导空格的显式命令无法通过 startsWith('/') 分派。
+2. 解决：两入口共用 prepareRemotePrompt，在 enqueue 前识别意图、启用会话团队工具并转为 /agent-teams；显式命令返回 trimmed，普通输入与排除项保留原文。headless user 帧继续使用原始文本与原 UUID，避免桌面气泡显示展开后的内部提示。单测先红后绿 9 项，全量 src 测试 537/537（独立配置目录、测试密钥 sk-user）；App 远程黑盒验证普通/首次/重复/TUI/headless/显式空格命令与原文气泡。
+3. 位置：src/utils/imRemote/prompt.ts、prompt.test.ts、src/cli/print.ts、src/screens/REPL.tsx；App tools/verify-im-remote.mjs R16/R17。两仓 feature/remote-teams-guides；重编内置 CLI 时基线为 3174a6a，本轮已获用户授权提交、合并 main 并删除已合并分支；App 提交说明记录最终 CLI commit。安装版远程 85/85、对话 246/246、设置 60/60、启动冒烟 5/5；test/{feishu-ws-probe,wecom-probe}.ts 补旧探针遗漏的授权后 bindChat，增加未授权零出站检查，飞书 25/25、企微 11/11（适配器生产代码未改）。
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。
