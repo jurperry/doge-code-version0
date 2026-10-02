@@ -18,6 +18,7 @@ import {
 } from 'src/utils/model/providers.js'
 import { readCustomApiStorage } from 'src/utils/customApiStorage.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
+import { requestFetch, requestTimeouts, validateModelEndpoint } from './requestLifecycle.js'
 import {
   getIsNonInteractiveSession,
   getSessionId,
@@ -99,6 +100,7 @@ export async function getAnthropicClient({
   fetchOverride?: ClientOptions['fetch']
   source?: string
 }): Promise<Anthropic> {
+  if (process.env.ANTHROPIC_BASE_URL) validateModelEndpoint(process.env.ANTHROPIC_BASE_URL)
   // Env var takes priority over stored provider so start scripts
   // (which set CLAUDE_CODE_COMPATIBLE_API_PROVIDER) are not overridden
   // by a stale customApiStorage.provider from a previous /model switch.
@@ -152,7 +154,7 @@ export async function getAnthropicClient({
   const ARGS = {
     defaultHeaders,
     maxRetries,
-    timeout: parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10),
+    timeout: requestTimeouts().headerMs,
     dangerouslyAllowBrowser: true,
     fetchOptions: getProxyFetchOptions({
       forAnthropicAPI: true,
@@ -416,6 +418,6 @@ function buildFetch(
     } catch {
       // never let logging crash the fetch
     }
-    return inner(input, { ...init, headers })
+    return requestFetch(inner as typeof fetch, input, { ...init, headers })
   }
 }

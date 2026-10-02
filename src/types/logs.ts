@@ -294,7 +294,17 @@ export type ContextCollapseSnapshotEntry = {
   lastSpawnTokens: number
 }
 
+export type NetworkRetryUsageEntry = {
+  type: 'network-retry-usage'
+  uuid: string
+  sessionId: string
+  timestamp: string
+  sourceUuid?: string
+  message: { id: string; model: string; usage: Record<string, unknown> }
+}
+
 export type Entry =
+  | NetworkRetryUsageEntry
   | TranscriptMessage
   | SummaryMessage
   | CustomTitleMessage

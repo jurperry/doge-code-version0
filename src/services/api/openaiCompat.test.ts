@@ -1,11 +1,33 @@
 import { test, expect } from 'bun:test'
-import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { APIConnectionError, APIError, APIUserAbortError } from '@anthropic-ai/sdk'
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import { convertAnthropicRequestToOpenAI, createAnthropicStreamFromOpenAI, createOpenAICompatStream } from './openaiCompat.js'
 import type { BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 
+test('premature OpenAI EOF is a retryable connection failure', async () => {
+  const reader = new Response('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n').body!.getReader()
+  const error = await expectError((async () => {
+    for await (const event of createAnthropicStreamFromOpenAI({ reader, model: 'test' })) {}
+  })())
+  expect(error).toBeInstanceOf(APIConnectionError)
+})
+
+test('OpenAI SSE authentication error retains terminal status instead of reconnecting', async () => {
+  const reader = new Response('data: {"error":{"type":"authentication_error","message":"bad key"}}\n\n').body!.getReader()
+  const error = await expectError((async () => { for await (const event of createAnthropicStreamFromOpenAI({ reader, model: 'test' })) {} })())
+  expect(error).toBeInstanceOf(APIError)
+  expect((error as APIError).status).toBe(401)
+})
+
 const GATEWAY_UPSTREAM_400 =
   '{"error":{"message":"Error from provider (Console Go): Upstream request failed","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}'
+
+test('invalid OpenAI endpoint is a terminal configuration error before fetch', async () => {
+  let requests = 0
+  const error = await expectError(createOpenAICompatStream({ apiKey: 'test', baseURL: 'not-a-url', fetch: (async () => { requests++; return new Response(null) }) as typeof fetch }, { model: 'test', messages: [] }))
+  expect(error).not.toBeInstanceOf(APIConnectionError)
+  expect(requests).toBe(0)
+})
 
 function stubFetch(response: Response): typeof globalThis.fetch {
   return (() => Promise.resolve(response)) as unknown as typeof globalThis.fetch
@@ -118,7 +140,7 @@ test('network-level fetch failure → retryable APIConnectionError', async () =>
   expect(error).toBeInstanceOf(APIConnectionError)
 })
 
-test('aborted signal rethrows the original abort error instead of APIConnectionError', async () => {
+test('pre-aborted signal returns user cancellation instead of APIConnectionError', async () => {
   const controller = new AbortController()
   controller.abort()
   const abortError = new DOMException('This operation was aborted', 'AbortError')
@@ -129,7 +151,7 @@ test('aborted signal rethrows the original abort error instead of APIConnectionE
       controller.signal,
     ),
   )
-  expect(error).toBe(abortError)
+  expect(error).toBeInstanceOf(APIUserAbortError)
 })
 
 test('200 with body returns a stream reader', async () => {

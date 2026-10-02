@@ -25,6 +25,7 @@ import {
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
 import { readCustomApiStorage } from 'src/utils/customApiStorage.js'
+import { recordNetworkRetryUsage } from 'src/utils/sessionStorage.js'
 import {
   convertAnthropicRequestToOpenAI,
   createAnthropicStreamFromOpenAI,
@@ -268,8 +269,10 @@ import {
   FallbackTriggeredError,
   is529Error,
   type RetryContext,
+  RetryBudget,
   withRetry,
 } from './withRetry.js'
+import { recoverStream } from './streamRecovery.js'
 
 // Define a type that represents valid JSON values
 type JsonValue = string | number | boolean | null | JsonObject | JsonArray
@@ -720,6 +723,7 @@ export type Options = {
   maxOutputTokensOverride?: number
   fallbackModel?: string
   onStreamingFallback?: () => void
+  retryBudget?: RetryBudget
   querySource: QuerySource
   agents: AgentDefinition[]
   allowedAgentTypes?: string[]
@@ -867,6 +871,7 @@ export async function* executeNonStreamingRequest(
     signal: AbortSignal
     initialConsecutive529Errors?: number
     querySource?: QuerySource
+    retryBudget?: RetryBudget
   },
   paramsFromContext: (context: RetryContext) => BetaMessageStreamParams,
   onAttempt: (attempt: number, start: number, maxOutputTokens: number) => void,
@@ -940,6 +945,7 @@ export async function* executeNonStreamingRequest(
       signal: retryOptions.signal,
       initialConsecutive529Errors: retryOptions.initialConsecutive529Errors,
       querySource: retryOptions.querySource,
+      retryBudget: retryOptions.retryBudget,
     },
   )
 
@@ -1808,6 +1814,20 @@ async function* queryModel(
   const contentBlocks: (BetaContentBlock | ConnectorTextBlock)[] = []
   let usage: NonNullableUsage = EMPTY_USAGE
   let costUSD = 0
+  let attemptUsageRecorded = false
+  let retainedToolUsageCorrection = false
+  function recordAttemptUsage(persistFailed = false, persistRetained = false): void {
+    if (attemptUsageRecorded) return
+    attemptUsageRecorded = true
+    if (!Object.values(usage).some(value => typeof value === 'number' && value > 0)) return
+    costUSD += addToTotalSessionCost(calculateUSDCost(resolvedModel, usage), usage, options.model)
+    const retained = persistRetained ? newMessages.at(-1) : undefined
+    if (persistFailed || retained) {
+      void recordNetworkRetryUsage(options.model, usage, retained ? {
+        messageId: retained.message.id, messageUuid: retained.uuid,
+      } : undefined).catch(logError)
+    }
+  }
   let stopReason: BetaStopReason | null = null
   let didFallBackToNonStreaming = false
   let fallbackMessage: AssistantMessage | undefined
@@ -1817,9 +1837,10 @@ async function* queryModel(
   let isFastModeRequest = isFastMode // Keep separate state as it may change if falling back
   let isAdvisorInProgress = false
 
+  const retryBudget = options.retryBudget ?? new RetryBudget()
   try {
     queryCheckpoint('query_client_creation_start')
-    const createGenerator = () => withRetry(
+    const createGenerator = (initialError?: unknown, discardPartial?: boolean, continuation?: boolean) => withRetry(
       () =>
         getAnthropicClient({
           maxRetries: 0, // Disabled auto-retry in favor of manual implementation
@@ -1828,6 +1849,7 @@ async function* queryModel(
           source: options.querySource,
         }),
       async (anthropic, attempt, context) => {
+        if (continuation) return undefined
         attemptNumber = attempt
         isFastModeRequest = context.fastMode ?? false
         start = Date.now()
@@ -1974,58 +1996,66 @@ async function* queryModel(
         ...(isFastModeEnabled() ? { fastMode: isFastMode } : false),
         signal,
         querySource: options.querySource,
+        retryBudget,
+        initialError,
+        discardPartial,
       },
     )
 
-    let generator = createGenerator()
-    let hasAttemptedImageStripRetry = false
-    let e
-    while (true) {
-      try {
-        e = await generator.next()
-      } catch (errorFromRetry) {
-        // Image/vision capability rejection: the endpoint doesn't support
-        // image blocks (common for third-party Anthropic-compatible endpoints
-        // like GLM/DeepSeek/Qwen). Strip images from this request only - not
-        // persisted history, so switching to a vision-capable model later
-        // still has them - and retry once. Independent of the (currently
-        // stubbed) reactiveCompact path, which never fires for media errors;
-        // without this, the image-bearing message sits in history forever and
-        // every subsequent turn re-fails.
-        if (
-          !hasAttemptedImageStripRetry &&
-          (isImageUnsupportedError(errorFromRetry) ||
-            (isClientError(errorFromRetry) &&
-              messagesContainImage(messagesForAPI)))
-        ) {
-          hasAttemptedImageStripRetry = true
-          messagesForAPI = stripImagesFromMessages(messagesForAPI)
-          generator = createGenerator()
-          continue
+    async function* acquireStream(initialError?: unknown, discardPartial?: boolean, continuation?: boolean) {
+      let generator = createGenerator(initialError, discardPartial, continuation)
+      let hasAttemptedImageStripRetry = false
+      let e
+      while (true) {
+        try {
+          e = await generator.next()
+        } catch (errorFromRetry) {
+          // Image/vision capability rejection: the endpoint doesn't support
+          // image blocks (common for third-party Anthropic-compatible endpoints
+          // like GLM/DeepSeek/Qwen). Strip images from this request only - not
+          // persisted history, so switching to a vision-capable model later
+          // still has them - and retry once. Independent of the (currently
+          // stubbed) reactiveCompact path, which never fires for media errors;
+          // without this, the image-bearing message sits in history forever and
+          // every subsequent turn re-fails.
+          if (
+            !hasAttemptedImageStripRetry &&
+            (isImageUnsupportedError(errorFromRetry) ||
+              (isClientError(errorFromRetry) &&
+                messagesContainImage(messagesForAPI)))
+          ) {
+            hasAttemptedImageStripRetry = true
+            if (!retryBudget.consume()) throw errorFromRetry
+            messagesForAPI = stripImagesFromMessages(messagesForAPI)
+            retryBudget.terminalError = undefined
+            generator = createGenerator()
+            continue
+          }
+          throw errorFromRetry
         }
-        throw errorFromRetry
-      }
 
-      if (e && !e.done && e.value === undefined) {
+        if (e && !e.done && e.value === undefined) {
+          throw new Error(
+            `[claude.ts] retry generator yielded undefined before stream acquisition; source=${options.querySource}`,
+          )
+        }
+
+        // Only yielded values are retry status; the return value is the stream.
+        if (!e.done) {
+          yield e.value
+        }
+        if (e.done) {
+          break
+        }
+      }
+      if (!e || (!e.value && !continuation)) {
         throw new Error(
-          `[claude.ts] retry generator yielded undefined before stream acquisition; source=${options.querySource}`,
+          `[claude.ts] retry generator completed without stream value; source=${options.querySource}`,
         )
       }
-
-      // yield API error messages (the stream has a 'controller' property, error messages don't)
-      if (!('controller' in e.value)) {
-        yield e.value
-      }
-      if (e.done) {
-        break
-      }
+      return e.value as Stream<BetaRawMessageStreamEvent> | undefined
     }
-    if (!e || !e.value) {
-      throw new Error(
-        `[claude.ts] retry generator completed without stream value; source=${options.querySource}`,
-      )
-    }
-    stream = e.value as Stream<BetaRawMessageStreamEvent>
+    stream = recoverStream(acquireStream) as unknown as Stream<BetaRawMessageStreamEvent>
 
     // reset state
     newMessages.length = 0
@@ -2036,69 +2066,6 @@ async function* queryModel(
     stopReason = null
     isAdvisorInProgress = false
 
-    // Streaming idle timeout watchdog: abort the stream if no chunks arrive
-    // for STREAM_IDLE_TIMEOUT_MS. Unlike the stall detection below (which only
-    // fires when the *next* chunk arrives), this uses setTimeout to actively
-    // kill hung streams. Without this, a silently dropped connection can hang
-    // the session indefinitely since the SDK's request timeout only covers the
-    // initial fetch(), not the streaming body.
-    const streamWatchdogEnabled = isEnvTruthy(
-      process.env.CLAUDE_ENABLE_STREAM_WATCHDOG,
-    )
-    const STREAM_IDLE_TIMEOUT_MS =
-      parseInt(process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS || '', 10) || 90_000
-    const STREAM_IDLE_WARNING_MS = STREAM_IDLE_TIMEOUT_MS / 2
-    let streamIdleAborted = false
-    // performance.now() snapshot when watchdog fires, for measuring abort propagation delay
-    let streamWatchdogFiredAt: number | null = null
-    let streamIdleWarningTimer: ReturnType<typeof setTimeout> | null = null
-    let streamIdleTimer: ReturnType<typeof setTimeout> | null = null
-    function clearStreamIdleTimers(): void {
-      if (streamIdleWarningTimer !== null) {
-        clearTimeout(streamIdleWarningTimer)
-        streamIdleWarningTimer = null
-      }
-      if (streamIdleTimer !== null) {
-        clearTimeout(streamIdleTimer)
-        streamIdleTimer = null
-      }
-    }
-    function resetStreamIdleTimer(): void {
-      clearStreamIdleTimers()
-      if (!streamWatchdogEnabled) {
-        return
-      }
-      streamIdleWarningTimer = setTimeout(
-        warnMs => {
-          logForDebugging(
-            `Streaming idle warning: no chunks received for ${warnMs / 1000}s`,
-            { level: 'warn' },
-          )
-          logForDiagnosticsNoPII('warn', 'cli_streaming_idle_warning')
-        },
-        STREAM_IDLE_WARNING_MS,
-        STREAM_IDLE_WARNING_MS,
-      )
-      streamIdleTimer = setTimeout(() => {
-        streamIdleAborted = true
-        streamWatchdogFiredAt = performance.now()
-        logForDebugging(
-          `Streaming idle timeout: no chunks received for ${STREAM_IDLE_TIMEOUT_MS / 1000}s, aborting stream`,
-          { level: 'error' },
-        )
-        logForDiagnosticsNoPII('error', 'cli_streaming_idle_timeout')
-        logEvent('tengu_streaming_idle_timeout', {
-          model:
-            options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          request_id: (streamRequestId ??
-            'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          timeout_ms: STREAM_IDLE_TIMEOUT_MS,
-        })
-        releaseStreamResources()
-      }, STREAM_IDLE_TIMEOUT_MS)
-    }
-    resetStreamIdleTimer()
-
     startSessionActivity('api_call')
     try {
       // stream in and accumulate state
@@ -2108,13 +2075,30 @@ async function* queryModel(
       let totalStallTime = 0
       let stallCount = 0
 
-      for await (const part of stream) {
+      for await (const rawPart of stream as unknown as ReturnType<typeof recoverStream>) {
+        if (rawPart.type === 'system') {
+          if (rawPart.discardPartial === false && newMessages.some(message => message.message.content.some(block => block.type === 'tool_use'))) retainedToolUsageCorrection = true
+          if (rawPart.discardPartial) {
+            recordAttemptUsage(true)
+            rawPart.discardMessageIds = newMessages.map(message => message.uuid)
+            options.onStreamingFallback?.()
+            newMessages.length = 0
+            contentBlocks.length = 0
+            partialMessage = undefined
+            usage = EMPTY_USAGE
+            attemptUsageRecorded = false
+            retainedToolUsageCorrection = false
+            stopReason = null
+          }
+          yield rawPart
+          continue
+        }
+        const part = rawPart as BetaRawMessageStreamEvent
         if (!part) {
           throw new Error(
             `[claude.ts] stream yielded undefined part; compatProvider=${readCustomApiStorage().provider ?? 'anthropic'} model=${options.model}`,
           )
         }
-        resetStreamIdleTimer()
         const now = Date.now()
 
         // Detect and log streaming stalls (only after first event to avoid counting TTFB)
@@ -2423,14 +2407,6 @@ async function* queryModel(
               lastMsg.message.stop_reason = stopReason
             }
 
-            // Update cost
-            const costUSDForPart = calculateUSDCost(resolvedModel, usage)
-            costUSD += addToTotalSessionCost(
-              costUSDForPart,
-              usage,
-              options.model,
-            )
-
             const refusalMessage = getErrorMessageIfRefusal(
               part.delta.stop_reason,
               options.model,
@@ -2468,8 +2444,10 @@ async function* queryModel(
             }
             break
           }
-          case 'message_stop':
+          case 'message_stop': {
+            recordAttemptUsage(false, retainedToolUsageCorrection)
             break
+          }
         }
 
         yield {
@@ -2478,38 +2456,6 @@ async function* queryModel(
           ...(part.type === 'message_start' ? { ttftMs } : undefined),
         }
       }
-      // Clear the idle timeout watchdog now that the stream loop has exited
-      clearStreamIdleTimers()
-
-      // If the stream was aborted by our idle timeout watchdog, fall back to
-      // non-streaming retry rather than treating it as a completed stream.
-      if (streamIdleAborted) {
-        // Instrumentation: proves the for-await exited after the watchdog fired
-        // (vs. hung forever). exit_delay_ms measures abort propagation latency:
-        // 0-10ms = abort worked; >>1000ms = something else woke the loop.
-        const exitDelayMs =
-          streamWatchdogFiredAt !== null
-            ? Math.round(performance.now() - streamWatchdogFiredAt)
-            : -1
-        logForDiagnosticsNoPII(
-          'info',
-          'cli_stream_loop_exited_after_watchdog_clean',
-        )
-        logEvent('tengu_stream_loop_exited_after_watchdog', {
-          request_id: (streamRequestId ??
-            'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          exit_delay_ms: exitDelayMs,
-          exit_path:
-            'clean' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          model:
-            options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        })
-        // Prevent double-emit: this throw lands in the catch block below,
-        // whose exit_path='error' probe guards on streamWatchdogFiredAt.
-        streamWatchdogFiredAt = null
-        throw new Error('Stream idle timeout - no chunks received')
-      }
-
       // Detect when the stream completed without producing any assistant messages.
       // This covers two proxy failure modes:
       // 1. No events at all (!partialMessage): proxy returned 200 with non-SSE body
@@ -2578,34 +2524,9 @@ async function* queryModel(
         responseHeaders = resp.headers
       }
     } catch (streamingError) {
-      // Clear the idle timeout watchdog on error path too
-      clearStreamIdleTimers()
-
-      // Instrumentation: if the watchdog had already fired and the for-await
-      // threw (rather than exiting cleanly), record that the loop DID exit and
-      // how long after the watchdog. Distinguishes true hangs from error exits.
-      if (streamIdleAborted && streamWatchdogFiredAt !== null) {
-        const exitDelayMs = Math.round(
-          performance.now() - streamWatchdogFiredAt,
-        )
-        logForDiagnosticsNoPII(
-          'info',
-          'cli_stream_loop_exited_after_watchdog_error',
-        )
-        logEvent('tengu_stream_loop_exited_after_watchdog', {
-          request_id: (streamRequestId ??
-            'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          exit_delay_ms: exitDelayMs,
-          exit_path:
-            'error' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          error_name:
-            streamingError instanceof Error
-              ? (streamingError.name as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS)
-              : ('unknown' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS),
-          model:
-            options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        })
-      }
+      recordAttemptUsage(newMessages.length === 0, newMessages.length > 0)
+      if (streamingError instanceof CannotRetryError || signal.aborted) throw streamingError
+      if (newMessages.some(message => message.message.content.some(block => block.type === 'tool_use'))) throw streamingError
 
       if (streamingError instanceof APIUserAbortError) {
         // Check if the abort signal was triggered by the user (ESC key)
@@ -2670,9 +2591,7 @@ async function* queryModel(
           fallback_disabled: true,
           request_id: (streamRequestId ??
             'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          fallback_cause: (streamIdleAborted
-            ? 'watchdog'
-            : 'other') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          fallback_cause: 'other' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         })
         throw streamingError
       }
@@ -2702,9 +2621,7 @@ async function* queryModel(
         fallback_disabled: false,
         request_id: (streamRequestId ??
           'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        fallback_cause: (streamIdleAborted
-          ? 'watchdog'
-          : 'other') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        fallback_cause: 'other' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
 
       // Fall back to non-streaming mode with retries.
@@ -2720,9 +2637,7 @@ async function* queryModel(
           'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         model:
           options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        fallback_cause: (streamIdleAborted
-          ? 'watchdog'
-          : 'other') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        fallback_cause: 'other' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
       const result = yield* executeNonStreamingRequest(
         { model: options.model, source: options.querySource },
@@ -2733,6 +2648,7 @@ async function* queryModel(
           ...(isFastModeEnabled() && { fastMode: isFastMode }),
           signal,
           initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0,
+          retryBudget,
           querySource: options.querySource,
         },
         paramsFromContext,
@@ -2768,8 +2684,6 @@ async function* queryModel(
       newMessages.push(m)
       fallbackMessage = m
       yield m
-    } finally {
-      clearStreamIdleTimers()
     }
   } catch (errorFromRetry) {
     // FallbackTriggeredError must propagate to query.ts, which performs the
@@ -2792,6 +2706,8 @@ async function* queryModel(
       errorFromRetry.originalError.status === 404
 
     if (is404StreamCreationError) {
+      if (!retryBudget.consume()) throw errorFromRetry
+      retryBudget.terminalError = undefined
       // 404 is thrown at .withResponse() before streamRequestId is assigned,
       // and CannotRetryError means every retry failed — so grab the failed
       // request's ID from the error header instead.
@@ -2831,6 +2747,7 @@ async function* queryModel(
             thinkingConfig,
             ...(isFastModeEnabled() && { fastMode: isFastMode }),
             signal,
+            retryBudget,
           },
           paramsFromContext,
           (attempt, _startTime, tokens) => {
@@ -3093,6 +3010,10 @@ export function cleanupStream(
     return
   }
   try {
+    if (!('controller' in stream)) {
+      void (stream as unknown as AsyncGenerator).return(undefined).catch(() => {})
+      return
+    }
     // Abort the stream via its controller if not already aborted
     if (!stream.controller.signal.aborted) {
       stream.controller.abort()

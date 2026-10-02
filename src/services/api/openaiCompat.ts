@@ -1,4 +1,6 @@
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { requestFetch } from './requestLifecycle.js'
+import { streamAPIError } from './streamErrors.js'
 import type {
   BetaMessage,
   BetaMessageParam,
@@ -421,7 +423,7 @@ export async function createOpenAICompatStream(
 ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
   let response: Response
   try {
-    response = await (config.fetch ?? globalThis.fetch)(
+    response = await requestFetch(config.fetch ?? globalThis.fetch,
       joinBaseUrl(config.baseURL, '/v1/chat/completions'),
       {
         method: 'POST',
@@ -436,7 +438,7 @@ export async function createOpenAICompatStream(
     )
   } catch (error) {
     // Never convert an intentional abort into a retryable connection error.
-    if (signal?.aborted) throw error
+    if (signal?.aborted || !(error instanceof APIConnectionError)) throw error
     // Network-level failure (DNS, reset, TLS). The Anthropic-native path gets
     // APIConnectionError from the SDK and withRetry retries it — give the
     // OpenAI-compatible path the same treatment.
@@ -540,6 +542,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
   // some providers only emit them on the final chunk.
   const urlCitations = new Map<string, string>()
 
+  try {
   while (true) {
     const { done, value } = await input.reader.read()
     if (done) break
@@ -556,6 +559,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
       for (const data of dataLines) {
         if (!data || data === '[DONE]') continue
         const chunk = JSON.parse(data) as OpenAIStreamChunk
+        if ((chunk as any)?.error) throw streamAPIError(chunk)
         if (!chunk || typeof chunk !== 'object') {
           throw new Error(
             `[openaiCompat] invalid stream chunk: ${String(data).slice(0, 500)}`,
@@ -865,7 +869,11 @@ export async function* createAnthropicStreamFromOpenAI(input: {
     }
   }
 
-  throw new Error(
+  throw new APIConnectionError({ message:
     `[openaiCompat] stream ended unexpectedly before message_stop for model=${input.model}`,
-  )
+  })
+  } finally {
+    void input.reader.cancel().catch(() => {})
+    try { input.reader.releaseLock() } catch {}
+  }
 }

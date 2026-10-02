@@ -1586,6 +1586,9 @@ export const SDKAPIRetryMessageSchema = lazySchema(() =>
     .object({
       type: z.literal('system'),
       subtype: z.literal('api_retry'),
+      discard_partial: z.boolean().optional(),
+      discard_message_ids: z.array(z.string()).optional(),
+      parent_tool_use_id: z.string().nullable().optional(),
       attempt: z.number(),
       max_retries: z.number(),
       retry_delay_ms: z.number(),

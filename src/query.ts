@@ -102,6 +102,7 @@ import { recordContentReplacement } from './utils/sessionStorage.js'
 import { handleStopHooks } from './query/stopHooks.js'
 import { buildQueryConfig } from './query/config.js'
 import { productionDeps, type QueryDeps } from './query/deps.js'
+import { RetryBudget } from './services/api/withRetry.js'
 import type { Terminal, Continue } from './query/transitions.js'
 import { feature } from 'bun:bundle'
 import {
@@ -262,6 +263,7 @@ async function* queryLoop(
     skipCacheWrite,
   } = params
   const deps = params.deps ?? productionDeps()
+  const retryBudget = new RetryBudget()
 
   // IM remote-control: count every tool call so the bridge daemon can emit
   // progress summaries (every N calls) to the paired IM user. Wrapping at
@@ -675,6 +677,7 @@ async function* queryLoop(
                 return appState.toolPermissionContext
               },
               model: currentModel,
+              retryBudget,
               ...(config.gates.fastModeEnabled && {
                 fastMode: appState.fastMode,
               }),
@@ -717,6 +720,10 @@ async function* queryLoop(
             // We could.. but then we'd have to merge assistant messages
             // with different ids and double up on full the tool_results
             if (streamingFallbackOccured) {
+              streamingFallbackOccured = false
+              if (message.type === 'system' && message.subtype === 'api_error') {
+                message.discardMessageIds = assistantMessages.map(msg => msg.uuid)
+              }
               // Yield tombstones for orphaned messages so they're removed from UI and transcript.
               // These partial messages (especially thinking blocks) have invalid signatures
               // that would cause "thinking blocks cannot be modified" API errors.

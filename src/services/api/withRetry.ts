@@ -125,6 +125,9 @@ export interface RetryContext {
 }
 
 interface RetryOptions {
+  retryBudget?: RetryBudget
+  initialError?: unknown
+  discardPartial?: boolean
   maxRetries?: number
   model: string
   fallbackModel?: string
@@ -139,6 +142,20 @@ interface RetryOptions {
    * regardless of which request mode hit the overload.
    */
   initialConsecutive529Errors?: number
+}
+
+export class RetryBudget {
+  retriesUsed = 0
+  terminalError: unknown
+  readonly maxRetries: number
+  constructor(maxRetries = getDefaultMaxRetries()) {
+    this.maxRetries = Number.isInteger(maxRetries) && maxRetries >= 0 ? Math.min(10, maxRetries) : 10
+  }
+  consume(): boolean {
+    if (this.retriesUsed >= this.maxRetries) return false
+    this.retriesUsed++
+    return true
+  }
 }
 
 export class CannotRetryError extends Error {
@@ -177,10 +194,16 @@ export async function* withRetry<T>(
   options: RetryOptions,
 ): AsyncGenerator<SystemAPIErrorMessage, T> {
   const maxRetries = getMaxRetries(options)
+  const budget = options.retryBudget ?? new RetryBudget(maxRetries)
   const retryContext: RetryContext = {
     model: options.model,
     thinkingConfig: options.thinkingConfig,
     ...(isFastModeEnabled() && { fastMode: options.fastMode }),
+  }
+  if (budget.terminalError !== undefined) throw new CannotRetryError(budget.terminalError, retryContext)
+  function terminalError(error: unknown): CannotRetryError {
+    budget.terminalError = error
+    return new CannotRetryError(error, retryContext)
   }
   let client: Anthropic | null = null
   let consecutive529Errors = options.initialConsecutive529Errors ?? 0
@@ -198,6 +221,7 @@ export async function* withRetry<T>(
       : false
 
     try {
+      if (attempt === 1 && options.initialError !== undefined) throw options.initialError
       // Check for mock rate limits (used by /mock-limits command for Ant employees)
       if (process.env.USER_TYPE === 'ant') {
         const mockError = checkMockRateLimitError(
@@ -250,8 +274,9 @@ export async function* withRetry<T>(
         client = await getClient()
       }
 
-      return await operation(client, attempt, retryContext)
+      return await operation(client, budget.retriesUsed + 1, retryContext)
     } catch (error) {
+      if (options.signal?.aborted || error instanceof APIUserAbortError) throw new APIUserAbortError()
       lastError = error
       logForDebugging(
         `API error (attempt ${attempt}/${maxRetries + 1}): ${error instanceof APIError ? `${error.status} ${error.message}` : errorMessage(error)}`,
@@ -270,6 +295,7 @@ export async function* withRetry<T>(
         error instanceof APIError &&
         (error.status === 429 || is529Error(error))
       ) {
+        if (!budget.consume()) throw terminalError(error)
         // If the 429 is specifically because extra usage (overage) is not
         // available, permanently disable fast mode with a specific message.
         const overageReason = error.headers?.get(
@@ -308,6 +334,7 @@ export async function* withRetry<T>(
       // (e.g., org doesn't have fast mode enabled), permanently disable fast
       // mode and retry at standard speed.
       if (wasFastModeActive && isFastModeNotEnabledError(error)) {
+        if (!budget.consume()) throw terminalError(error)
         handleFastModeRejectedByAPI()
         retryContext.fastMode = false
         continue
@@ -320,7 +347,7 @@ export async function* withRetry<T>(
           query_source:
             options.querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         })
-        throw new CannotRetryError(error, retryContext)
+        throw terminalError(error)
       }
 
       // Track consecutive 529 errors
@@ -335,6 +362,7 @@ export async function* withRetry<T>(
         if (consecutive529Errors >= MAX_529_RETRIES) {
           // Check if fallback model is specified
           if (options.fallbackModel) {
+            if (!budget.consume()) throw terminalError(error)
             logEvent('tengu_api_opus_fallback_triggered', {
               original_model:
                 options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -367,8 +395,8 @@ export async function* withRetry<T>(
       // Only retry if the error indicates we should
       const persistent =
         isPersistentRetryEnabled() && isTransientCapacityError(error)
-      if (attempt > maxRetries && !persistent) {
-        throw new CannotRetryError(error, retryContext)
+      if (attempt > maxRetries || budget.retriesUsed >= budget.maxRetries) {
+        throw terminalError(error)
       }
 
       // AWS/GCP errors aren't always APIError, but can be retried
@@ -378,8 +406,10 @@ export async function* withRetry<T>(
         !handledCloudAuthError &&
         (!(error instanceof APIError) || !shouldRetry(error))
       ) {
-        throw new CannotRetryError(error, retryContext)
+        throw terminalError(error)
       }
+
+      if (!budget.consume()) throw terminalError(error)
 
       // Handle max tokens context overflow errors by adjusting max_tokens for the next attempt
       // NOTE: With extended-context-window beta, this 400 error should not occur.
@@ -459,12 +489,12 @@ export async function* withRetry<T>(
           PERSISTENT_RESET_CAP_MS,
         )
       } else {
-        delayMs = getRetryDelay(attempt, retryAfter)
+        delayMs = getRetryDelay(budget.retriesUsed, retryAfter)
       }
 
       // In persistent mode the for-loop `attempt` is clamped at maxRetries+1;
       // use persistentAttempt for telemetry/yields so they show the true count.
-      const reportedAttempt = persistent ? persistentAttempt : attempt
+      const reportedAttempt = budget.retriesUsed
       logEvent('tengu_api_retry', {
         attempt: reportedAttempt,
         delayMs: delayMs,
@@ -490,12 +520,10 @@ export async function* withRetry<T>(
         while (remaining > 0) {
           if (options.signal?.aborted) throw new APIUserAbortError()
           if (error instanceof APIError) {
-            yield createSystemAPIErrorMessage(
-              error,
-              remaining,
-              reportedAttempt,
-              maxRetries,
-            )
+            yield {
+              ...createSystemAPIErrorMessage(error, remaining, reportedAttempt, budget.maxRetries),
+              discardPartial: options.discardPartial ?? false,
+            }
           }
           const chunk = Math.min(remaining, HEARTBEAT_INTERVAL_MS)
           await sleep(chunk, options.signal, { abortError })
@@ -506,14 +534,17 @@ export async function* withRetry<T>(
         if (attempt >= maxRetries) attempt = maxRetries
       } else {
         if (error instanceof APIError) {
-          yield createSystemAPIErrorMessage(error, delayMs, attempt, maxRetries)
+          yield {
+            ...createSystemAPIErrorMessage(error, delayMs, reportedAttempt, budget.maxRetries),
+            discardPartial: options.discardPartial ?? false,
+          }
         }
         await sleep(delayMs, options.signal, { abortError })
       }
     }
   }
 
-  throw new CannotRetryError(lastError, retryContext)
+  throw terminalError(lastError)
 }
 
 function getRetryAfter(error: unknown): string | null {
@@ -534,13 +565,16 @@ export function getRetryDelay(
 ): number {
   if (retryAfterHeader) {
     const seconds = parseInt(retryAfterHeader, 10)
-    if (!isNaN(seconds)) {
-      return seconds * 1000
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, maxDelayMs)
     }
   }
 
+  const configuredBase = Number(process.env.DOGE_NETWORK_RETRY_BASE_MS)
+  const retryBase = Number.isInteger(configuredBase) && configuredBase >= 10 && configuredBase <= 32_000
+    ? configuredBase : BASE_DELAY_MS
   const baseDelay = Math.min(
-    BASE_DELAY_MS * Math.pow(2, attempt - 1),
+    retryBase * Math.pow(2, attempt - 1),
     maxDelayMs,
   )
   const jitter = Math.random() * 0.25 * baseDelay
@@ -698,6 +732,12 @@ function shouldRetry(error: APIError): boolean {
   if (isMockRateLimitError(error)) {
     return false
   }
+  // User configuration/authentication failures are not network reconnects.
+  // Keep the specific max_tokens adjustment below for known recoverable 400s.
+  if (error.status === 400 && !parseMaxTokensContextOverflowError(error)) return false
+  if ((error.status === 401 || error.status === 403) &&
+      !isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) &&
+      !(getClaudeAIOAuthTokens()?.accessToken && isClaudeAISubscriber())) return false
 
   // Persistent mode: 429/529 always retryable, bypass subscriber gates and
   // x-should-retry header.
@@ -788,17 +828,17 @@ function shouldRetry(error: APIError): boolean {
 
 export function getDefaultMaxRetries(): number {
   if (process.env.CLAUDE_CODE_MAX_RETRIES) {
-    const parsed = parseInt(process.env.CLAUDE_CODE_MAX_RETRIES, 10)
+    const parsed = Number(process.env.CLAUDE_CODE_MAX_RETRIES)
     // NaN would make every retry-loop comparison false and fail the request
     // immediately with an opaque CannotRetryError.
-    if (Number.isFinite(parsed) && parsed >= 0) {
-      return parsed
+    if (Number.isInteger(parsed) && parsed >= 0) {
+      return Math.min(parsed, DEFAULT_MAX_RETRIES)
     }
   }
   return DEFAULT_MAX_RETRIES
 }
 function getMaxRetries(options: RetryOptions): number {
-  return options.maxRetries ?? getDefaultMaxRetries()
+  return options.retryBudget?.maxRetries ?? new RetryBudget(options.maxRetries ?? getDefaultMaxRetries()).maxRetries
 }
 
 const DEFAULT_FAST_MODE_FALLBACK_HOLD_MS = 30 * 60 * 1000 // 30 minutes

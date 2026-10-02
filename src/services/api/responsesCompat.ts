@@ -1,4 +1,6 @@
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { requestFetch } from './requestLifecycle.js'
+import { streamAPIError } from './streamErrors.js'
 import type {
   BetaMessage,
   BetaMessageParam,
@@ -405,7 +407,7 @@ export async function createResponsesCompatStream(
 ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
   let response: Response
   try {
-    response = await (config.fetch ?? globalThis.fetch)(
+    response = await requestFetch(config.fetch ?? globalThis.fetch,
       joinBaseUrl(config.baseURL, '/v1/responses'),
       {
         method: 'POST',
@@ -420,7 +422,7 @@ export async function createResponsesCompatStream(
     )
   } catch (error) {
     // Never convert an intentional abort into a retryable connection error.
-    if (signal?.aborted) throw error
+    if (signal?.aborted || !(error instanceof APIConnectionError)) throw error
     // Network-level failure (DNS, reset, TLS) — same treatment as the
     // OpenAI-compatible path so withRetry can retry it.
     throw new APIConnectionError({
@@ -636,6 +638,7 @@ export async function* createAnthropicStreamFromResponses(input: {
     }
   }
 
+  try {
   while (true) {
     const { done, value } = await input.reader.read()
     if (done) break
@@ -654,6 +657,7 @@ export async function* createAnthropicStreamFromResponses(input: {
         }
 
         const eventType = normalizeEventType(event, rawEvent.event)
+        if (eventType === 'error' || eventType === 'response.failed') throw streamAPIError(event)
         responseId =
           event.response?.id ?? event.response_id ?? event.item?.id ?? responseId
 
@@ -886,8 +890,7 @@ export async function* createAnthropicStreamFromResponses(input: {
 
         if (
           eventType === 'response.completed' ||
-          eventType === 'response.incomplete' ||
-          eventType === 'response.failed'
+          eventType === 'response.incomplete'
         ) {
           finalStopReason = mapResponsesStopReason(event)
 
@@ -1032,7 +1035,11 @@ export async function* createAnthropicStreamFromResponses(input: {
     }
   }
 
-  throw new Error(
+  throw new APIConnectionError({ message:
     `[responsesCompat] stream ended unexpectedly before message_stop for model=${input.model}`,
-  )
+  })
+  } finally {
+    void input.reader.cancel().catch(() => {})
+    try { input.reader.releaseLock() } catch {}
+  }
 }

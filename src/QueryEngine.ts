@@ -74,6 +74,7 @@ import { setCwd } from './utils/Shell.js'
 import {
   flushSessionStorage,
   recordTranscript,
+  removeTranscriptMessage,
 } from './utils/sessionStorage.js'
 import { asSystemPrompt } from './utils/systemPromptType.js'
 import { resolveThemeSetting } from './utils/systemTheme.js'
@@ -666,6 +667,12 @@ export class QueryEngine {
 
     // Track current message usage (reset on each message_start)
     let currentMessageUsage: NonNullableUsage = EMPTY_USAGE
+    let currentMessageUsageRecorded = true
+    const recordCurrentMessageUsage = () => {
+      if (currentMessageUsageRecorded) return
+      this.totalUsage = accumulateUsage(this.totalUsage, currentMessageUsage)
+      currentMessageUsageRecorded = true
+    }
     let turnCount = 1
     let hasAcknowledgedInitialMessages = false
     // Track structured output from StructuredOutput tool calls
@@ -682,6 +689,7 @@ export class QueryEngine {
       ? countToolCalls(this.mutableMessages, SYNTHETIC_OUTPUT_TOOL_NAME)
       : 0
 
+    const pendingTranscriptWrites = new Set<Promise<unknown>>()
     for await (const message of query({
       messages,
       systemPrompt,
@@ -735,7 +743,9 @@ export class QueryEngine {
           // useLogMessages.ts fire-and-forgets. enqueueWrite is
           // order-preserving so fire-and-forget here is safe.
           if (message.type === 'assistant') {
-            void recordTranscript(messages)
+            const recording = recordTranscript(messages)
+            pendingTranscriptWrites.add(recording)
+            void recording.finally(() => pendingTranscriptWrites.delete(recording)).catch(() => {})
           } else {
             await recordTranscript(messages)
           }
@@ -766,7 +776,20 @@ export class QueryEngine {
 
       switch (message.type) {
         case 'tombstone':
-          // Tombstone messages are control signals for removing messages, skip them
+          // Replayed partial blocks must leave memory and disk as well as UI.
+          // print.ts retains this array across ask() engines. Preserve its
+          // identity so the next turn sees the accepted replay, not the orphan.
+          for (let index = this.mutableMessages.length - 1; index >= 0; index--) {
+            if (this.mutableMessages[index].uuid === message.message.uuid) this.mutableMessages.splice(index, 1)
+          }
+          for (let index = messages.length - 1; index >= 0; index--) {
+            if (messages[index].uuid === message.message.uuid) messages.splice(index, 1)
+          }
+          if (persistSession) {
+            await Promise.all(pendingTranscriptWrites)
+            await flushSessionStorage()
+            await removeTranscriptMessage(message.message.uuid)
+          }
           break
         case 'assistant':
           // Capture stop_reason if already set (synthetic messages). For
@@ -797,6 +820,7 @@ export class QueryEngine {
           break
         case 'stream_event':
           if (message.event.type === 'message_start') {
+            currentMessageUsageRecorded = false
             // Reset current message usage for new message
             currentMessageUsage = EMPTY_USAGE
             currentMessageUsage = updateUsage(
@@ -818,11 +842,7 @@ export class QueryEngine {
             }
           }
           if (message.event.type === 'message_stop') {
-            // Accumulate current message usage into total
-            this.totalUsage = accumulateUsage(
-              this.totalUsage,
-              currentMessageUsage,
-            )
+            recordCurrentMessageUsage()
           }
 
           if (includePartialMessages) {
@@ -951,6 +971,7 @@ export class QueryEngine {
             }
           }
           if (message.subtype === 'api_error') {
+            if (message.discardPartial) recordCurrentMessageUsage()
             yield {
               type: 'system',
               subtype: 'api_retry' as const,
@@ -959,6 +980,9 @@ export class QueryEngine {
               retry_delay_ms: message.retryInMs,
               error_status: message.error.status ?? null,
               error: categorizeRetryableAPIError(message.error),
+              discard_partial: message.discardPartial ?? false,
+              discard_message_ids: message.discardMessageIds ?? [],
+              parent_tool_use_id: null,
               session_id: getSessionId(),
               uuid: message.uuid,
             }
@@ -1057,6 +1081,9 @@ export class QueryEngine {
         }
       }
     }
+
+    // A final failed stream may have known usage without a terminal marker.
+    recordCurrentMessageUsage()
 
     // Stop hooks yield progress/attachment messages AFTER the assistant
     // response (via yield* handleStopHooks in query.ts). Since #23537 pushes

@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import type { UUID } from 'crypto'
+import { randomUUID, type UUID } from 'crypto'
 import type { Dirent } from 'fs'
 // Sync fs primitives for readFileTailSync — separate from fs/promises
 // imports above. Named (not wildcard) per CLAUDE.md style; no collisions
@@ -598,6 +598,7 @@ class Project {
   // Entries buffered while sessionFile is null. Flushed by materializeSessionFile
   // on the first user/assistant message — prevents metadata-only session files.
   private pendingEntries: Entry[] = []
+  private tombstonedMessageUuids = new Set<string>()
   private remoteIngressUrl: string | null = null
   private internalEventWriter: InternalEventWriter | null = null
   private internalEventReader: InternalEventReader | null = null
@@ -612,6 +613,10 @@ class Project {
   >()
   private flushTimer: ReturnType<typeof setTimeout> | null = null
   private activeDrain: Promise<void> | null = null
+  // Appends and tombstone rewrites must share one queue: a truncate based on
+  // an earlier file size must never erase a concurrent append or removal.
+  private fileMutationQueue: Promise<void> = Promise.resolve()
+  private pendingFileMutations = 0
   private FLUSH_INTERVAL_MS = 100
   private readonly MAX_CHUNK_BYTES = 100 * 1024 * 1024
 
@@ -619,11 +624,14 @@ class Project {
 
   /** @internal Reset flush/queue state for testing. */
   _resetFlushState(): void {
+    this.tombstonedMessageUuids.clear()
     this.pendingWriteCount = 0
     this.flushResolvers = []
     if (this.flushTimer) clearTimeout(this.flushTimer)
     this.flushTimer = null
     this.activeDrain = null
+    this.fileMutationQueue = Promise.resolve()
+    this.pendingFileMutations = 0
     this.writeQueues = new Map()
   }
 
@@ -652,6 +660,7 @@ class Project {
   }
 
   private enqueueWrite(filePath: string, entry: Entry): Promise<void> {
+    if (this.isTombstoned(entry)) return Promise.resolve()
     return new Promise<void>(resolve => {
       let queue = this.writeQueues.get(filePath)
       if (!queue) {
@@ -679,15 +688,31 @@ class Project {
     }, this.FLUSH_INTERVAL_MS)
   }
 
+  private mutateFile<T>(operation: () => Promise<T>): Promise<T> {
+    this.pendingFileMutations++
+    const pending = this.fileMutationQueue.then(operation).finally(() => { this.pendingFileMutations-- })
+    this.fileMutationQueue = pending.then(() => {}, () => {})
+    return pending
+  }
+
+  /** Sync metadata writers defer only while an async file mutation is pending. */
+  deferMetadataWrite(filePath: string, line: string): boolean {
+    if (this.pendingFileMutations === 0) return false
+    void this.trackWrite(() => this.appendToFile(filePath, line)).catch(logError)
+    return true
+  }
+
   private async appendToFile(filePath: string, data: string): Promise<void> {
-    try {
-      await fsAppendFile(filePath, data, { mode: 0o600 })
-    } catch {
-      // Directory may not exist — some NFS-like filesystems return
-      // unexpected error codes, so don't discriminate on code.
-      await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
-      await fsAppendFile(filePath, data, { mode: 0o600 })
-    }
+    await this.mutateFile(async () => {
+      try {
+        await fsAppendFile(filePath, data, { mode: 0o600 })
+      } catch {
+        // Directory may not exist — some NFS-like filesystems return
+        // unexpected error codes, so don't discriminate on code.
+        await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
+        await fsAppendFile(filePath, data, { mode: 0o600 })
+      }
+    })
   }
 
   private async drainWriteQueue(): Promise<void> {
@@ -701,6 +726,7 @@ class Project {
       const resolvers: Array<() => void> = []
 
       for (const { entry, resolve } of batch) {
+        if (this.isTombstoned(entry)) { resolve(); continue }
         const line = jsonStringify(entry) + '\n'
 
         if (content.length + line.length >= this.MAX_CHUNK_BYTES) {
@@ -917,84 +943,98 @@ class Project {
    * positional write + truncate instead of rewriting the whole file.
    */
   async removeMessageByUuid(targetUuid: UUID): Promise<void> {
-    return this.trackWrite(async () => {
-      if (this.sessionFile === null) return
-      try {
-        let fileSize = 0
-        const fh = await fsOpen(this.sessionFile, 'r+')
-        try {
-          const { size } = await fh.stat()
-          fileSize = size
-          if (size === 0) return
-
-          const chunkLen = Math.min(size, LITE_READ_BUF_SIZE)
-          const tailStart = size - chunkLen
-          const buf = Buffer.allocUnsafe(chunkLen)
-          const { bytesRead } = await fh.read(buf, 0, chunkLen, tailStart)
-          const tail = buf.subarray(0, bytesRead)
-
-          // Entries are serialized via JSON.stringify (no key-value
-          // whitespace). Search for the full `"uuid":"..."` pattern, not
-          // just the bare UUID, so we do not match the same value sitting
-          // in `parentUuid` of a child entry. UUIDs are pure ASCII so a
-          // byte-level search is correct.
-          const needle = `"uuid":"${targetUuid}"`
-          const matchIdx = tail.lastIndexOf(needle)
-
-          if (matchIdx >= 0) {
-            // 0x0a never appears inside a UTF-8 multi-byte sequence, so
-            // byte-scanning for line boundaries is safe even if the chunk
-            // starts mid-character.
-            const prevNl = tail.lastIndexOf(0x0a, matchIdx)
-            // If the preceding newline is outside our chunk and we did not
-            // read from the start of the file, the line is longer than the
-            // window - fall through to the slow path.
-            if (prevNl >= 0 || tailStart === 0) {
-              const lineStart = prevNl + 1 // 0 when prevNl === -1
-              const nextNl = tail.indexOf(0x0a, matchIdx + needle.length)
-              const lineEnd = nextNl >= 0 ? nextNl + 1 : bytesRead
-
-              const absLineStart = tailStart + lineStart
-              const afterLen = bytesRead - lineEnd
-              // Truncate first, then re-append the trailing lines. In the
-              // common case (target is the last entry) afterLen is 0 and
-              // this is a single ftruncate.
-              await fh.truncate(absLineStart)
-              if (afterLen > 0) {
-                await fh.write(tail, lineEnd, afterLen, absLineStart)
-              }
-              return
-            }
-          }
-        } finally {
-          await fh.close()
+    this.tombstonedMessageUuids.add(targetUuid)
+    this.pendingEntries = this.pendingEntries.filter(entry => !this.isTombstoned(entry))
+    for (const queue of this.writeQueues.values()) {
+      for (let index = queue.length - 1; index >= 0; index--) {
+        if (this.isTombstoned(queue[index].entry)) {
+          queue[index].resolve()
+          queue.splice(index, 1)
         }
-
-        // Slow path: target was not in the last 64KB. Rare - requires many
-        // large entries to have landed between the write and the tombstone.
-        if (fileSize > MAX_TOMBSTONE_REWRITE_BYTES) {
-          logForDebugging(
-            `Skipping tombstone removal: session file too large (${formatFileSize(fileSize)})`,
-            { level: 'warn' },
-          )
-          return
-        }
-        const content = await readFile(this.sessionFile, { encoding: 'utf-8' })
-        const lines = content.split('\n').filter((line: string) => {
-          if (!line.trim()) return true
-          try {
-            const entry = jsonParse(line)
-            return entry.uuid !== targetUuid
-          } catch {
-            return true // Keep malformed lines
-          }
-        })
-        await writeFile(this.sessionFile, lines.join('\n'), {
-          encoding: 'utf8',
-        })
-      } catch {
-        // Silently ignore errors - the file might not exist yet
       }
+    }
+    // A drain may already have serialized this UUID before it was marked.
+    return this.trackWrite(async () => {
+      if (this.activeDrain) await this.activeDrain
+      return this.mutateFile(async () => {
+        if (this.sessionFile === null) return
+        try {
+          let fileSize = 0
+          const fh = await fsOpen(this.sessionFile, 'r+')
+          try {
+            const { size } = await fh.stat()
+            fileSize = size
+            if (size === 0) return
+
+            const chunkLen = Math.min(size, LITE_READ_BUF_SIZE)
+            const tailStart = size - chunkLen
+            const buf = Buffer.allocUnsafe(chunkLen)
+            const { bytesRead } = await fh.read(buf, 0, chunkLen, tailStart)
+            const tail = buf.subarray(0, bytesRead)
+
+            // Entries are serialized via JSON.stringify (no key-value
+            // whitespace). Search for the full `"uuid":"..."` pattern, not
+            // just the bare UUID, so we do not match the same value sitting
+            // in `parentUuid` of a child entry. UUIDs are pure ASCII so a
+            // byte-level search is correct.
+            const needle = `"uuid":"${targetUuid}"`
+            const matchIdx = tail.lastIndexOf(needle)
+
+            if (matchIdx >= 0) {
+              // 0x0a never appears inside a UTF-8 multi-byte sequence, so
+              // byte-scanning for line boundaries is safe even if the chunk
+              // starts mid-character.
+              const prevNl = tail.lastIndexOf(0x0a, matchIdx)
+              // If the preceding newline is outside our chunk and we did not
+              // read from the start of the file, the line is longer than the
+              // window - fall through to the slow path.
+              if (prevNl >= 0 || tailStart === 0) {
+                const lineStart = prevNl + 1 // 0 when prevNl === -1
+                const nextNl = tail.indexOf(0x0a, matchIdx + needle.length)
+                const lineEnd = nextNl >= 0 ? nextNl + 1 : bytesRead
+
+                const absLineStart = tailStart + lineStart
+                const afterLen = bytesRead - lineEnd
+                // Truncate first, then re-append the trailing lines. In the
+                // common case (target is the last entry) afterLen is 0 and
+                // this is a single ftruncate.
+                await fh.truncate(absLineStart)
+                if (afterLen > 0) {
+                  await fh.write(tail, lineEnd, afterLen, absLineStart)
+                }
+                return
+              }
+            }
+          } finally {
+            await fh.close()
+          }
+
+          // Slow path: target was not in the last 64KB. Rare - requires many
+          // large entries to have landed between the write and the tombstone.
+          if (fileSize > MAX_TOMBSTONE_REWRITE_BYTES) {
+            logForDebugging(
+              `Skipping tombstone removal: session file too large (${formatFileSize(fileSize)})`,
+              { level: 'warn' },
+            )
+            return
+          }
+          const content = await readFile(this.sessionFile, { encoding: 'utf-8' })
+          const lines = content.split('\n').filter((line: string) => {
+            if (!line.trim()) return true
+            try {
+              const entry = jsonParse(line)
+              return entry.uuid !== targetUuid
+            } catch {
+              return true // Keep malformed lines
+            }
+          })
+          await writeFile(this.sessionFile, lines.join('\n'), {
+            encoding: 'utf8',
+          })
+        } catch {
+          // Silently ignore errors - the file might not exist yet
+        }
+      })
     })
   }
 
@@ -1173,7 +1213,12 @@ class Project {
     })
   }
 
+  private isTombstoned(entry: Entry): boolean {
+    return 'uuid' in entry && this.tombstonedMessageUuids.has(String(entry.uuid))
+  }
+
   async appendEntry(entry: Entry, sessionId: UUID = getSessionId() as UUID) {
+    if (this.isTombstoned(entry)) return
     if (this.shouldSkipPersistence()) {
       return
     }
@@ -1203,7 +1248,9 @@ class Project {
     }
 
     // Only load current session messages if needed
-    if (entry.type === 'summary') {
+    if (entry.type === 'network-retry-usage') {
+      void this.enqueueWrite(sessionFile, entry)
+    } else if (entry.type === 'summary') {
       // Summaries can always be appended
       void this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'custom-title') {
@@ -1519,6 +1566,20 @@ export async function recordQueueOperation(queueOp: QueueOperationMessage) {
  */
 export async function removeTranscriptMessage(targetUuid: UUID): Promise<void> {
   await getProject().removeMessageByUuid(targetUuid)
+}
+
+/** Billing fact or retained-attempt correction, outside the model transcript. */
+export async function recordNetworkRetryUsage(
+  model: string,
+  usage: Record<string, unknown>,
+  source?: { messageId: string; messageUuid: string },
+): Promise<void> {
+  const uuid = randomUUID()
+  await getProject().appendEntry({
+    type: 'network-retry-usage', uuid, sessionId: getSessionId(), timestamp: new Date().toISOString(),
+    ...(source ? { sourceUuid: source.messageUuid } : {}),
+    message: { id: source?.messageId ?? 'network-retry-' + uuid, model, usage: structuredClone(usage) },
+  })
 }
 
 export async function recordFileHistorySnapshot(
@@ -2626,6 +2687,7 @@ function appendEntryToFile(
 ): void {
   const fs = getFsImplementation()
   const line = jsonStringify(entry) + '\n'
+  if (getProject().deferMetadataWrite(fullPath, line)) return
   try {
     fs.appendFileSync(fullPath, line, { mode: 0o600 })
   } catch {

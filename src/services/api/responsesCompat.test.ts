@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { APIConnectionError, APIError, APIUserAbortError } from '@anthropic-ai/sdk'
 import type {
   BetaMessageParam,
   BetaToolUnion,
@@ -12,6 +12,20 @@ import {
 
 const GATEWAY_UPSTREAM_400 =
   '{"error":{"message":"Error from provider (Console Go): Upstream request failed","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}'
+
+test('invalid Responses endpoint is a terminal configuration error before fetch', async () => {
+  let requests = 0
+  const error = await expectError(createResponsesCompatStream({ apiKey: 'test', baseURL: 'not-a-url', fetch: (async () => { requests++; return new Response(null) }) as typeof fetch }, { model: 'test', input: [] }))
+  expect(error).not.toBeInstanceOf(APIConnectionError)
+  expect(requests).toBe(0)
+})
+
+test('Responses response.failed is terminal authentication failure instead of successful message_stop', async () => {
+  const reader = new Response('event: response.failed\ndata: {"type":"response.failed","response":{"id":"test","error":{"code":"invalid_api_key","message":"bad key"}}}\n\n').body!.getReader()
+  const error = await expectError((async () => { for await (const event of createAnthropicStreamFromResponses({ reader, model: 'test' })) {} })())
+  expect(error).toBeInstanceOf(APIError)
+  expect((error as APIError).status).toBe(401)
+})
 
 function stubFetch(response: Response): typeof globalThis.fetch {
   return (() => Promise.resolve(response)) as unknown as typeof globalThis.fetch
@@ -196,7 +210,7 @@ test('network-level fetch failure → retryable APIConnectionError', async () =>
   expect(error).toBeInstanceOf(APIConnectionError)
 })
 
-test('aborted signal rethrows the original abort error instead of APIConnectionError', async () => {
+test('pre-aborted signal returns user cancellation instead of APIConnectionError', async () => {
   const controller = new AbortController()
   controller.abort()
   const abortError = new DOMException('The operation was aborted.', 'AbortError')
@@ -207,7 +221,7 @@ test('aborted signal rethrows the original abort error instead of APIConnectionE
       controller.signal,
     ),
   )
-  expect(error).toBe(abortError)
+  expect(error).toBeInstanceOf(APIUserAbortError)
 })
 
 function streamFromText(sseText: string): ReadableStreamDefaultReader<Uint8Array> {

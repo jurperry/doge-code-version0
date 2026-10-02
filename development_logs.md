@@ -4,6 +4,11 @@
 
 ## 一、API 兼容与上下文
 
+### 65. 三协议网络恢复、十轮预算与工具安全续接（2.1.277，2026-10-02）
+1. 问题：重试只覆盖响应头，流式断线或静默永久等待、兼容 reader 未释放；环境重试数无十轮上限，Bun 1.3.11 复用连接还会静默重发 POST；失败块留在界面、下一轮共享上下文与懒写磁盘，并发 tombstone 截断可损坏尾部及删除新 metadata；重放可能重复工具或丢已知失败用量。
+2. 解决：共享生命周期保护响应头及原始响应体（默认各 90 秒，心跳续钟，停止取消 reader/计时/退避），Bun 模型 POST 同时 Connection:close 与 keepalive:false 避免预算外重发；初次请求后至多十轮，取得响应、半流、模型/图像/404 回退共用预算；安全重放撤销失败块，已完成工具保留结果续接，终态立即释放连接，HTTP/SSE 认证参数及非法端点保持终态，真实 OAuth/远程认证刷新保留。TUI 首轮 Wi-Fi 中文状态，SDK api_retry 附 discard_partial/discard_message_ids/parent_tool_use_id；QueryEngine 原位修改共享历史并只累计每次失败 snapshot 一次，network-retry-usage 独立永久 metadata 不进模型上下文；保留工具的迟到用量纠正沿原 API message.id 与 sourceUuid 关联，统计末非零替代旧快照防双计，普通成功流不变；存储 tombstone 先剔除队列并防迟到写回，磁盘删除、追加及同步 metadata 共用 mutation 队列。API_TIMEOUT_MS/CLAUDE_STREAM_IDLE_TIMEOUT_MS 为 10–600000ms 完整整数；DOGE_NETWORK_RETRY_BASE_MS 为 10–32000ms（默认500），CLAUDE_CODE_MAX_RETRIES 可调低但至多十轮。验证：focused 80/80（295断言）、逐文件干净进程全套 584/584（71文件，三项既有 bare 工具枚举测试提供本地假key，认证恢复测试清继承key）；版本入口2.1.277；三协议40场景94断言真实 localhost 故障、终态挂连接、SSE错误、十轮11POST、同进程双prompt历史、工具只追加一次、失败用量/result一致；另320ms迟到工具usage纠正实测永久账单44token与result一致。单进程全套仍存在既有全局配置/团队锁污染，隔离 runner 保留。
+3. 位置：src/services/api/{requestLifecycle,streamRecovery,streamErrors,withRetry,claude,client,openaiCompat,responsesCompat}.ts 与对应 bun:test；src/query.ts、src/QueryEngine.ts、src/utils/sessionStorage.ts、src/types/logs.ts、src/utils/sessionStorage.networkRecovery.test.ts、src/entrypoints/sdk/coreSchemas.ts、src/components/messages/SystemAPIErrorMessage.tsx；tools/verify-network-recovery.ts（自清沙箱，NETWORK_E2E_FILTER 筛场景，DOGE_NETWORK_TEST_EXE 可验打包/安装 CLI）、tools/run-isolated-tests.ts。编译版与安装版三协议黑盒均为40场景94检查通过，随APP 0.2.104交付；实际用户数据已恢复。最终test/临时产物删除被自动审批策略拒绝（blocked by policy，缩小为明确脚本删除仍拒绝），未改用其他执行器绕过；本轮测试日志/临时脚本暂留test/，不纳入提交。
+
 ### 1. 自定义 API 认证绕过（2026-04）
 1. 问题：自定义 OpenAI/Responses 提供商仍走官方密钥审批流程，无法直接用 env key。
 2. 解决：检测到自定义 provider（openai/responses 或非官方 Anthropic URL）时跳过审批直接返回密钥（有意行为，改动须保持）。
