@@ -5,6 +5,7 @@ import { getAllowedChannels, getQuestionPreviewFormat } from 'src/bootstrap/stat
 import { MessageResponse } from 'src/components/MessageResponse.js';
 import { BLACK_CIRCLE } from 'src/constants/figures.js';
 import { getModeColor } from 'src/utils/permissions/PermissionMode.js';
+import { isZeroAskAutoActive } from 'src/utils/permissions/autoBypass.js';
 import { z } from 'zod/v4';
 import { Box, Text } from '../../ink.js';
 import type { Tool } from '../../Tool.js';
@@ -80,6 +81,33 @@ export const _sdkOutputSchema = outputSchema;
 export type Question = z.infer<ReturnType<typeof questionSchema>>;
 export type QuestionOption = z.infer<ReturnType<typeof questionOptionSchema>>;
 export type Output = z.infer<OutputSchema>;
+
+/**
+ * doge fork: Auto zero-ask — build the answers an AskUserQuestion call gets
+ * when no user is consulted. Every question takes its first option label
+ * (multi-select takes the first item); a question with no usable options
+ * gets a fixed delegation answer. Answers the model pre-filled in the input
+ * (the schema allows it) win over the defaults.
+ *
+ * @internal Exported for testing.
+ */
+export function buildAutoAnswers(input: {
+  questions?: {
+    question?: string
+    options?: { label?: string }[]
+    multiSelect?: boolean
+  }[]
+  answers?: Record<string, string>
+}): Record<string, string> {
+  const answers: Record<string, string> = {}
+  for (const question of input.questions ?? []) {
+    if (typeof question?.question !== 'string') continue
+    answers[question.question] =
+      question.options?.[0]?.label ?? '由 AI 全权决定'
+  }
+  return { ...answers, ...input.answers }
+}
+
 function AskUserQuestionResultMessage(t0) {
   const $ = _c(3);
   const {
@@ -179,7 +207,20 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
       result: true
     };
   },
-  async checkPermissions(input) {
+  async checkPermissions(input, context) {
+    // doge fork: Auto zero-ask — never show the question card. The allow
+    // decision carries auto-filled answers through updatedInput into call()
+    // (hasPermissionsToUseToolInner 2a → permissionDecision.updatedInput →
+    // tool input), so the tool completes without any user interaction.
+    if (isZeroAskAutoActive(context.getAppState().toolPermissionContext)) {
+      return {
+        behavior: 'allow' as const,
+        updatedInput: {
+          ...input,
+          answers: buildAutoAnswers(input),
+        }
+      };
+    }
     return {
       behavior: 'ask' as const,
       message: 'Answer questions?',

@@ -9,6 +9,7 @@ import type { Tool, ToolPermissionContext, ToolUseContext } from '../../Tool.js'
 import { AGENT_TOOL_NAME } from '../../tools/AgentTool/constants.js'
 import { shouldUseSandbox } from '../../tools/BashTool/shouldUseSandbox.js'
 import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
+import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../../tools/ExitPlanModeTool/constants.js'
 import { POWERSHELL_TOOL_NAME } from '../../tools/PowerShellTool/toolName.js'
 import { REPL_TOOL_NAME } from '../../tools/REPLTool/constants.js'
 import type { AssistantMessage } from '../../types/message.js'
@@ -22,7 +23,7 @@ import {
   SETTING_SOURCES,
 } from '../settings/constants.js'
 import { plural } from '../stringUtils.js'
-import { isAutoBypassActive } from './autoBypass.js'
+import { isAutoBypassActive, isZeroAskAutoActive, isZeroAskPlanInterlude } from './autoBypass.js'
 import { permissionModeTitle } from './PermissionMode.js'
 import type {
   PermissionAskDecision,
@@ -1167,6 +1168,19 @@ async function hasPermissionsToUseToolInner(
 
   let appState = context.getAppState()
 
+  // doge fork: Auto zero-ask. A bypassPermissions session never prompts —
+  // every ask-shaped decision below (1b/1e/1f/1g) falls through to the 2a
+  // bypass allow; explicit deny rules (1a/1d) still win. Killswitch-aware
+  // (isZeroAskAutoActive returns false when bypass is disabled).
+  const zeroAskAuto = isZeroAskAutoActive(appState.toolPermissionContext)
+  // doge fork: Auto plan interlude — plan mode entered FROM bypassPermissions
+  // (model called EnterPlanMode inside an Auto session). Ask-shaped decisions
+  // become a deny telling the model to keep planning; ExitPlanMode itself is
+  // auto-approved so the session returns to Auto without prompting.
+  const zeroAskPlanInterlude = isZeroAskPlanInterlude(
+    appState.toolPermissionContext,
+  )
+
   // 1. Check if the tool is denied
   // 1a. Entire tool is denied
   const denyRule = getDenyRuleForTool(appState.toolPermissionContext, tool)
@@ -1194,14 +1208,20 @@ async function hasPermissionsToUseToolInner(
       shouldUseSandbox(input)
 
     if (!canSandboxAutoAllow) {
-      return {
-        behavior: 'ask',
-        decisionReason: {
-          type: 'rule',
-          rule: askRule,
-        },
-        message: createPermissionRequestMessage(tool.name),
+      if (zeroAskPlanInterlude) {
+        return planInterludeDeny(tool)
       }
+      if (!zeroAskAuto) {
+        return {
+          behavior: 'ask',
+          decisionReason: {
+            type: 'rule',
+            rule: askRule,
+          },
+          message: createPermissionRequestMessage(tool.name),
+        }
+      }
+      // Zero-ask Auto: fall through so content-level deny rules (1d) still apply.
     }
     // Fall through to let Bash's checkPermissions handle command-specific rules
   }
@@ -1228,36 +1248,71 @@ async function hasPermissionsToUseToolInner(
     return toolPermissionResult
   }
 
+  // doge fork: Auto plan interlude — ExitPlanMode is auto-approved so the
+  // session returns to Auto (call() restores prePlanMode) without the
+  // approval dialog. Placed after 1a/1d so explicit deny rules still win.
+  if (zeroAskPlanInterlude && tool.name === EXIT_PLAN_MODE_V2_TOOL_NAME) {
+    return {
+      behavior: 'allow',
+      updatedInput: getUpdatedInputOrFallback(toolPermissionResult, input),
+      decisionReason: {
+        type: 'mode',
+        mode: appState.toolPermissionContext.mode,
+      },
+    }
+  }
+
   // 1e. Tool requires user interaction even in bypass mode
   if (
     tool.requiresUserInteraction?.() &&
     toolPermissionResult?.behavior === 'ask'
   ) {
-    return toolPermissionResult
+    if (zeroAskPlanInterlude) {
+      return planInterludeDeny(tool)
+    }
+    if (!zeroAskAuto) {
+      return toolPermissionResult
+    }
+    // Zero-ask Auto: fall through to 2a — the bypass allow carries the
+    // tool's updatedInput (e.g. AskUserQuestion's auto-filled answers).
   }
 
   // 1f. Content-specific ask rules from tool.checkPermissions take precedence
   // over bypassPermissions mode. When a user explicitly configures a
   // content-specific ask rule (e.g. Bash(npm publish:*)), the tool's
   // checkPermissions returns {behavior:'ask', decisionReason:{type:'rule',
-  // rule:{ruleBehavior:'ask'}}}. This must be respected even in bypass mode,
-  // just as deny rules are respected at step 1d.
+  // rule:{ruleBehavior:'ask'}}}. Upstream respected this even in bypass mode,
+  // just as deny rules are respected at step 1d — doge fork: zero-ask Auto
+  // overrides ask rules (the user asked for no prompts at all); deny rules
+  // are still respected at 1a/1d.
   if (
     toolPermissionResult?.behavior === 'ask' &&
     toolPermissionResult.decisionReason?.type === 'rule' &&
     toolPermissionResult.decisionReason.rule.ruleBehavior === 'ask'
   ) {
-    return toolPermissionResult
+    if (zeroAskPlanInterlude) {
+      return planInterludeDeny(tool)
+    }
+    if (!zeroAskAuto) {
+      return toolPermissionResult
+    }
   }
 
-  // 1g. Safety checks (e.g. .git/, .claude/, .vscode/, shell configs) are
-  // bypass-immune — they must prompt even in bypassPermissions mode.
+  // 1g. Safety checks (e.g. .git/, .claude/, .vscode/, shell configs) were
+  // bypass-immune upstream — they prompted even in bypassPermissions mode.
   // checkPathSafetyForAutoEdit returns {type:'safetyCheck'} for these paths.
+  // doge fork: zero-ask Auto releases them (no prompts at all); the Auto
+  // plan interlude denies them with keep-planning guidance.
   if (
     toolPermissionResult?.behavior === 'ask' &&
     toolPermissionResult.decisionReason?.type === 'safetyCheck'
   ) {
-    return toolPermissionResult
+    if (zeroAskPlanInterlude) {
+      return planInterludeDeny(tool)
+    }
+    if (!zeroAskAuto) {
+      return toolPermissionResult
+    }
   }
 
   // 2a. Check if mode allows the tool to run
@@ -1266,9 +1321,9 @@ async function hasPermissionsToUseToolInner(
   // Check if permissions should be bypassed:
   // - Direct bypassPermissions mode (/auto included)
   // - Plan mode when the user originally started with bypass mode (isBypassPermissionsModeAvailable)
-  // - doge fork: plan mode entered FROM bypassPermissions — the model switching
-  //   to plan inside an /auto session keeps auto's release semantics
-  //   (prePlanMode stash from prepareContextForPlanMode)
+  //   doge fork: plan entered from an /auto session (prePlanMode stash) is NOT
+  //   here on purpose — that combination is the zero-ask plan interlude
+  //   handled above, where asks become keep-planning denials.
   const shouldBypassPermissions = isAutoBypassActive(
     appState.toolPermissionContext,
   )
@@ -1312,6 +1367,12 @@ async function hasPermissionsToUseToolInner(
         }
       : toolPermissionResult
 
+  // doge fork: Auto plan interlude — nothing may prompt while the model is
+  // planning; deny with keep-planning guidance instead.
+  if (result.behavior === 'ask' && zeroAskPlanInterlude) {
+    return planInterludeDeny(tool)
+  }
+
   if (result.behavior === 'ask' && result.suggestions) {
     logForDebugging(
       `Permission suggestions for ${tool.name}: ${jsonStringify(result.suggestions, null, 2)}`,
@@ -1319,6 +1380,25 @@ async function hasPermissionsToUseToolInner(
   }
 
   return result
+}
+
+/**
+ * doge fork: deny decision used during the Auto plan interlude (plan mode
+ * entered from bypassPermissions). There is no one to prompt — the user is
+ * not consulted in Auto — so asks become a deny that tells the model to
+ * finish the plan and exit via ExitPlanMode (auto-approved above).
+ */
+function planInterludeDeny(
+  tool: Pick<Tool, 'name'>,
+): PermissionDenyDecision {
+  return {
+    behavior: 'deny',
+    message: `Auto mode is planning: ${tool.name} is unavailable during the plan phase. Finish writing the plan to the plan file, then call ExitPlanMode — it is auto-approved and execution resumes in Auto mode without prompting the user.`,
+    decisionReason: {
+      type: 'mode',
+      mode: 'plan',
+    },
+  }
 }
 
 type EditPermissionRuleArgs = {

@@ -80,6 +80,7 @@ import {
   permissionRuleValueFromString,
   permissionRuleValueToString,
 } from './permissionRuleParser.js'
+import { setCurrentPermissionMode } from './currentPermissionMode.js'
 
 /**
  * Checks if a Bash permission rule is dangerous for auto mode.
@@ -989,6 +990,11 @@ export async function initializeToolPermissionContext({
     },
     rulesFromDisk,
   )
+
+  // doge fork: seed the live mode mirror (currentPermissionMode.ts) so
+  // mode-aware system prompt sections are correct before the first
+  // onChangeAppState mode diff fires.
+  setCurrentPermissionMode(permissionMode)
 
   // Add directories from settings and --add-dir
   const allAdditionalDirectories = [

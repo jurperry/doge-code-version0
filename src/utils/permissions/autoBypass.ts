@@ -1,33 +1,70 @@
 import type { ToolPermissionContext } from '../../Tool.js'
+import { isBypassPermissionsModeDisabled } from './permissionSetup.js'
 
 // doge fork: single source for "this session currently auto-releases tool
 // permission checks" (the /auto command). Direct bypassPermissions mode, plus
-// plan mode that was entered FROM bypassPermissions — the model's
-// EnterPlanModeTool in an /auto session stashes prePlanMode='bypassPermissions'
-// (permissionSetup.ts prepareContextForPlanMode). Previously only
-// flag-launched sessions (isBypassPermissionsModeAvailable) kept bypass while
-// in plan mode; /auto sessions regressed to per-tool prompts the moment the
-// model switched to plan.
+// plan mode in a flag-launched session (isBypassPermissionsModeAvailable —
+// upstream semantics for --dangerously-skip-permissions).
 //
-// This must stay weaker than the pipeline's earlier gates: deny rules (1a),
-// tool-level ask rules (1b/1f), safety checks (1g) and — crucially —
-// requiresUserInteraction tools like the ExitPlanMode approval dialog (1e)
-// are all evaluated BEFORE the mode bypass in hasPermissionsToUseToolInner,
-// so plan approval still reaches the user in auto mode.
+// Plan mode entered FROM bypassPermissions in a /auto session
+// (prePlanMode='bypassPermissions' stashed by prepareContextForPlanMode) is
+// deliberately NOT bypass-active anymore: that combination is the Auto
+// zero-ask plan interlude (see isZeroAskPlanInterlude), where writes are
+// denied so the model actually plans instead of executing.
+//
+// This must stay weaker than the pipeline's earlier gates: deny rules (1a)
+// are evaluated BEFORE the mode bypass in hasPermissionsToUseToolInner.
 export function isAutoBypassActive(
   toolPermissionContext: Pick<
     ToolPermissionContext,
     'mode' | 'prePlanMode' | 'isBypassPermissionsModeAvailable'
   >,
 ): boolean {
-  const { mode, prePlanMode, isBypassPermissionsModeAvailable } =
-    toolPermissionContext
+  const { mode, isBypassPermissionsModeAvailable } = toolPermissionContext
   if (mode === 'bypassPermissions') {
     return true
   }
+  return mode === 'plan' && isBypassPermissionsModeAvailable === true
+}
+
+/**
+ * doge fork: "Auto zero-ask" — a bypassPermissions session never asks the
+ * user anything. While active, hasPermissionsToUseToolInner releases every
+ * prompt-shaped decision (tool ask rules 1b, requiresUserInteraction tools
+ * 1e, content ask rules 1f, safety checks 1g) to the 2a bypass allow;
+ * explicit deny rules (1a/1d) still win. The killswitch
+ * (settings/GrowthBook) turns the whole behavior off.
+ */
+export function isZeroAskAutoActive(
+  toolPermissionContext: Pick<ToolPermissionContext, 'mode'>,
+): boolean {
   return (
-    mode === 'plan' &&
-    (prePlanMode === 'bypassPermissions' ||
-      isBypassPermissionsModeAvailable === true)
+    toolPermissionContext.mode === 'bypassPermissions' &&
+    !isBypassPermissionsModeDisabled()
+  )
+}
+
+/**
+ * doge fork: the Auto plan interlude — plan mode entered FROM
+ * bypassPermissions (model called EnterPlanMode inside an Auto session).
+ * While active, hasPermissionsToUseToolInner turns prompt-shaped decisions
+ * into a deny telling the model to finish the plan, and auto-approves
+ * ExitPlanMode so the session returns to Auto without asking.
+ *
+ * Flag-launched --dangerously-skip-permissions sessions are excluded
+ * (isBypassPermissionsModeAvailable): upstream keeps full bypass inside
+ * plan mode for them via isAutoBypassActive above.
+ */
+export function isZeroAskPlanInterlude(
+  toolPermissionContext: Pick<
+    ToolPermissionContext,
+    'mode' | 'prePlanMode' | 'isBypassPermissionsModeAvailable'
+  >,
+): boolean {
+  return (
+    toolPermissionContext.mode === 'plan' &&
+    toolPermissionContext.prePlanMode === 'bypassPermissions' &&
+    toolPermissionContext.isBypassPermissionsModeAvailable !== true &&
+    !isBypassPermissionsModeDisabled()
   )
 }

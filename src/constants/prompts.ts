@@ -65,6 +65,7 @@ import { logForDebugging } from '../utils/debug.js'
 import { loadMemoryPrompt } from '../memdir/memdir.js'
 import { isUndercover } from '../utils/undercover.js'
 import { isMcpInstructionsDeltaEnabled } from '../utils/mcpInstructionsDelta.js'
+import { getCurrentPermissionMode } from '../utils/permissions/currentPermissionMode.js'
 
 // Dead code elimination: conditional imports for feature-gated modules
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -446,6 +447,18 @@ function getSimpleToneAndStyleSection(): string {
   return [`# Tone and style`, ...prependBullets(items)].join(`\n`)
 }
 
+// doge fork: Auto (bypassPermissions) zero-ask guidance. The user is never
+// prompted in Auto — tool calls are auto-approved and AskUserQuestion is
+// answered automatically — so the model must not try to consult the user,
+// and should route planning through the auto-approved plan interlude.
+// Mode reads go through the live mirror (currentPermissionMode.ts); the
+// section is registered uncached so it flips with Shift+Tab /auto /plan.
+function getZeroAskAutoSection(): string | null {
+  if (getCurrentPermissionMode() !== 'bypassPermissions') return null
+  return `# Auto mode
+Auto mode is active: every tool call is auto-approved and the user is never prompted. Do not ask the user questions — ${ASK_USER_QUESTION_TOOL_NAME} is answered automatically with its first option, so prefer making a reasonable decision yourself. If the task needs planning before execution, call EnterPlanMode to draft a plan, then call ExitPlanMode when the plan is ready — it is auto-approved and you immediately continue executing in Auto mode.`
+}
+
 export async function getSystemPrompt(
   tools: Tools,
   model: string,
@@ -500,6 +513,14 @@ ${CYBER_RISK_INSTRUCTION}`,
     systemPromptSection('memory', () => loadMemoryPrompt()),
     systemPromptSection('ant_model_override', () =>
       getAntModelOverrideSection(),
+    ),
+    // doge fork: uncached — the value flips with the permission mode
+    // (Shift+Tab carousel, /auto, plan interlude entry/exit), which must be
+    // reflected on the very next turn instead of after /clear.
+    DANGEROUS_uncachedSystemPromptSection(
+      'zero_ask_auto',
+      () => getZeroAskAutoSection(),
+      'permission mode can change mid-session',
     ),
     systemPromptSection('env_info_simple', () =>
       computeSimpleEnvInfo(model, additionalWorkingDirectories),

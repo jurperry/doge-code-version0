@@ -297,9 +297,11 @@ export function getComputerUseMCPToolOverrides(toolName: string): ComputerUseMCP
  */
 async function runPermissionDialog(req: CuPermissionRequest): Promise<CuPermissionResponse> {
   const context = tuc();
-  // doge fork: auto mode (/auto → bypassPermissions, including plan entered
-  // from it) skips the consent dialog — the session is already fully
-  // released. tccState (macOS OS-level permissions missing) must still show:
+  // doge fork: auto mode (/auto → bypassPermissions) skips the consent
+  // dialog — the session is already fully released. Plan mode entered from
+  // /auto is the zero-ask plan interlude (isAutoBypassActive excludes it):
+  // CU calls are denied by the permission pipeline before reaching here.
+  // tccState (macOS OS-level permissions missing) must still show:
   // auto-granting the app list is meaningless while the OS gate is closed.
   if (isAutoBypassActive(context.getAppState().toolPermissionContext) && !req.tccState) {
     const response = buildAutoGrantResponse(req);

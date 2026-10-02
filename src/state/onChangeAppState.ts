@@ -18,6 +18,7 @@ import {
   notifySessionMetadataChanged,
   type SessionExternalMetadata,
 } from '../utils/sessionState.js'
+import { setCurrentPermissionMode } from '../utils/permissions/currentPermissionMode.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
 import { resolveModelSwitchScope } from '../utils/model/modelSwitchScope.js'
 import type { AppState } from './AppStateStore.js'
@@ -67,6 +68,9 @@ export function onChangeAppState({
   const prevMode = oldState.toolPermissionContext.mode
   const newMode = newState.toolPermissionContext.mode
   if (prevMode !== newMode) {
+    // doge fork: keep the live mode mirror current for mode-aware system
+    // prompt sections (constants/prompts.ts zero-ask Auto guidance).
+    setCurrentPermissionMode(newMode)
     // CCR external_metadata must not receive internal-only mode names
     // (bubble, ungated auto). Externalize first — and skip
     // the CCR notify if the EXTERNAL mode didn't change (e.g.,
