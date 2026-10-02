@@ -20,6 +20,11 @@ import type { Tools } from '../Tool.js'
 import type { Command } from '../types/command.js'
 import { BASH_TOOL_NAME } from '../tools/BashTool/toolName.js'
 import {
+  getCachedPowerShellPath,
+  getResolvedPowerShellPathSync,
+} from '../utils/shell/powershellDetection.js'
+import { resolveActiveShellTool } from '../utils/shell/shellToolUtils.js'
+import {
   getCanonicalName,
   getMarketingNameForModel,
 } from '../utils/model/model.js'
@@ -730,6 +735,18 @@ function getKnowledgeCutoff(modelId: string): string | null {
 }
 
 function getShellInfoLine(): string {
+  // When the user selected defaultShell: 'powershell', the model gets
+  // PowerShellTool instead of BashTool (resolveActiveShellTool is the same
+  // exclusive resolution tools.ts uses) — so the syntax guidance must flip
+  // from Unix to PowerShell or the model keeps emitting bash on pwsh.
+  if (env.platform === 'win32' && resolveActiveShellTool() === 'powershell') {
+    // Detection is async; kick it so the next prompt build shows the real
+    // binary name. Until it resolves, fall back to the generic name.
+    const psPath = getResolvedPowerShellPathSync()
+    if (!psPath) void getCachedPowerShellPath()
+    const shellName = psPath?.split(/[/\\]/).pop() ?? 'powershell'
+    return `Shell: ${shellName} (PowerShell — use PowerShell syntax: native Windows paths like C:\\..., $env:NAME for environment variables, prefer cmdlets over Unix commands)`
+  }
   const shell = process.env.SHELL || 'unknown'
   const shellName = shell.includes('zsh')
     ? 'zsh'

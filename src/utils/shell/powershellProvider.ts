@@ -1,15 +1,39 @@
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { join as posixJoin } from 'path/posix'
+import { isEnvTruthy } from '../envUtils.js'
 import { getSessionEnvVars } from '../sessionEnvVars.js'
 import type { ShellProvider } from './shellProvider.js'
 
 /**
+ * Force pwsh's own output AND its decoding of native-command output to
+ * UTF-8 (no BOM). Without this, on a CP936/GBK console Windows PowerShell
+ * 5.1 mojibakes non-ASCII output — Node decodes the child's stdout as
+ * UTF-8 unconditionally. Prepended on the same line (no leading newline)
+ * so $PSItem.ScriptLineNumber / error line numbers still match the user's
+ * command text. Exported for the hook spawn path (hooks.ts), which builds
+ * its command via buildPowerShellArgs without buildExecCommand.
+ */
+export const POWERSHELL_UTF8_PREAMBLE =
+  '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ' +
+  '$OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
+
+/**
  * PowerShell invocation flags + command. Shared by the provider's getSpawnArgs
  * and the hook spawn path in hooks.ts so the flag set stays in one place.
+ *
+ * -ExecutionPolicy Bypass: machine policy default (Restricted on some SKUs,
+ * AllSigned via GPO/MDM) otherwise blocks even -Command script evaluation on
+ * locked-down boxes. CLAUDE_CODE_POWERSHELL_RESPECT_EXECUTION_POLICY=1 opts
+ * back into honoring the machine policy (compliance environments).
  */
 export function buildPowerShellArgs(cmd: string): string[] {
-  return ['-NoProfile', '-NonInteractive', '-Command', cmd]
+  const bypass = isEnvTruthy(
+    process.env.CLAUDE_CODE_POWERSHELL_RESPECT_EXECUTION_POLICY,
+  )
+    ? []
+    : ['-ExecutionPolicy', 'Bypass']
+  return ['-NoProfile', '-NonInteractive', ...bypass, '-Command', cmd]
 }
 
 /**
@@ -63,7 +87,7 @@ export function createPowerShellProvider(shellPath: string): ShellProvider {
       // exit code (was 0 — old logic only looked at $? which the trailing
       // cmdlet set true). Both rarer than the git/npm/curl stderr case.
       const cwdTracking = `\n; $_ec = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }\n; (Get-Location).Path | Out-File -FilePath '${escapedCwdFilePath}' -Encoding utf8 -NoNewline\n; exit $_ec`
-      const psCommand = command + cwdTracking
+      const psCommand = POWERSHELL_UTF8_PREAMBLE + command + cwdTracking
 
       // Sandbox wraps the returned commandString as `<binShell> -c '<cmd>'` —
       // hardcoded `-c`, no way to inject -NoProfile -NonInteractive. So for

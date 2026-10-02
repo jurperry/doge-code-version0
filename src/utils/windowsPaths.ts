@@ -1,4 +1,5 @@
 import memoize from 'lodash-es/memoize.js'
+import { homedir } from 'os'
 import * as path from 'path'
 import * as pathWin32 from 'path/win32'
 import { getCwd } from './cwd.js'
@@ -80,16 +81,126 @@ function findExecutable(executable: string): string | null {
 }
 
 /**
+ * Read GitForWindows' InstallPath from the registry (HKLM or HKCU).
+ * Returns null on any failure — reg.exe missing, key absent, parse hiccup.
+ */
+function queryGitInstallPathFromRegistry(hive: 'HKLM' | 'HKCU'): string | null {
+  try {
+    const out = execSync_DEPRECATED(
+      `reg query "${hive}\\SOFTWARE\\GitForWindows" /v InstallPath`,
+      { stdio: 'pipe', encoding: 'utf8' },
+    )
+    // Output line looks like: `    InstallPath    REG_SZ    C:\Program Files\Git`
+    const match = out.match(/^\s*InstallPath\s+REG_SZ\s+(.+?)\s*$/m)
+    return match?.[1] ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Non-exiting sibling of findGitBashPath(): locate git-bash's bash.exe,
+ * returning null instead of killing the process when it isn't there.
+ * Probe order:
+ *   1. CLAUDE_CODE_GIT_BASH_PATH env (invalid value is skipped with a log,
+ *      not fatal — findGitBashPath keeps the strict exit semantics)
+ *   2. Registry InstallPath (HKLM then HKCU) + \bin\bash.exe
+ *   3. git on PATH → ../../bin/bash.exe
+ *   4. Well-known install dirs (Program Files, Program Files (x86),
+ *      %LocalAppData%\Programs\Git, scoop)
+ *
+ * Memoized per CLAUDE_CODE_GIT_BASH_PATH value so tests flipping the env
+ * get a fresh probe; the registry/where.exe hits only run once per value.
+ */
+export const probeGitBashPath = memoize(
+  (): string | null => {
+    if (getPlatform() !== 'windows') return null
+
+    const envPath = process.env.CLAUDE_CODE_GIT_BASH_PATH
+    if (envPath) {
+      if (checkPathExists(envPath)) {
+        return envPath
+      }
+      logForDebugging(
+        `CLAUDE_CODE_GIT_BASH_PATH "${envPath}" does not exist; probing other locations`,
+      )
+    }
+
+    for (const hive of ['HKLM', 'HKCU'] as const) {
+      const installPath = queryGitInstallPathFromRegistry(hive)
+      if (installPath) {
+        const bashPath = pathWin32.join(installPath, 'bin', 'bash.exe')
+        if (checkPathExists(bashPath)) {
+          return bashPath
+        }
+      }
+    }
+
+    const gitPath = findExecutable('git')
+    if (gitPath) {
+      const bashPath = pathWin32.join(gitPath, '..', '..', 'bin', 'bash.exe')
+      if (checkPathExists(bashPath)) {
+        return bashPath
+      }
+    }
+
+    const candidates = [
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+      process.env.LOCALAPPDATA
+        ? pathWin32.join(
+            process.env.LOCALAPPDATA,
+            'Programs',
+            'Git',
+            'bin',
+            'bash.exe',
+          )
+        : null,
+      pathWin32.join(homedir(), 'scoop', 'apps', 'git', 'current', 'bin', 'bash.exe'),
+    ]
+    for (const candidate of candidates) {
+      if (candidate && checkPathExists(candidate)) {
+        return candidate
+      }
+    }
+
+    return null
+  },
+  () => process.env.CLAUDE_CODE_GIT_BASH_PATH ?? '',
+)
+
+/**
  * If Windows, set the SHELL environment variable to git-bash path.
  * This is used by BashTool and Shell.ts for user shell commands.
  * COMSPEC is left unchanged for system process execution.
+ *
+ * When git-bash is absent the historical behavior is a hard exit — except
+ * when the user selected defaultShell: 'powershell', in which case the
+ * model gets PowerShellTool instead of BashTool and the CLI must still
+ * start. SHELL stays unset then; bash hooks fail gracefully per-hook.
  */
 export function setShellIfWindows(): void {
-  if (getPlatform() === 'windows') {
-    const gitBashPath = findGitBashPath()
+  if (getPlatform() !== 'windows') return
+  const gitBashPath = probeGitBashPath()
+  if (gitBashPath) {
     process.env.SHELL = gitBashPath
     logForDebugging(`Using bash path: "${gitBashPath}"`)
+    return
   }
+  // Lazy require: windowsPaths is imported by very early/low-level modules;
+  // pulling settings.ts in statically here risks import cycles.
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const { resolveDefaultShell } =
+    require('./shell/resolveDefaultShell.js') as typeof import('./shell/resolveDefaultShell.js')
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  if (resolveDefaultShell() === 'powershell') {
+    logForDebugging(
+      'git-bash not found; continuing without SHELL because defaultShell is powershell',
+    )
+    return
+  }
+  // Bash-default without git-bash: keep the original error + exit(1).
+  findGitBashPath()
 }
 
 /**

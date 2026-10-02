@@ -1,9 +1,11 @@
 import { getInitialSettings } from '../settings/settings.js'
 
 /**
- * Resolve the default shell for input-box `!` commands.
+ * Resolve the default shell — drives the model's shell tool (Bash vs
+ * PowerShell, see shellToolUtils.resolveActiveShellTool), input-box `!`
+ * routing, and the no-git-bash startup gate.
  *
- * Resolution order (docs/design/ps-shell-selection.md §4.2):
+ * Resolution order:
  *   settings.defaultShell → 'bash'
  *
  * Platform default is 'bash' everywhere — we do NOT auto-flip Windows to

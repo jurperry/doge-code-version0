@@ -17,10 +17,10 @@ import {
 } from './sessionEnvironment.js'
 import { subprocessEnv } from './subprocessEnv.js'
 import { getPlatform } from './platform.js'
-import { findGitBashPath, windowsPathToPosixPath } from './windowsPaths.js'
+import { probeGitBashPath, windowsPathToPosixPath } from './windowsPaths.js'
 import { getCachedPowerShellPath } from './shell/powershellDetection.js'
 import { DEFAULT_HOOK_SHELL } from './shell/shellProvider.js'
-import { buildPowerShellArgs } from './shell/powershellProvider.js'
+import { buildPowerShellArgs, POWERSHELL_UTF8_PREAMBLE } from './shell/powershellProvider.js'
 import {
   loadPluginOptions,
   substituteUserConfigVariables,
@@ -948,12 +948,13 @@ async function execCommandHook(
   //   skips user profile scripts (faster, deterministic).
   //   -NonInteractive fails fast instead of prompting.
   //
-  // The Git Bash hard-exit in findGitBashPath() is still in place for
-  // bash hooks. PowerShell hooks never call it, so a Windows user with
-  // only pwsh and shell: 'powershell' on every hook could in theory run
-  // without Git Bash — but init.ts still calls setShellIfWindows() on
-  // startup, which will exit first. Relaxing that is phase 1 of the
-  // design's implementation order (separate PR).
+  // Git Bash absence no longer hard-exits from here: with
+  // defaultShell: 'powershell' the CLI starts without git-bash
+  // (setShellIfWindows), so a bash hook on such a machine must fail as a
+  // normal hook error (mirrors the powershell-branch throw above) instead
+  // of killing the process via findGitBashPath(). For bash-default setups
+  // the startup gate already exited before any hook could run, so the
+  // probe can only return null where exiting was previously impossible.
   let child: ChildProcessWithoutNullStreams
   if (shellType === 'powershell') {
     const pwshPath = await getCachedPowerShellPath()
@@ -964,7 +965,11 @@ async function execCommandHook(
           `PowerShell, or remove "shell": "powershell" to use bash.`,
       )
     }
-    child = spawn(pwshPath, buildPowerShellArgs(finalCommand), {
+    // Same UTF-8 preamble as buildExecCommand — hooks spawn pwsh directly
+    // (no provider), so without this PS 5.1 on a GBK console mojibakes
+    // non-ASCII hook output. Produces no output itself; same-line prefix
+    // keeps error line numbers aligned with the user's hook command.
+    child = spawn(pwshPath, buildPowerShellArgs(POWERSHELL_UTF8_PREAMBLE + finalCommand), {
       env: envVars,
       cwd: safeCwd,
       // Prevent visible console window on Windows (no-op on other platforms)
@@ -973,7 +978,15 @@ async function execCommandHook(
   } else {
     // On Windows, use Git Bash explicitly (cmd.exe can't run bash syntax).
     // On other platforms, shell: true uses /bin/sh.
-    const shell = isWindows ? findGitBashPath() : true
+    const gitBashPath = isWindows ? probeGitBashPath() : null
+    if (isWindows && !gitBashPath) {
+      throw new Error(
+        `Hook "${hook.command}" uses bash but git-bash was not found on ` +
+          `this system. Install Git for Windows, set CLAUDE_CODE_GIT_BASH_PATH, ` +
+          `or set the hook's "shell" to "powershell".`,
+      )
+    }
+    const shell = isWindows ? gitBashPath! : true
     child = spawn(finalCommand, [], {
       env: envVars,
       cwd: safeCwd,

@@ -57,6 +57,7 @@ export async function findPowerShell(): Promise<string | null> {
 }
 
 let cachedPowerShellPath: Promise<string | null> | null = null
+let resolvedPowerShellPath: string | null = null
 
 /**
  * Gets the cached PowerShell path. Returns a memoized promise that
@@ -64,9 +65,22 @@ let cachedPowerShellPath: Promise<string | null> | null = null
  */
 export function getCachedPowerShellPath(): Promise<string | null> {
   if (!cachedPowerShellPath) {
-    cachedPowerShellPath = findPowerShell()
+    cachedPowerShellPath = findPowerShell().then(p => {
+      resolvedPowerShellPath = p
+      return p
+    })
   }
   return cachedPowerShellPath
+}
+
+/**
+ * Synchronous read of the detection result — null until the memoized
+ * findPowerShell() promise has resolved (or when nothing was found).
+ * For sync contexts like the system prompt's shell info line; callers
+ * that can await should use getCachedPowerShellPath() instead.
+ */
+export function getResolvedPowerShellPathSync(): string | null {
+  return resolvedPowerShellPath
 }
 
 export type PowerShellEdition = 'core' | 'desktop'
@@ -104,4 +118,5 @@ export async function getPowerShellEdition(): Promise<PowerShellEdition | null> 
  */
 export function resetPowerShellCache(): void {
   cachedPowerShellPath = null
+  resolvedPowerShellPath = null
 }

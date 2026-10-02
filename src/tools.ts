@@ -137,7 +137,10 @@ import type { ToolPermissionContext } from './Tool.js'
 import { getDenyRuleForTool } from './utils/permissions/permissions.js'
 import { hasEmbeddedSearchTools } from './utils/embeddedTools.js'
 import { isEnvTruthy } from './utils/envUtils.js'
-import { isPowerShellToolEnabled } from './utils/shell/shellToolUtils.js'
+import {
+  isPowerShellToolEnabled,
+  resolveActiveShellTool,
+} from './utils/shell/shellToolUtils.js'
 import { isAgentSwarmsEnabled } from './utils/agentSwarmsEnabled.js'
 import { isWorktreeModeEnabled } from './utils/worktreeModeEnabled.js'
 import {
@@ -191,10 +194,17 @@ export function getToolsForDefaultPreset(): string[] {
  * NOTE: This MUST stay in sync with https://console.statsig.com/4aF3Ewatb6xPVpCwxb5nA3/dynamic_configs/claude_code_global_system_caching, in order to cache the system prompt across users.
  */
 export function getAllBaseTools(): Tools {
+  // Shell tool exclusivity: the model gets exactly one of Bash / PowerShell.
+  // PowerShell only when the gate is open AND defaultShell selects it
+  // (resolveActiveShellTool is re-evaluated on every call, so a mid-session
+  // /shell switch takes effect on the next query). env=1 without the
+  // setting no longer adds PowerShell alongside Bash.
+  const activeShell = resolveActiveShellTool()
+  const powerShellTool = activeShell === 'powershell' ? getPowerShellTool() : null
   return [
     AgentTool,
     TaskOutputTool,
-    BashTool,
+    ...(activeShell === 'powershell' ? [] : [BashTool]),
     // Ant-native builds have bfs/ugrep embedded in the bun binary (same ARGV0
     // trick as ripgrep). When available, find/grep in Claude's shell are aliased
     // to these fast tools, so the dedicated Glob/Grep tools are unnecessary.
@@ -239,7 +249,7 @@ export function getAllBaseTools(): Tools {
     ...(SendUserFileTool ? [SendUserFileTool] : []),
     ...(PushNotificationTool ? [PushNotificationTool] : []),
     ...(SubscribePRTool ? [SubscribePRTool] : []),
-    ...(getPowerShellTool() ? [getPowerShellTool()] : []),
+    ...(powerShellTool ? [powerShellTool] : []),
     ...(SnipTool ? [SnipTool] : []),
     ...(process.env.NODE_ENV === 'test' ? [TestingPermissionTool] : []),
     ListMcpResourcesTool,
@@ -284,7 +294,15 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
       }
       return filterToolsByDenyRules(replSimple, permissionContext)
     }
-    const simpleTools: Tool[] = [BashTool, FileReadTool, FileEditTool]
+    const simpleTools: Tool[] = [
+      // Same shell exclusivity as getAllBaseTools: Pwsh replaces Bash when
+      // defaultShell selects it.
+      (resolveActiveShellTool() === 'powershell'
+        ? (getPowerShellTool() ?? BashTool)
+        : BashTool),
+      FileReadTool,
+      FileEditTool,
+    ]
     // When coordinator mode is also active, include AgentTool and TaskStopTool
     // so the coordinator gets Task+TaskStop (via useMergedTools filtering) and
     // workers get Bash/Read/Edit (via filterToolsForAgent filtering).

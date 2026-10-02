@@ -461,12 +461,12 @@ export const SettingsSchema = lazySchema(() =>
         .boolean()
         .optional()
         .describe('Disable all hooks and statusLine execution'),
-      // Which shell backs input-box `!` (see docs/design/ps-shell-selection.md §4.2)
+      // Which shell backs the model's shell tool and input-box `!` (see /shell)
       defaultShell: z
         .enum(['bash', 'powershell'])
         .optional()
         .describe(
-          'Default shell for input-box ! commands. ' +
+          'Default shell for the shell tool and input-box ! commands. ' +
             "Defaults to 'bash' on all platforms (no Windows auto-flip).",
         ),
       // Only run hooks defined in managed settings (managed-settings.json)

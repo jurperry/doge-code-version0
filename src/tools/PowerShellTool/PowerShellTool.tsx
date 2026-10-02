@@ -324,7 +324,7 @@ export const PowerShellTool = buildTool({
     return outputSchema();
   },
   userFacingName(): string {
-    return 'PowerShell';
+    return 'Pwsh';
   },
   getToolUseSummary(input: Partial<PowerShellToolInput> | undefined): string | null {
     if (!input?.command) {
