@@ -47,6 +47,7 @@ import {
 import { configureGlobalAgents } from '../utils/proxy.js'
 import { isBetaTracingEnabled } from '../utils/telemetry/betaSessionTracing.js'
 import { getTelemetryAttributes } from '../utils/telemetryAttributes.js'
+import { initSessionShellSnapshot } from '../utils/shell/sessionShell.js'
 import { setShellIfWindows } from '../utils/windowsPaths.js'
 
 // initialize1PEventLogging is dynamically imported to defer OpenTelemetry sdk-logs/resources
@@ -181,6 +182,11 @@ export const init = memoize(async (): Promise<void> => {
         )
       }
     }
+
+    // Freeze this session's shell BEFORE the first resolveDefaultShell()
+    // consumer (setShellIfWindows below): later disk settings.json changes
+    // must not retarget a running session's active shell (sessionShell.ts).
+    initSessionShellSnapshot()
 
     // Set up git-bash if relevant
     setShellIfWindows()

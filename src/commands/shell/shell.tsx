@@ -5,12 +5,13 @@ import { clearSystemPromptSections } from '../../constants/systemPromptSections.
 import { Text } from '../../ink.js'
 import type { LocalJSXCommandCall } from '../../types/command.js'
 import { getPlatform } from '../../utils/platform.js'
-import { updateSettingsForSource } from '../../utils/settings/settings.js'
+import { getInitialSettings, updateSettingsForSource } from '../../utils/settings/settings.js'
 import {
   getCachedPowerShellPath,
   getPowerShellEdition,
 } from '../../utils/shell/powershellDetection.js'
 import { resolveDefaultShell } from '../../utils/shell/resolveDefaultShell.js'
+import { setSessionShell } from '../../utils/shell/sessionShell.js'
 import type { ShellType } from '../../utils/shell/shellProvider.js'
 import { probeGitBashPath } from '../../utils/windowsPaths.js'
 import { parseShellArgs } from './args.js'
@@ -22,7 +23,9 @@ Select the command interpreter:
 - pwsh    PowerShell (native Windows syntax; alias: powershell)
 - status  Show the current shell and availability
 
-Saved to user settings (defaultShell); takes effect on the next turn.`
+Saved to user settings (defaultShell). This session switches immediately
+(next turn) and keeps the selection until you switch again — later disk
+changes do not retarget an already-running session's shell.`
 
 type ShellAvailability = {
   available: boolean
@@ -82,6 +85,10 @@ function applyShellSelection(
   if (result.error) {
     return `Failed to set shell: ${result.error.message}`
   }
+  // Override this session's shell right away (sessionShell.ts): the session
+  // snapshot wins over disk settings, so the switch takes effect on the next
+  // turn and later disk edits won't retarget this running session.
+  setSessionShell(shell)
   // The env-info system prompt section (which carries the Shell: line) is
   // cached per session and only cleared on /clear, /compact, and worktree
   // enter/exit — without this the model keeps the old shell's syntax
@@ -90,13 +97,14 @@ function applyShellSelection(
   const lines = [
     `Switched to ${shellDisplayName(shell)} — takes effect on the next turn.`,
   ]
-  // A higher-priority source (project/local/--settings) can override the
-  // user setting we just wrote — surface that instead of lying about the
-  // effective shell.
-  const effective = resolveDefaultShell()
-  if (effective !== shell) {
+  // A higher-priority source (project/local/--settings) can override the user
+  // setting we just wrote ON DISK. The session override above still wins for
+  // this session, but new sessions snapshot the disk value — surface what
+  // they'll start with instead of implying the selection sticks everywhere.
+  const onDisk = getInitialSettings().defaultShell ?? 'bash'
+  if (onDisk !== shell) {
     lines.push(
-      `Note: a higher-priority settings source overrides this — the effective shell is ${shellDisplayName(effective)}.`,
+      `Note: a higher-priority settings source overrides this on disk — new sessions will start with ${shellDisplayName(onDisk)}.`,
     )
   }
   if (shell === 'powershell' && !availability.pwsh.available) {
@@ -113,8 +121,13 @@ function applyShellSelection(
 }
 
 function statusMessage(availability: ShellAvailabilityInfo): string {
+  const session = resolveDefaultShell()
+  const onDisk = getInitialSettings().defaultShell ?? 'bash'
   return [
-    `Current shell: ${shellDisplayName(resolveDefaultShell())}`,
+    `Current shell: ${shellDisplayName(session)} (this session)`,
+    `Saved in settings: ${shellDisplayName(onDisk)}${
+      onDisk === session ? '' : ' — new sessions will start with this'
+    }`,
     '',
     `Bash: ${availability.bash.detail}`,
     `Pwsh: ${availability.pwsh.detail}`,
