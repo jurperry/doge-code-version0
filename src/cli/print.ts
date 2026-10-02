@@ -2872,11 +2872,15 @@ function runHeadlessStreaming(
       imRemote.getConfig()?.autoMode === true,
       prev.toolPermissionContext.mode,
       isBypassPermissionsModeDisabled(),
+      prev.toolPermissionContext.autoPlan === true,
     )
     return next
       ? {
           ...prev,
-          toolPermissionContext: { ...prev.toolPermissionContext, mode: next },
+          toolPermissionContext: {
+            ...transitionPermissionMode(prev.toolPermissionContext.mode, next, prev.toolPermissionContext),
+            mode: next,
+          },
         }
       : prev
   }

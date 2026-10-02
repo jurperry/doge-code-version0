@@ -64,6 +64,7 @@ export function applyPermissionUpdate(
       return {
         ...context,
         mode: update.mode,
+        ...(update.mode !== 'plan' ? { autoPlan: undefined, prePlanMode: undefined } : {}),
       }
 
     case 'addRules': {

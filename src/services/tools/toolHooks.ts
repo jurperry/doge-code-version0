@@ -28,6 +28,7 @@ import {
   type PermissionResult,
 } from '../../utils/permissions/PermissionResult.js'
 import { checkRuleBasedPermissions } from '../../utils/permissions/permissions.js'
+import { isZeroAskAutoActive, isZeroAskPlanInterlude } from '../../utils/permissions/autoBypass.js'
 import { formatError } from '../../utils/toolErrors.js'
 import { isMcpTool } from '../mcp/utils.js'
 import type { McpServerType, MessageUpdateLazy } from './toolExecution.js'
@@ -343,6 +344,19 @@ export async function resolveHookPermissionDecision(
 }> {
   const requiresInteraction = tool.requiresUserInteraction?.()
   const requireCanUseTool = toolUseContext.requireCanUseTool
+
+  // Hooks must not force a user dialog or allow writes during Auto planning.
+  // Keep explicit hook denials; route every other decision through the same
+  // mode-aware pipeline as ordinary calls, including automatic question input.
+  const permissionContext = toolUseContext.getAppState().toolPermissionContext
+  if (hookPermissionResult?.behavior !== 'deny' &&
+      (isZeroAskAutoActive(permissionContext) || isZeroAskPlanInterlude(permissionContext))) {
+    const hookInput = hookPermissionResult?.updatedInput ?? input
+    return {
+      decision: await canUseTool(tool, hookInput, toolUseContext, assistantMessage, toolUseID),
+      input: hookInput,
+    }
+  }
 
   if (hookPermissionResult?.behavior === 'allow') {
     const hookInput = hookPermissionResult.updatedInput ?? input

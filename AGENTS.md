@@ -50,6 +50,8 @@
 | `DOGE_HEADLESS_BUILTIN_MCP` | headless 模式下启用内置 MCP（含 Playwright） |
 | `DOGE_PLAYWRIGHT_MCP` / `DOGE_PLAYWRIGHT_*` | 内置 Playwright MCP 开关与浏览器配置（`DOGE_PLAYWRIGHT_MCP=0` 关闭） |
 
+- **Auto 自动计划（2.1.280）**：`autoPlan` 只标记模型从 bypassPermissions 进入的 Plan，手动 Plan（含旗标启动会话）保留交互；只读工具和当前计划文件可执行，配置/hook allow 不可越过边界。ExitPlan 自动回 Auto；切到其他模式统一清 prePlanMode/autoPlan。远程接入/新 prompt 保留自动 Plan；`plan_mode` attachment（含 compact）记录来源，历史按 snapshot 渲染。MCP 表单/URL retry 走共享自动应答并过 ElicitationResult hooks 与 SDK schema 校验，不挂询问队列；显式 deny 与 killswitch 保留。测试：test/auto-plan.test.ts、test/auto-elicitation.test.ts，App tools/verify-auto-plan.mjs 与 verify-im-remote R18。
+
 ## 三、仓库地图（src 之外的关键目录，勿误解/误删）
 
 - `needs/` — 随仓库维护的默认资源暂存：hooks 脚本、`settings.json` 模板、skills 副本，面向 `~/.doge/`（其中 hook 命令指向 `~/.doge/hooks/`）；不被 src 直接引用，改动后需自行同步到目标位置

@@ -1582,6 +1582,7 @@ export async function createPlanModeAttachmentIfNeeded(
   return createAttachmentMessage({
     type: 'plan_mode',
     reminderType: 'full',
+    autoPlan: appState.toolPermissionContext.autoPlan === true,
     isSubAgent: !!context.agentId,
     planFilePath,
     planExists,

@@ -195,6 +195,11 @@
 
 ## 四、TUI 与权限
 
+### 66. Auto 自动规划来源、权限边界与 MCP 零咨询（2.1.280，2026-10-02；取代 38 的旧 Auto/Plan 语义）
+1. 问题：Plan 沿用 bypass 启动旗标，自动规划和手动 Plan 混在一起；路径 allow/hook allow 可越过计划限制，hook ask 仍有询问通道，远程新消息会提前强切 Auto。计划历史按当前全局模式重渲染，退出后反而恢复手动采访模板；MCP 表单和 URL retry 绕过工具权限管道，另有咨询通道。新增自动答案又需保留 ElicitationResult 否决 hooks，并避免整数上界与格式字符串截断产生不合法输入。
+2. 解决：仅模型从 bypassPermissions EnterPlanMode 设置 autoPlan，手动/旗标 Plan 保留交互；统一来源判定与模式转换清理，Ask 自动首选，ExitPlan 自动回 Auto，Plan 边界独立于 allow 规则与 hooks（只读和当前计划文件），异步权限检查重读模式，显式 deny/killswitch 保留。远程 Auto 保留自动计划；普通和压缩补发的计划 attachment 保存来源，历史提示不漂移。MCP 三条通道共享自动答案，默认值/首选项与受限基本类型经 SDK Ajv 校验，自动答案仍执行结果 hooks；不可生成有效答案则自动终结，不询问。独立审查五项实质问题均修复并加回归；全套按文件隔离 76 文件、631 测试通过（共享进程有既有配置/团队锁污染；认证环境清理后提醒单测使用本地假 key）。源码、编译与安装 CLI 六场景真实协议黑盒通过，Auto/自动 Plan 的 MCP form 与 -32042 URL retry 全程零咨询，计划/执行文件实写，标准/Accept/手动 Plan 保留审批。新增 MCP 模块对 SDK 类型独立检查通过；CLI version=2.1.280，随 App 0.2.107 打包，编译/安装 SHA256=8A778351395DBD35DCF9FB578977804BAA3CE540553D43F12617357AF1F18CED。编译源为 92b8974 基线加本轮源码；用户已于 2026-10-02 明确授权提交、合并 main 与删除功能分支，对应 CLI 源码 commit 由 App 提交说明记录。
+3. 位置：src/utils/permissions/{autoBypass,autoPlan,permissions,permissionSetup,PermissionUpdate,currentPermissionMode}.ts；Tool.ts/types/permissions.ts、EnterPlanModeTool/ExitPlanModeV2Tool/AskUserQuestionTool、services/tools/toolHooks.ts、state/onChangeAppState.ts、constants/prompts.ts、utils/{attachments,messages}.ts、services/compact/compact.ts、services/mcp/{autoElicitation,elicitationHandler}.ts、utils/imRemote/autoMode.ts、screens/REPL.tsx、cli/print.ts；test/auto-plan.test.ts 与 auto-elicitation.test.ts 为保留的可复用测试源码。App 验证与测试现场清理记录见 docs/superpowers/plans/2026-10-02-agent-sidebar-auto.md（App 仓）。
+
 ### 37. /clear 与 /model 卡顿（2026-07-14）
 1. 问题：skills 扫描不跳过 node_modules（claude-to-im 1 万+文件）；/clear 复用 resume 的全清把 fileIndex 清空，非 git 大目录触发 ripgrep 全量扫描 + Defender IO 饱和数秒。
 2. 解决：markdown 扫描（ripgrep 与 native 兜底）剪枝 node_modules；`clearFileSuggestionCaches` 软清保留索引；非 git 兜底 `--max-depth`（`CLAUDE_CODE_FILE_INDEX_MAX_DEPTH`，默认 3）；同步 statSync 调用 setImmediate 让出主线程。

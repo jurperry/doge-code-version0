@@ -564,6 +564,8 @@ export type Attachment =
   | {
       type: 'plan_mode'
       reminderType: 'full' | 'sparse'
+      /** Captured at creation so historical reminders do not change on mode switches. */
+      autoPlan?: boolean
       isSubAgent?: boolean
       planFilePath: string
       planExists: boolean
@@ -1233,6 +1235,7 @@ async function getPlanModeAttachments(
   attachments.push({
     type: 'plan_mode',
     reminderType,
+    autoPlan: permissionContext.autoPlan === true,
     isSubAgent: !!toolUseContext.agentId,
     planFilePath,
     planExists: existingPlan !== null,

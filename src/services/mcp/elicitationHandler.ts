@@ -6,6 +6,7 @@ import {
   type ElicitResult,
 } from '@modelcontextprotocol/sdk/types.js'
 import type { AppState } from '../../state/AppState.js'
+import { getAutomaticElicitationResponse } from './autoElicitation.js'
 import {
   executeElicitationHooks,
   executeElicitationResultHooks,
@@ -249,11 +250,13 @@ export async function runElicitationHooks(
       }
     }
 
-    return undefined
   } catch (error) {
     logMCPError(serverName, `Elicitation hook error: ${error}`)
-    return undefined
   }
+  const automaticResponse = getAutomaticElicitationResponse(params)
+  if (!automaticResponse) return undefined
+  // Automatic consent still passes the same result hooks as a UI response.
+  return runElicitationResultHooks(serverName, automaticResponse, signal, params.mode ?? 'form', 'elicitationId' in params ? params.elicitationId : undefined)
 }
 
 /**

@@ -135,6 +135,8 @@ export type ToolPermissionContext = DeepImmutable<{
   awaitAutomatedChecksBeforeDialog?: boolean
   /** Stores the permission mode before model-initiated plan mode entry, so it can be restored on exit */
   prePlanMode?: PermissionMode
+  /** Model-initiated planning inside Auto; manual Plan keeps its interactive behavior. */
+  autoPlan?: boolean
 }>
 
 export const getEmptyToolPermissionContext: () => ToolPermissionContext =

@@ -398,6 +398,7 @@ export const ExitPlanModeV2Tool: Tool<InputSchema, Output> = buildTool({
           ...baseContext,
           mode: restoreMode,
           prePlanMode: undefined,
+          autoPlan: undefined,
         },
       }
     })

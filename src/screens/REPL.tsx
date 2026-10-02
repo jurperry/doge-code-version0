@@ -122,7 +122,7 @@ import useCanUseTool from '../hooks/useCanUseTool.js';
 import type { ToolPermissionContext, Tool } from '../Tool.js';
 import { applyPermissionUpdate, applyPermissionUpdates, persistPermissionUpdate } from '../utils/permissions/PermissionUpdate.js';
 import { buildPermissionUpdates } from '../components/permissions/ExitPlanModePermissionRequest/ExitPlanModePermissionRequest.js';
-import { isBypassPermissionsModeDisabled, stripDangerousPermissionsForAutoMode } from '../utils/permissions/permissionSetup.js';
+import { isBypassPermissionsModeDisabled, stripDangerousPermissionsForAutoMode, transitionPermissionMode } from '../utils/permissions/permissionSetup.js';
 import { getScratchpadDir, isScratchpadEnabled } from '../utils/permissions/filesystem.js';
 import { WEB_FETCH_TOOL_NAME } from '../tools/WebFetchTool/prompt.js';
 import { SLEEP_TOOL_NAME } from '../tools/SleepTool/prompt.js';
@@ -927,12 +927,13 @@ export function REPL({
         imRemote.getConfig()?.autoMode === true,
         prev.toolPermissionContext.mode,
         isBypassPermissionsModeDisabled(),
+        prev.toolPermissionContext.autoPlan === true,
       );
       return next
         ? {
             ...prev,
             toolPermissionContext: {
-              ...prev.toolPermissionContext,
+              ...transitionPermissionMode(prev.toolPermissionContext.mode, next, prev.toolPermissionContext),
               mode: next,
             },
           }

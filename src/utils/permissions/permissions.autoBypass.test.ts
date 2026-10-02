@@ -108,6 +108,7 @@ function planInterludeContext(): ToolUseContext {
   return makeContext({
     mode: 'plan',
     prePlanMode: 'bypassPermissions',
+    autoPlan: true,
   } as ToolPermissionContext)
 }
 
@@ -254,6 +255,7 @@ test('plan interlude: ExitPlanMode is auto-approved back to Auto', async () => {
 test('plan interlude: read-only tools the tool itself allows still run', async () => {
   const tool = {
     name: 'Read',
+    isReadOnly: () => true,
     inputSchema: z.object({}).passthrough(),
     async checkPermissions(input: Record<string, unknown>) {
       return { behavior: 'allow' as const, updatedInput: input }
@@ -269,7 +271,7 @@ test('plan interlude: read-only tools the tool itself allows still run', async (
   expect(result.behavior).toBe('allow')
 })
 
-test('flag-launched session keeps upstream plan-mode bypass (no interlude)', async () => {
+test('manually selected Plan retains prompts even in a flag-launched session', async () => {
   const result = await hasPermissionsToUseTool(
     makeTool('Bash'),
     { command: 'ls' },
@@ -281,7 +283,7 @@ test('flag-launched session keeps upstream plan-mode bypass (no interlude)', asy
     assistantMessage,
     'test-id',
   )
-  expect(result.behavior).toBe('allow')
+  expect(result.behavior).toBe('ask')
 })
 
 test('plain plan mode still asks (regression guard)', async () => {

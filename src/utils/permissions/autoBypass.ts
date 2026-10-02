@@ -2,29 +2,18 @@ import type { ToolPermissionContext } from '../../Tool.js'
 import { isBypassPermissionsModeDisabled } from './permissionSetup.js'
 
 // doge fork: single source for "this session currently auto-releases tool
-// permission checks" (the /auto command). Direct bypassPermissions mode, plus
-// plan mode in a flag-launched session (isBypassPermissionsModeAvailable —
-// upstream semantics for --dangerously-skip-permissions).
-//
-// Plan mode entered FROM bypassPermissions in a /auto session
-// (prePlanMode='bypassPermissions' stashed by prepareContextForPlanMode) is
-// deliberately NOT bypass-active anymore: that combination is the Auto
-// zero-ask plan interlude (see isZeroAskPlanInterlude), where writes are
-// denied so the model actually plans instead of executing.
+// permission checks" (the /auto command). Launch flags describe availability,
+// not the current mode: Plan must stay bounded even in a flag-launched session.
 //
 // This must stay weaker than the pipeline's earlier gates: deny rules (1a)
 // are evaluated BEFORE the mode bypass in hasPermissionsToUseToolInner.
 export function isAutoBypassActive(
   toolPermissionContext: Pick<
     ToolPermissionContext,
-    'mode' | 'prePlanMode' | 'isBypassPermissionsModeAvailable'
+    'mode'
   >,
 ): boolean {
-  const { mode, isBypassPermissionsModeAvailable } = toolPermissionContext
-  if (mode === 'bypassPermissions') {
-    return true
-  }
-  return mode === 'plan' && isBypassPermissionsModeAvailable === true
+  return isZeroAskAutoActive(toolPermissionContext)
 }
 
 /**
@@ -51,20 +40,19 @@ export function isZeroAskAutoActive(
  * into a deny telling the model to finish the plan, and auto-approves
  * ExitPlanMode so the session returns to Auto without asking.
  *
- * Flag-launched --dangerously-skip-permissions sessions are excluded
- * (isBypassPermissionsModeAvailable): upstream keeps full bypass inside
- * plan mode for them via isAutoBypassActive above.
+ * Only model-initiated entry sets autoPlan. A user selecting Plan directly
+ * retains the ordinary interactive planning workflow.
  */
 export function isZeroAskPlanInterlude(
   toolPermissionContext: Pick<
     ToolPermissionContext,
-    'mode' | 'prePlanMode' | 'isBypassPermissionsModeAvailable'
+    'mode' | 'prePlanMode' | 'autoPlan'
   >,
 ): boolean {
   return (
     toolPermissionContext.mode === 'plan' &&
     toolPermissionContext.prePlanMode === 'bypassPermissions' &&
-    toolPermissionContext.isBypassPermissionsModeAvailable !== true &&
+    toolPermissionContext.autoPlan === true &&
     !isBypassPermissionsModeDisabled()
   )
 }

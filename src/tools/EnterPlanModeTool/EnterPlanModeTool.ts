@@ -9,6 +9,8 @@ import { buildTool, type ToolDef } from '../../Tool.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { applyPermissionUpdate } from '../../utils/permissions/PermissionUpdate.js'
 import { prepareContextForPlanMode } from '../../utils/permissions/permissionSetup.js'
+import { isCurrentAutoPlan } from '../../utils/permissions/currentPermissionMode.js'
+import { getPlanFilePath } from '../../utils/plans.js'
 import { isPlanModeInterviewPhaseEnabled } from '../../utils/planModeV2.js'
 import { ENTER_PLAN_MODE_TOOL_NAME } from './constants.js'
 import { getEnterPlanModeToolPrompt } from './prompt.js'
@@ -88,7 +90,7 @@ export const EnterPlanModeTool: Tool<InputSchema, Output> = buildTool({
     context.setAppState(prev => ({
       ...prev,
       toolPermissionContext: applyPermissionUpdate(
-        prepareContextForPlanMode(prev.toolPermissionContext),
+        prepareContextForPlanMode(prev.toolPermissionContext, true),
         { type: 'setMode', mode: 'plan', destination: 'session' },
       ),
     }))
@@ -101,7 +103,9 @@ export const EnterPlanModeTool: Tool<InputSchema, Output> = buildTool({
     }
   },
   mapToolResultToToolResultBlockParam({ message }, toolUseID) {
-    const instructions = isPlanModeInterviewPhaseEnabled()
+    const instructions = isCurrentAutoPlan()
+      ? `${message}\nExplore with read-only tools and write the plan file (${getPlanFilePath()}). Make decisions autonomously; do not ask the user questions or request approval. Call ExitPlanMode when ready to resume execution automatically in Auto mode.`
+      : isPlanModeInterviewPhaseEnabled()
       ? `${message}
 
 DO NOT write or edit any files except the plan file. Detailed workflow instructions will follow.`

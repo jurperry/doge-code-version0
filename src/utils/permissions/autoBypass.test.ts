@@ -32,6 +32,7 @@ function ctx(
   return {
     mode,
     ...(prePlanMode !== undefined ? { prePlanMode } : {}),
+    ...(mode === 'plan' && prePlanMode === 'bypassPermissions' ? { autoPlan: true } : {}),
     ...(isBypassPermissionsModeAvailable !== undefined
       ? { isBypassPermissionsModeAvailable }
       : {}),
@@ -70,9 +71,9 @@ test('plan entered from bypassPermissions (/auto session) is NOT auto-bypass —
   expect(isAutoBypassActive(ctx('plan', 'bypassPermissions'))).toBe(false)
 })
 
-test('plan in a flag-launched session keeps upstream auto-bypass', () => {
-  expect(isAutoBypassActive(ctx('plan', undefined, true))).toBe(true)
-  expect(isAutoBypassActive(ctx('plan', 'bypassPermissions', true))).toBe(true)
+test('plan in a flag-launched session retains planning boundaries', () => {
+  expect(isAutoBypassActive(ctx('plan', undefined, true))).toBe(false)
+  expect(isAutoBypassActive(ctx('plan', 'bypassPermissions', true))).toBe(false)
 })
 
 test('plain plan mode (entered from default/acceptEdits) is not auto-bypass', () => {
@@ -99,11 +100,10 @@ test('zero-ask auto is active exactly in bypassPermissions mode', () => {
   expect(isZeroAskAutoActive(ctx('plan', 'bypassPermissions'))).toBe(false)
 })
 
-test('zero-ask plan interlude is plan entered from bypassPermissions in a non-flag session', () => {
+test('zero-ask plan interlude is model-initiated Plan from Auto in every launch mode', () => {
   expect(isZeroAskPlanInterlude(ctx('plan', 'bypassPermissions'))).toBe(true)
-  // flag-launched sessions keep upstream plan-bypass semantics instead
   expect(isZeroAskPlanInterlude(ctx('plan', 'bypassPermissions', true))).toBe(
-    false,
+    true,
   )
   expect(isZeroAskPlanInterlude(ctx('plan'))).toBe(false)
   expect(isZeroAskPlanInterlude(ctx('plan', 'default'))).toBe(false)

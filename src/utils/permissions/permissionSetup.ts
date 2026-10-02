@@ -639,8 +639,8 @@ export function transitionPermissionMode(
   }
 
   // Only spread if there's something to clear (preserves ref equality)
-  if (fromMode === 'plan' && toMode !== 'plan' && context.prePlanMode) {
-    return { ...context, prePlanMode: undefined }
+  if (fromMode === 'plan' && toMode !== 'plan' && (context.prePlanMode || context.autoPlan)) {
+    return { ...context, prePlanMode: undefined, autoPlan: undefined }
   }
 
   return context
@@ -1467,9 +1467,13 @@ export function shouldPlanUseAutoMode(): boolean {
  */
 export function prepareContextForPlanMode(
   context: ToolPermissionContext,
+  modelInitiated = false,
 ): ToolPermissionContext {
   const currentMode = context.mode
   if (currentMode === 'plan') return context
+  if (currentMode === 'bypassPermissions') {
+    return { ...context, prePlanMode: currentMode, autoPlan: modelInitiated || undefined }
+  }
   if (feature('TRANSCRIPT_CLASSIFIER')) {
     const planAutoMode = shouldPlanUseAutoMode()
     if (currentMode === 'auto') {
@@ -1495,7 +1499,7 @@ export function prepareContextForPlanMode(
     `[prepareContextForPlanMode] plain plan entry, prePlanMode=${currentMode}`,
     { level: 'info' },
   )
-  return { ...context, prePlanMode: currentMode }
+  return { ...context, prePlanMode: currentMode, autoPlan: undefined }
 }
 
 /**

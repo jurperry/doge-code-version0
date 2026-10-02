@@ -7,11 +7,17 @@ import type { PermissionMode } from '../../types/permissions.js'
 // path (Shift+Tab, /auto, /plan, ExitPlanMode, SDK set_permission_mode,
 // bridge) flows through.
 let currentPermissionMode: PermissionMode = 'default'
+let currentAutoPlan = false
 
 export function getCurrentPermissionMode(): PermissionMode {
   return currentPermissionMode
 }
 
-export function setCurrentPermissionMode(mode: PermissionMode): void {
+export function isCurrentAutoPlan(): boolean {
+  return currentPermissionMode === 'plan' && currentAutoPlan
+}
+
+export function setCurrentPermissionMode(mode: PermissionMode, autoPlan = false): void {
   currentPermissionMode = mode
+  currentAutoPlan = autoPlan
 }

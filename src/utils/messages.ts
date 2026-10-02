@@ -3144,10 +3144,17 @@ export function wrapMessagesInSystemReminder(
 
 function getPlanModeInstructions(attachment: {
   reminderType: 'full' | 'sparse'
+  autoPlan?: boolean
   isSubAgent?: boolean
   planFilePath: string
   planExists: boolean
 }): UserMessage[] {
+  if (attachment.autoPlan && !attachment.isSubAgent) {
+    return wrapMessagesInSystemReminder([createUserMessage({
+      content: `Auto planning is active. Explore the codebase and decide the approach autonomously. Do not ask the user questions or request approval. You may only perform read-only exploration and write or edit the plan file (${attachment.planFilePath}). Include the implementation approach and verification in that file, then call ExitPlanMode to return automatically to Auto and execute the plan without waiting for a user reply.`,
+      isMeta: true,
+    })])
+  }
   if (attachment.isSubAgent) {
     return getPlanModeV2SubAgentInstructions(attachment)
   }

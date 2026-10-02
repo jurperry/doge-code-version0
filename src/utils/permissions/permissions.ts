@@ -24,6 +24,7 @@ import {
 } from '../settings/constants.js'
 import { plural } from '../stringUtils.js'
 import { isAutoBypassActive, isZeroAskAutoActive, isZeroAskPlanInterlude } from './autoBypass.js'
+import { isAutoPlanOperationAllowed } from './autoPlan.js'
 import { permissionModeTitle } from './PermissionMode.js'
 import type {
   PermissionAskDecision,
@@ -1172,12 +1173,12 @@ async function hasPermissionsToUseToolInner(
   // every ask-shaped decision below (1b/1e/1f/1g) falls through to the 2a
   // bypass allow; explicit deny rules (1a/1d) still win. Killswitch-aware
   // (isZeroAskAutoActive returns false when bypass is disabled).
-  const zeroAskAuto = isZeroAskAutoActive(appState.toolPermissionContext)
+  let zeroAskAuto = isZeroAskAutoActive(appState.toolPermissionContext)
   // doge fork: Auto plan interlude — plan mode entered FROM bypassPermissions
   // (model called EnterPlanMode inside an Auto session). Ask-shaped decisions
   // become a deny telling the model to keep planning; ExitPlanMode itself is
   // auto-approved so the session returns to Auto without prompting.
-  const zeroAskPlanInterlude = isZeroAskPlanInterlude(
+  let zeroAskPlanInterlude = isZeroAskPlanInterlude(
     appState.toolPermissionContext,
   )
 
@@ -1208,10 +1209,7 @@ async function hasPermissionsToUseToolInner(
       shouldUseSandbox(input)
 
     if (!canSandboxAutoAllow) {
-      if (zeroAskPlanInterlude) {
-        return planInterludeDeny(tool)
-      }
-      if (!zeroAskAuto) {
+      if (!zeroAskAuto && !zeroAskPlanInterlude) {
         return {
           behavior: 'ask',
           decisionReason: {
@@ -1244,6 +1242,11 @@ async function hasPermissionsToUseToolInner(
   }
 
   // 1d. Tool implementation denied permission
+  // Permission checks can await IO; use the latest mode before deciding
+  // whether a dialog is allowed or the automatic plan boundary applies.
+  appState = context.getAppState()
+  zeroAskAuto = isZeroAskAutoActive(appState.toolPermissionContext)
+  zeroAskPlanInterlude = isZeroAskPlanInterlude(appState.toolPermissionContext)
   if (toolPermissionResult?.behavior === 'deny') {
     return toolPermissionResult
   }
@@ -1260,6 +1263,14 @@ async function hasPermissionsToUseToolInner(
         mode: appState.toolPermissionContext.mode,
       },
     }
+  }
+
+  if (zeroAskPlanInterlude) {
+    if (isAutoPlanOperationAllowed(tool, input, context.agentId)) {
+      return { behavior: 'allow', updatedInput: getUpdatedInputOrFallback(toolPermissionResult, input),
+        decisionReason: { type: 'mode', mode: 'plan' } }
+    }
+    return planInterludeDeny(tool)
   }
 
   // 1e. Tool requires user interaction even in bypass mode

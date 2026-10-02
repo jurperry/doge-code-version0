@@ -12,7 +12,9 @@ export function remoteAutoTargetMode(
   autoMode: boolean,
   currentMode: string,
   bypassDisabled: boolean,
+  autoPlan = false,
 ): 'bypassPermissions' | null {
   if (!autoMode || currentMode === 'bypassPermissions' || bypassDisabled) return null
+  if (currentMode === 'plan' && autoPlan) return null
   return 'bypassPermissions'
 }

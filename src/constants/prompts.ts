@@ -65,7 +65,7 @@ import { logForDebugging } from '../utils/debug.js'
 import { loadMemoryPrompt } from '../memdir/memdir.js'
 import { isUndercover } from '../utils/undercover.js'
 import { isMcpInstructionsDeltaEnabled } from '../utils/mcpInstructionsDelta.js'
-import { getCurrentPermissionMode } from '../utils/permissions/currentPermissionMode.js'
+import { getCurrentPermissionMode, isCurrentAutoPlan } from '../utils/permissions/currentPermissionMode.js'
 
 // Dead code elimination: conditional imports for feature-gated modules
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -454,6 +454,9 @@ function getSimpleToneAndStyleSection(): string {
 // Mode reads go through the live mirror (currentPermissionMode.ts); the
 // section is registered uncached so it flips with Shift+Tab /auto /plan.
 function getZeroAskAutoSection(): string | null {
+  if (isCurrentAutoPlan()) {
+    return `# Auto planning\nYou are planning autonomously inside Auto mode. Do not ask the user any questions, request approval, or wait for a reply. Make reasonable decisions yourself, explore with read-only tools, and write the plan file. When the plan is ready call ExitPlanMode; approval is automatic and execution resumes in Auto mode.`
+  }
   if (getCurrentPermissionMode() !== 'bypassPermissions') return null
   return `# Auto mode
 Auto mode is active: every tool call is auto-approved and the user is never prompted. Do not ask the user questions — ${ASK_USER_QUESTION_TOOL_NAME} is answered automatically with its first option, so prefer making a reasonable decision yourself. If the task needs planning before execution, call EnterPlanMode to draft a plan, then call ExitPlanMode when the plan is ready — it is auto-approved and you immediately continue executing in Auto mode.`

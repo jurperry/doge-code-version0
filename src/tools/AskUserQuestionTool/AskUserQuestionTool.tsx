@@ -5,7 +5,7 @@ import { getAllowedChannels, getQuestionPreviewFormat } from 'src/bootstrap/stat
 import { MessageResponse } from 'src/components/MessageResponse.js';
 import { BLACK_CIRCLE } from 'src/constants/figures.js';
 import { getModeColor } from 'src/utils/permissions/PermissionMode.js';
-import { isZeroAskAutoActive } from 'src/utils/permissions/autoBypass.js';
+import { isZeroAskAutoActive, isZeroAskPlanInterlude } from 'src/utils/permissions/autoBypass.js';
 import { z } from 'zod/v4';
 import { Box, Text } from '../../ink.js';
 import type { Tool } from '../../Tool.js';
@@ -212,7 +212,8 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
     // decision carries auto-filled answers through updatedInput into call()
     // (hasPermissionsToUseToolInner 2a → permissionDecision.updatedInput →
     // tool input), so the tool completes without any user interaction.
-    if (isZeroAskAutoActive(context.getAppState().toolPermissionContext)) {
+    const permissionContext = context.getAppState().toolPermissionContext;
+    if (isZeroAskAutoActive(permissionContext) || isZeroAskPlanInterlude(permissionContext)) {
       return {
         behavior: 'allow' as const,
         updatedInput: {
