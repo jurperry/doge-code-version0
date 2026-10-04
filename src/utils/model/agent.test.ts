@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { getAgentModel } from './agent.js'
+import { buildAgentModelOptions, getAgentModel } from './agent.js'
 
 const savedSubagentModel = process.env.CLAUDE_CODE_SUBAGENT_MODEL
 
@@ -77,5 +77,69 @@ describe('getAgentModel — CLAUDE_CODE_SUBAGENT_MODEL env', () => {
     expect(getAgentModel('opus', 'claude-sonnet-4-5', 'haiku', 'default')).toBe(
       'claude-haiku-4-5',
     )
+  })
+})
+
+describe('buildAgentModelOptions — /agents model picker', () => {
+  test('profiles contribute main model AND tier slots, labelled by provider', () => {
+    const options = buildAgentModelOptions(
+      [
+        {
+          model: 'glm-5.2',
+          providerName: 'GLM',
+          defaultHaikuModel: 'glm-5.2-flash',
+        },
+      ],
+      [],
+    )
+    const values = options.map((o) => o.value)
+    expect(values).toContain('glm-5.2')
+    // The blind spot this guards: tier models never entered the legacy
+    // savedModels index, so they were invisible in the picker.
+    expect(values).toContain('glm-5.2-flash')
+    const flash = options.find((o) => o.value === 'glm-5.2-flash')!
+    expect(flash.description).toContain('GLM')
+    expect(flash.description).toContain('Haiku tier')
+  })
+
+  test('standard aliases are ALWAYS present, even with custom models', () => {
+    // Old behavior: non-empty savedModels swapped the list to custom-only,
+    // dropping sonnet/opus/haiku. Aliases must survive — they resolve
+    // against the active provider's tier env at run time.
+    const options = buildAgentModelOptions(
+      [{ model: 'deepseek-chat', providerName: 'DS' }],
+      ['kimi-k3'],
+    )
+    const values = options.map((o) => o.value)
+    for (const alias of ['sonnet', 'opus', 'haiku', 'inherit']) {
+      expect(values).toContain(alias)
+    }
+    expect(values[values.length - 1]).toBe('inherit')
+    expect(values).toContain('deepseek-chat')
+    expect(values).toContain('kimi-k3')
+  })
+
+  test('no profiles, no saved models → exactly the four standard options', () => {
+    const values = buildAgentModelOptions([], []).map((o) => o.value)
+    expect(values).toEqual(['sonnet', 'opus', 'haiku', 'inherit'])
+  })
+
+  test('dedupe by exact string only — [1m] variants stay distinct', () => {
+    const options = buildAgentModelOptions(
+      [
+        {
+          model: 'kimi-k3',
+          providerName: 'Kimi',
+          defaultHaikuModel: 'kimi-k3[1m]',
+        },
+        { model: 'kimi-k3', providerName: 'Kimi-mirror' },
+      ],
+      ['kimi-k3', '  glm-5.2  '],
+    )
+    const values = options.map((o) => o.value)
+    expect(values.filter((v) => v === 'kimi-k3')).toHaveLength(1)
+    expect(values).toContain('kimi-k3[1m]')
+    // Trimmed, not collapsed with the bare id.
+    expect(values).toContain('glm-5.2')
   })
 })

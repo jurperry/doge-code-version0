@@ -114,6 +114,9 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
         ? (task.workflowName as string | undefined)
         : undefined,
     prompt: 'prompt' in task ? (task.prompt as string) : undefined,
+    // LocalAgentTask/InProcessTeammate states carry the (possibly alias)
+    // model string; other task types simply omit the field.
+    model: 'model' in task ? (task.model as string | undefined) : undefined,
   })
 }
 

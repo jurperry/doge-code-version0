@@ -140,62 +140,98 @@ export function getAgentModelDisplay(model: string | undefined): string {
   return capitalize(model)
 }
 
+export type AgentModelProfileInput = {
+  model?: unknown
+  providerName?: unknown
+  defaultOpusModel?: unknown
+  defaultSonnetModel?: unknown
+  defaultHaikuModel?: unknown
+}
+
 /**
- * Get available model options for agents
+ * Build the agent model option list from stored profiles and the legacy
+ * savedModels index.
+ *
+ * The stored provider profiles (modelProfiles) are the source of truth:
+ * every profile contributes its main model plus its three tier slots,
+ * labelled with the provider name (the legacy flat savedModels index only
+ * ever held main-model strings, so tier models were invisible here). The
+ * legacy index still feeds entries that predate profiles. The three
+ * standard aliases are ALWAYS listed alongside: getAgentModel resolves
+ * them against the active provider's tier env at run time, so next to a
+ * full model id they read as "follow the active tier" vs "pin this model".
+ * Values are deduped by exact string — [1m]/[2m] variants stay distinct
+ * choices (they select different context windows).
  */
-export function getAgentModelOptions(): AgentModelOption[] {
-  const customModels = [
-    ...(getGlobalConfig().customApiEndpoint?.savedModels ?? []),
-    ...(readCustomApiStorage().savedModels ?? []),
-  ]
-    .map(model => model.trim())
-    .filter(Boolean)
-
-  // Env var takes priority over stored provider (consistent with auth.ts / client.ts)
-  const compatProviderEnv = process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER
-  const customApiProvider =
-    (compatProviderEnv === 'openai' || compatProviderEnv === 'responses'
-      ? compatProviderEnv
-      : undefined) ??
-    readCustomApiStorage().provider ??
-    getGlobalConfig().customApiEndpoint?.provider ??
-    'anthropic'
-
-  if (customApiProvider === 'openai' || customModels.length > 0) {
-    return [
-      ...[...new Set(customModels)].map(model => ({
-        value: model,
-        label: model,
-        description: 'Custom model',
-      })),
-      {
-        value: 'inherit',
-        label: 'Inherit from parent',
-        description: 'Use the same model as the main conversation',
-      },
-    ]
+export function buildAgentModelOptions(
+  profiles: AgentModelProfileInput[],
+  savedModels: unknown[],
+): AgentModelOption[] {
+  const options: AgentModelOption[] = []
+  const seen = new Set<string>()
+  const push = (model: unknown, description: string) => {
+    if (typeof model !== 'string') return
+    const value = model.trim()
+    if (!value || seen.has(value)) return
+    seen.add(value)
+    options.push({ value, label: value, description })
   }
 
-  return [
+  for (const profile of profiles) {
+    const provider =
+      typeof profile.providerName === 'string' && profile.providerName.trim()
+        ? profile.providerName.trim()
+        : 'provider'
+    push(profile.model, `${provider} · main model`)
+    push(profile.defaultOpusModel, `${provider} · Opus tier`)
+    push(profile.defaultSonnetModel, `${provider} · Sonnet tier`)
+    push(profile.defaultHaikuModel, `${provider} · Haiku tier`)
+  }
+
+  // Legacy flat list (pre-profiles entries) — kept so nothing disappears.
+  for (const model of savedModels) {
+    push(model, 'Custom model')
+  }
+
+  options.push(
     {
       value: 'sonnet',
       label: 'Sonnet',
-      description: 'Balanced performance - best for most agents',
+      description: 'Balanced performance - follows the active Sonnet tier',
     },
     {
       value: 'opus',
       label: 'Opus',
-      description: 'Most capable for complex reasoning tasks',
+      description: 'Most capable - follows the active Opus tier',
     },
     {
       value: 'haiku',
       label: 'Haiku',
-      description: 'Fast and efficient for simple tasks',
+      description: 'Fast and efficient - follows the active Haiku tier',
     },
     {
       value: 'inherit',
       label: 'Inherit from parent',
       description: 'Use the same model as the main conversation',
     },
-  ]
+  )
+  return options
+}
+
+/**
+ * Get available model options for agents. Thin IO wrapper over
+ * buildAgentModelOptions — secure storage first (authoritative), the
+ * .claude.json mirror as fallback.
+ */
+export function getAgentModelOptions(): AgentModelOption[] {
+  return buildAgentModelOptions(
+    [
+      ...(readCustomApiStorage().modelProfiles ?? []),
+      ...((getGlobalConfig().customApiEndpoint?.modelProfiles ?? []) as AgentModelProfileInput[]),
+    ],
+    [
+      ...(getGlobalConfig().customApiEndpoint?.savedModels ?? []),
+      ...(readCustomApiStorage().savedModels ?? []),
+    ],
+  )
 }

@@ -66,6 +66,11 @@
 
 ## 二、模型选择与凭证
 
+### 67. /agents 模型选择器接 modelProfiles + task_started 透传模型（2.1.281，2026-10-04）
+1. 问题：/agents 代理编辑器的模型下拉只读 legacy savedModels 扁平索引——provider 档位槽模型（defaultOpus/Sonnet/HaikuModel）在向导里看不见选不到；索引非空（或 openai provider）时 sonnet/opus/haiku 别名整组被挤掉；子代理实际跑什么模型 SDK 消费端完全不可见（LocalAgentTask/InProcessTeammate 任务态里的 model 只上 TUI 面板，不上 SDK 事件线）。
+2. 解决：getAgentModelOptions 拆纯函数 buildAgentModelOptions——modelProfiles（主模型+三档位槽，带 providerName 标注，secure storage 权威、.claude.json 镜像兜底）∪ legacy savedModels ∪ 恒在四别名（sonnet/opus/haiku/inherit——别名由 getAgentModel 运行期按活动 provider 档位 env 解析，与完整 ID 并列即「跟档位 vs 钉模型」两种语义），精确字符串去重（[1m]/[2m] 变体是不同上下文窗口须保留）；registerTask 发 task_started 时按 `'model' in task` 泛读任务态 model 字段透传（LocalAgentTask/InProcessTeammate 两类自动覆盖，shell/dream 等无模型任务自然缺省），TaskStartedEvent schema 同步加可选 model（值可能仍是别名串，子代理每回合经 getAgentModel 再解析）。
+3. 位置：`src/utils/model/agent.ts`（buildAgentModelOptions/getAgentModelOptions）、`src/utils/task/framework.ts`（registerTask 发射）、`src/utils/sdkEventQueue.ts`（事件类型）、`src/utils/model/agent.test.ts`（buildAgentModelOptions 四断言：档位槽露出/别名恒在/空态四选项/精确去重保 [1m]）；配套 APP 0.2.111 交付（行/侧栏模型徽章 + E2E T26e/T26f）。
+
 ### 12. Agent 层级模型 fallback（2026-04-08）
 1. 问题：`getDefault{Opus,Sonnet,Haiku}Model` 硬编码官方模型名，单模型 API 下 Agent 显式指定档位必失败。
 2. 解决：env 档位变量 → 用户主模型（直读 env+settings 避免循环依赖）→ 硬编码默认。
