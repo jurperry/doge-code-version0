@@ -41,13 +41,14 @@ export function getAgentModel(
   parentModel: string,
   toolSpecifiedModel?: AgentModelAlias,
   permissionMode?: PermissionMode,
+  options?: { ignoreEnvironmentOverride?: boolean },
 ): string {
   // 'inherit' in the env var means the same as the tool parameter of that
   // value — resolve from the agent definition/parent — not a literal model id
   // (parseUserSpecifiedModel passes unknown strings through unchanged, which
   // would send the literal "inherit" to the API and 404).
   const subagentModelEnv = process.env.CLAUDE_CODE_SUBAGENT_MODEL
-  if (subagentModelEnv && subagentModelEnv.toLowerCase() !== 'inherit') {
+  if (!options?.ignoreEnvironmentOverride && subagentModelEnv && subagentModelEnv.toLowerCase() !== 'inherit') {
     return parseUserSpecifiedModel(subagentModelEnv)
   }
 

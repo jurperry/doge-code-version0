@@ -59,6 +59,7 @@ import { getTokenCountFromUsage } from '../../utils/tokens.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../ExitPlanModeTool/constants.js'
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME } from './constants.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
+import { agentRequestError } from './agentCompletion.js'
 export type ResolvedAgentTools = {
   hasWildcard: boolean
   validTools: string[]
@@ -72,13 +73,16 @@ export function filterToolsForAgent({
   isBuiltIn,
   isAsync = false,
   permissionMode,
+  allowNestedAgents = false,
 }: {
   tools: Tools
   isBuiltIn: boolean
   isAsync?: boolean
   permissionMode?: PermissionMode
+  allowNestedAgents?: boolean
 }): Tools {
   return tools.filter(tool => {
+    if (allowNestedAgents && toolMatchesName(tool, AGENT_TOOL_NAME)) return true
     // Allow MCP tools for all agents
     if (tool.name.startsWith('mcp__')) {
       return true
@@ -127,6 +131,7 @@ export function resolveAgentTools(
   availableTools: Tools,
   isAsync = false,
   isMainThread = false,
+  allowNestedAgents = false,
 ): ResolvedAgentTools {
   const {
     tools: agentTools,
@@ -144,6 +149,7 @@ export function resolveAgentTools(
         isBuiltIn: source === 'built-in',
         isAsync,
         permissionMode,
+        allowNestedAgents,
       })
 
   // Create a set of disallowed tool names for quick lookup
@@ -195,7 +201,7 @@ export function resolveAgentTools(
       }
       // For sub-agents, Agent is excluded by filterToolsForAgent — mark the spec
       // valid for allowedAgentTypes tracking but skip tool resolution.
-      if (!isMainThread) {
+      if (!isMainThread && !allowNestedAgents) {
         validTools.push(toolSpec)
         continue
       }
@@ -516,6 +522,7 @@ export async function runAsyncAgentLifecycle({
   agentIdForCleanup,
   enableSummarization,
   getWorktreeResult,
+  notificationMode,
 }: {
   taskId: string
   abortController: AbortController
@@ -532,6 +539,7 @@ export async function runAsyncAgentLifecycle({
     worktreePath?: string
     worktreeBranch?: string
   }>
+  notificationMode?: 'conversation' | 'sdk-only'
 }): Promise<void> {
   let stopSummarization: (() => void) | undefined
   const agentMessages: MessageType[] = []
@@ -594,6 +602,9 @@ export async function runAsyncAgentLifecycle({
 
     stopSummarization?.()
 
+    const apiError = agentRequestError(agentMessages)
+    if (apiError) throw apiError
+
     const agentResult = finalizeAgentTool(agentMessages, taskId, metadata)
 
     // Mark task completed FIRST so TaskOutput(block=true) unblocks
@@ -622,6 +633,7 @@ export async function runAsyncAgentLifecycle({
     const worktreeResult = await getWorktreeResult()
 
     enqueueAgentNotification({
+      notificationMode,
       taskId,
       description,
       status: 'completed',
@@ -638,6 +650,13 @@ export async function runAsyncAgentLifecycle({
   } catch (error) {
     stopSummarization?.()
     if (error instanceof AbortError) {
+      const reason = abortController.signal.reason
+      if (reason instanceof Error && reason.name === 'TimeoutError') {
+        failAsyncAgent(taskId, reason.message, rootSetAppState)
+        enqueueAgentNotification({ notificationMode, taskId, description, status: 'failed',
+          error: reason.message, setAppState: rootSetAppState, toolUseId: toolUseContext.toolUseId })
+        return
+      }
       // killAsyncAgent is a no-op if TaskStop already set status='killed' —
       // but only this catch handler has agentMessages, so the notification
       // must fire unconditionally. Transition status BEFORE worktree cleanup
@@ -657,6 +676,7 @@ export async function runAsyncAgentLifecycle({
       const worktreeResult = await getWorktreeResult()
       const partialResult = extractPartialResult(agentMessages)
       enqueueAgentNotification({
+        notificationMode,
         taskId,
         description,
         status: 'killed',
@@ -671,6 +691,7 @@ export async function runAsyncAgentLifecycle({
     failAsyncAgent(taskId, msg, rootSetAppState)
     const worktreeResult = await getWorktreeResult()
     enqueueAgentNotification({
+      notificationMode,
       taskId,
       description,
       status: 'failed',

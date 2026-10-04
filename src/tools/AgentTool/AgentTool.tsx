@@ -46,6 +46,7 @@ import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js';
 import { spawnTeammate } from '../shared/spawnMultiAgent.js';
 import { setAgentColor } from './agentColorManager.js';
 import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, runAsyncAgentLifecycle } from './agentToolUtils.js';
+import { agentCompletionStatus, agentRequestError } from './agentCompletion.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
@@ -567,6 +568,8 @@ export const AgentTool = buildTool({
     // below (registerAsyncAgentTask + notifyOnCompletion).
     const assistantForceAsync = feature('KAIROS') ? appState.kairosEnabled : false;
     const shouldRunAsync = (run_in_background === true || selectedAgent.background === true || isCoordinator || forceAsync || assistantForceAsync || (proactiveModule?.isProactiveActive() ?? false)) && !isBackgroundTasksDisabled;
+    const parentTask = toolUseContext.agentId ? appState.tasks[toolUseContext.agentId] : undefined;
+    const workflowParent = isLocalAgentTask(parentTask) && parentTask.workflowName ? parentTask : undefined;
     // Assemble the worker's tool pool independently of the parent's.
     // Workers always get their tools from assembleToolPool with their own
     // permission mode, so they aren't affected by the parent's tool
@@ -697,7 +700,10 @@ export const AgentTool = buildTool({
         // survive when the user presses ESC to cancel the main thread.
         // They are killed explicitly via chat:killAgents.
         toolUseId: toolUseContext.toolUseId,
-        model: resolvedAgentModel
+        model: resolvedAgentModel,
+        workflowName: workflowParent?.workflowName,
+        workflowRootAgentId: workflowParent?.workflowRootAgentId,
+        parentAbortController: workflowParent ? toolUseContext.abortController : undefined
       });
 
       // Register name → agentId for SendMessage routing. Post-registerAsyncAgent
@@ -827,7 +833,10 @@ export const AgentTool = buildTool({
             setAppState: rootSetAppState,
             toolUseId: toolUseContext.toolUseId,
             autoBackgroundMs: getAutoBackgroundMs() || undefined,
-            model: resolvedAgentModel
+            model: resolvedAgentModel,
+            workflowName: workflowParent?.workflowName,
+            workflowRootAgentId: workflowParent?.workflowRootAgentId,
+            parentAbortController: workflowParent ? toolUseContext.abortController : undefined
           });
           foregroundTaskId = registration.taskId;
           backgroundPromise = registration.backgroundSignal.then(() => ({
@@ -905,6 +914,14 @@ export const AgentTool = buildTool({
                 // Capture the taskId for use in the async callback
                 const backgroundedTaskId = foregroundTaskId;
                 wasBackgrounded = true;
+                const foregroundProgress = getProgressUpdate(syncTracker);
+                enqueueSdkEvent({
+                  type: 'system', subtype: 'task_progress', task_id: foregroundTaskId,
+                  tool_use_id: toolUseContext.toolUseId, description,
+                  is_background: true, summary: '已转到后台执行',
+                  usage: { total_tokens: foregroundProgress.tokenCount,
+                    tool_uses: foregroundProgress.toolUseCount, duration_ms: elapsed }
+                });
                 // Stop foreground summarization; the backgrounded closure
                 // below owns its own independent stop function.
                 stopForegroundSummarization?.();
@@ -952,6 +969,8 @@ export const AgentTool = buildTool({
                         emitTaskProgress(tracker, backgroundedTaskId, toolUseContext.toolUseId, description, startTime, lastToolName);
                       }
                     }
+                    const apiError = agentRequestError(agentMessages);
+                    if (apiError) throw apiError;
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
 
                     // Mark task completed FIRST so TaskOutput(block=true)
@@ -1175,7 +1194,7 @@ export const AgentTool = buildTool({
                 subtype: 'task_notification',
                 task_id: foregroundTaskId,
                 tool_use_id: toolUseContext.toolUseId,
-                status: syncAgentError ? 'failed' : wasAborted ? 'stopped' : 'completed',
+                status: agentCompletionStatus(agentMessages, syncAgentError, wasAborted),
                 output_file: '',
                 summary: description,
                 usage: {
@@ -1205,6 +1224,9 @@ export const AgentTool = buildTool({
             worktreeResult = await cleanupWorktreeIfNeeded();
           }
         }
+
+        const apiError = agentRequestError(agentMessages);
+        if (apiError) throw apiError;
 
         // Re-throw abort errors
         // TODO: Find a cleaner way to express this

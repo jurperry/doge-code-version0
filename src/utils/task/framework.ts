@@ -109,6 +109,7 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
     tool_use_id: task.toolUseId,
     description: task.description,
     task_type: task.type,
+    agent_id: 'agentId' in task && (task.type === 'local_agent' || task.type === 'in_process_teammate') ? task.agentId as string : undefined,
     workflow_name:
       'workflowName' in task
         ? (task.workflowName as string | undefined)
@@ -299,7 +300,7 @@ export function enqueueTaskNotification(attachment: TaskAttachment): void {
 <${OUTPUT_FILE_TAG}>${outputPath}</${OUTPUT_FILE_TAG}>
 <${STATUS_TAG}>${attachment.status}</${STATUS_TAG}>
 <${SUMMARY_TAG}>Task "${attachment.description}" ${statusText}</${SUMMARY_TAG}>
-</${TASK_NOTIFICATION_TAG}>`
+${attachment.deltaSummary ? `<result>${attachment.deltaSummary}</result>\n` : ''}</${TASK_NOTIFICATION_TAG}>`
 
   enqueuePendingNotification({ value: message, mode: 'task-notification' })
 }

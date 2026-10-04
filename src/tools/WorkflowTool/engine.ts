@@ -16,8 +16,8 @@
  *  - Cross-API steps (`profile: <providerName>`) spawn a short-lived headless
  *    `doge -p --output-format stream-json` subprocess with an isolated env
  *    patch (modelProfileEnvPatch — the parent's provider env is untouched).
- *    Those emit raw headless task_* events with synthesized ids; in the TUI
- *    they are visible only through the umbrella row (documented MVP limit).
+ *    Each is a registered local_agent with a provider-resolved model. Child
+ *    records and nested task events are namespaced under the parent session.
  *  - On settle, the summary is appended to the task output file and the
  *    standard <task-notification> XML re-enters the conversation so the main
  *    model presents the result (same interaction as background agents).
@@ -28,12 +28,12 @@
  * via parentAbortController) and skips the rest.
  */
 
-import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createChildAbortController } from '../../utils/abortController.js'
 import { createTaskStateBase, generateTaskId } from '../../Task.js'
 import {
   isLocalAgentTask,
   registerAsyncAgent,
+  type LocalAgentTaskState,
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import type {
   LocalWorkflowTaskState,
@@ -42,16 +42,14 @@ import type {
 import type { LocalJSXCommandContext } from '../../types/command.js'
 import type { Message } from '../../types/message.js'
 import { registerCleanup } from '../../utils/cleanupRegistry.js'
-import {
-  type ModelProfile,
-  modelProfileEnvPatch,
-} from '../../utils/customApiStorage.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { extractResultText } from '../../utils/forkedAgent.js'
 import { getAgentModel } from '../../utils/model/agent.js'
-import type { ModelAlias } from '../../utils/model/aliases.js'
-import { createUserMessage } from '../../utils/messages.js'
+import { createUserMessage, SYNTHETIC_MODEL } from '../../utils/messages.js'
+import { recordTranscript, recordSidechainTranscript, flushSessionStorage, setAgentTranscriptSubdir, clearAgentTranscriptSubdir, removeTranscriptMessage, recordNetworkRetryUsage } from '../../utils/sessionStorage.js'
+import { spawnHeadlessStep, profileStepModel, type StepOutcome } from './headlessStep.js'
+import { StepTranscriptChain, StepTranscriptRelay } from './stepTranscript.js'
 import {
   emitTaskTerminatedSdk,
   enqueueSdkEvent,
@@ -85,13 +83,6 @@ export interface WorkflowRunHandle {
   taskId: string
 }
 
-interface StepOutcome {
-  status: 'completed' | 'failed'
-  output: string
-  error?: string
-  tokens?: number
-}
-
 /** Resolve a step agent definition by name with the standard fallback chain. */
 export function resolveStepAgent(
   context: Pick<LocalJSXCommandContext, 'options'>,
@@ -115,8 +106,8 @@ export function startWorkflowTask(opts: {
 }): WorkflowRunHandle {
   const { spec, argsString, argValues, context } = opts
   const taskId = generateTaskId('local_workflow')
-  const abortController = new AbortController()
-  const description = `工作流 ${spec.name}${argsString.trim() ? ` ${argsString.trim()}` : ''}`
+  const abortController = createChildAbortController(context.abortController)
+  const description = `工作流 ${spec.name}`
 
   const taskState: LocalWorkflowTaskState = {
     ...createTaskStateBase(taskId, 'local_workflow', description, undefined),
@@ -201,27 +192,28 @@ async function runWorkflowSteps(opts: {
     } catch (err) {
       const msg = errorMessage(err)
       outcome = { status: 'failed', output: '', error: msg }
-      // User stops surface as AbortError/killed states — treat as kill.
-      if (/stop|abort|取消/i.test(msg) && abortController.signal.aborted) {
-        for (const s of stepsRun.slice(i)) s.status = 'skipped'
-        run.status = 'skipped'
-        run.durationMs = Date.now() - (run.startedAt ?? Date.now())
-        workflowStatus = 'killed'
-        break
-      }
     }
 
     run.durationMs = Date.now() - (run.startedAt ?? Date.now())
+    if (abortController.signal.aborted || outcome.status === 'stopped') {
+      outcome.status = 'stopped'
+      workflowStatus = 'killed'
+      for (const pending of stepsRun.slice(i + 1)) pending.status = 'skipped'
+    }
     run.status = outcome.status
     run.summary = outcome.error ?? firstLine(outcome.output)
     interp.steps[step.id] = { status: outcome.status, output: outcome.output }
     updateStepState(setAppState, taskId, stepsRun)
+    await feedbackStep(context, spec.name, taskId, step, outcome)
+    if (workflowStatus === 'killed') break
 
-    if (outcome.status === 'failed' && !step.continueOnError) {
-      for (const s of stepsRun.slice(i + 1)) s.status = 'skipped'
+    if (outcome.status === 'failed') {
       workflowStatus = 'failed'
       failReason = `步骤 ${step.id} 失败：${outcome.error ?? outcome.output}`
-      break
+      if (!step.continueOnError) {
+        for (const s of stepsRun.slice(i + 1)) s.status = 'skipped'
+        break
+      }
     }
   }
 
@@ -233,6 +225,7 @@ async function runWorkflowSteps(opts: {
     workflowStatus,
     stepsRun,
     failReason,
+    Object.entries(interp.steps).map(([id, result]) => `## ${id}\n${result.output}`).join('\n\n'),
   )
 }
 
@@ -269,10 +262,12 @@ async function runInProcessStep(opts: {
     context.options.mainLoopModel,
     step.model,
     permissionMode,
+    { ignoreEnvironmentOverride: true },
   )
   const agentTaskId = createAgentId()
   const description = `${spec.name}/${step.id} · ${step.title}`
 
+  setAgentTranscriptSubdir(agentTaskId, `workflows/${spec.name}`)
   const registration = registerAsyncAgent({
     agentId: agentTaskId,
     description,
@@ -281,306 +276,172 @@ async function runInProcessStep(opts: {
     setAppState: (context.setAppStateForTasks ?? context.setAppState) as SetAppState,
     parentAbortController: abortController,
     model: resolvedModel,
+    workflowName: spec.name,
   })
 
   const agentMessages: Message[] = []
-  await runAsyncAgentLifecycle({
-    taskId: agentTaskId,
-    abortController: registration.abortController!,
-    makeStream: () => {
-      const iterator = runAgent({
-        agentDefinition: agentDef,
-        promptMessages: [createUserMessage({ content: prompt })],
-        toolUseContext: context,
-        canUseTool,
+  let timedOut = false
+  const timeout = step.timeoutSec ? setTimeout(() => {
+    timedOut = true
+    registration.abortController!.abort(new DOMException(`步骤超时（> ${step.timeoutSec}s）`, 'TimeoutError'))
+  }, step.timeoutSec * 1000) : undefined
+  try {
+    await runAsyncAgentLifecycle({
+      taskId: agentTaskId,
+      abortController: registration.abortController!,
+      makeStream: () => {
+        const iterator = runAgent({
+          agentDefinition: agentDef,
+          promptMessages: [createUserMessage({ content: prompt })],
+          toolUseContext: context,
+          canUseTool,
+          isAsync: true,
+          canShowPermissionPrompts: true,
+          allowNestedAgents: true,
+          querySource: 'agent:custom',
+          availableTools: context.options.tools,
+          description,
+          override: { agentId: agentTaskId, abortController: registration.abortController!, resolvedModel },
+          transcriptSubdir: `workflows/${spec.name}`,
+        })
+        return (async function* () {
+          for await (const message of iterator) {
+            agentMessages.push(message)
+            yield message
+          }
+        })()
+      },
+      metadata: {
+        prompt,
+        resolvedAgentModel: resolvedModel,
+        isBuiltInAgent: isBuiltInAgent(agentDef),
+        startTime: Date.now(),
+        agentType: agentDef.agentType,
         isAsync: true,
-        canShowPermissionPrompts: true,
-        querySource: 'agent:custom',
-        model: step.model as ModelAlias | undefined,
-        availableTools: context.options.tools,
-        description,
-        transcriptSubdir: `workflows/${spec.name}`,
-      })
-      return (async function* () {
-        for await (const message of iterator) {
-          agentMessages.push(message)
-          yield message
-        }
-      })()
-    },
-    metadata: {
-      prompt,
-      resolvedAgentModel: resolvedModel,
-      isBuiltInAgent: isBuiltInAgent(agentDef),
-      startTime: Date.now(),
-      agentType: agentDef.agentType,
-      isAsync: true,
-    },
-    description,
-    toolUseContext: context,
-    rootSetAppState: (context.setAppStateForTasks ?? context.setAppState) as SetAppState,
-    agentIdForCleanup: agentTaskId,
-    enableSummarization: false,
-    getWorktreeResult: async () => ({}),
-  })
+      },
+      description,
+      toolUseContext: context,
+      rootSetAppState: (context.setAppStateForTasks ?? context.setAppState) as SetAppState,
+      agentIdForCleanup: agentTaskId,
+      enableSummarization: false,
+      notificationMode: 'sdk-only',
+      getWorktreeResult: async () => ({}),
+    })
+    // A step owns its background agents; commands retain their own lifecycle.
+    while (Object.values(context.getAppState().tasks).some(task =>
+      isLocalAgentTask(task) && task.workflowRootAgentId === agentTaskId && task.id !== agentTaskId && task.status === 'running')) {
+      if (abortController.signal.aborted || timedOut) break
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  } finally {
+    if (timeout) clearTimeout(timeout)
+    await flushSessionStorage()
+    clearAgentTranscriptSubdir(agentTaskId)
+  }
 
   const output = extractResultText(agentMessages, '')
+  if (timedOut) return { status: 'failed', output, error: `步骤超时（> ${step.timeoutSec}s）` }
   const finalState = context.getAppState().tasks?.[agentTaskId]
   if (finalState && isLocalAgentTask(finalState)) {
     if (finalState.status === 'completed') {
       return { status: 'completed', output }
     }
     if (finalState.status === 'killed') {
-      throw new Error('步骤被用户停止')
+      return { status: 'stopped', output, error: '步骤被用户停止' }
     }
     return { status: 'failed', output, error: firstLine(output) || '步骤失败' }
   }
   return { status: 'completed', output }
 }
 
-/** Cross-API step: short-lived headless doge subprocess with profile env. */
+/** Cross-API steps are actual local_agent tasks, recorded under the parent. */
 export async function runSubprocessStep(opts: {
-  step: WorkflowStep
-  spec: WorkflowSpec
-  interp: InterpolationContext
-  context: LocalJSXCommandContext
-  abortController: AbortController
+  step: WorkflowStep; spec: WorkflowSpec; interp: InterpolationContext
+  context: LocalJSXCommandContext; abortController: AbortController
 }): Promise<StepOutcome> {
   const { step, spec, interp, context, abortController } = opts
   const profile = findWorkflowProfile(step.profile!)
-  if (!profile) {
-    return {
-      status: 'failed',
-      output: '',
-      error: `未找到 provider 配置 "${step.profile}"（provider 在 /provider 管理）`,
-    }
-  }
-  const model = step.model?.trim() || profile.model
+  if (!profile) return { status: 'failed', output: '', error: '未找到 provider 配置 ' + step.profile }
+  const agentDef = resolveStepAgent(context, step.agent)
+  if (!agentDef) throw new Error('没有可用的 agent 定义')
+  const requested = step.model ?? (step.agent ? agentDef.model : undefined)
+  const model = profileStepModel(profile, requested)
   const prompt = interpolate(step.prompt, interp)
-  const description = `${spec.name}/${step.id} · ${step.title} @${step.profile}`
-
-  // Raw headless-only events so the desktop shell gets a live row for the
-  // subprocess step (same shapes the async-agent path emits).
-  const subTaskId = `wfsub_${randomUUID().slice(0, 8)}`
+  const description = spec.name + '/' + step.id + ' · ' + step.title + ' @' + step.profile
+  const agentId = createAgentId()
+  const setAppState = (context.setAppStateForTasks ?? context.setAppState) as SetAppState
+  setAgentTranscriptSubdir(agentId, 'workflows/' + spec.name)
+  const registration = registerAsyncAgent({ agentId, description, prompt, selectedAgent: agentDef,
+    setAppState, parentAbortController: abortController, model, workflowName: spec.name })
   const startedAt = Date.now()
-  enqueueSdkEvent({
-    type: 'system',
-    subtype: 'task_started',
-    task_id: subTaskId,
-    description,
-    task_type: 'workflow_step',
-    workflow_name: spec.name,
-    prompt,
-    model,
+  let toolUses = 0
+  const initial = createUserMessage({ content: prompt })
+  const chain = new StepTranscriptChain()
+  chain.append(agentId, initial.uuid)
+  const transcriptIds = new Set<string>([agentId])
+  const relay = new StepTranscriptRelay(agentId, spec.name)
+  const ids = new Set<string>()
+  let outcome: StepOutcome
+  try {
+    await recordSidechainTranscript([initial], agentId)
+    outcome = await spawnHeadlessStep({ prompt, model, profile, agent: step.agent,
+      permissionMode: context.getAppState().toolPermissionContext.mode,
+      cwd: process.cwd(), signal: registration.abortController!.signal, timeoutSec: step.timeoutSec,
+      onMessage: async wire => {
+        if (wire.type === 'system' && wire.subtype === 'network_retry_usage') {
+          await recordNetworkRetryUsage(wire.model, wire.usage, wire.source)
+        }
+        const { record, event, discard } = relay.consume(wire)
+        if (event) enqueueSdkEvent(event)
+        for (const target of discard ?? []) {
+          await removeTranscriptMessage(target.uuid, target.agentId)
+          chain.discard(target.agentId, target.uuid)
+        }
+        if (record) {
+          if (!transcriptIds.has(record.agentId)) {
+            setAgentTranscriptSubdir(record.agentId, 'workflows/' + spec.name)
+            transcriptIds.add(record.agentId)
+          }
+          await recordSidechainTranscript([record.message], record.agentId, chain.parent(record.agentId))
+          chain.append(record.agentId, record.message.uuid)
+        }
+        if (wire.type === 'assistant' && !wire.parent_tool_use_id) {
+          for (const block of wire.message?.content ?? []) if (block.type === 'tool_use' && !ids.has(block.id)) { ids.add(block.id); toolUses++ }
+          enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentId, description,
+            summary: stepProgressSummary(JSON.stringify(wire)),
+            model: wire.message?.model === SYNTHETIC_MODEL ? undefined : wire.message?.model,
+            last_tool_name: wire.message?.content?.filter(b => b.type === 'tool_use').at(-1)?.name,
+            usage: { total_tokens: 0, tool_uses: toolUses, duration_ms: Date.now() - startedAt } })
+        }
+      },
+    })
+    await flushSessionStorage()
+  } catch (error) {
+    outcome = { status: abortController.signal.aborted ? 'stopped' : 'failed', output: '', error: errorMessage(error) }
+  } finally {
+    await flushSessionStorage()
+    for (const id of transcriptIds) clearAgentTranscriptSubdir(id)
+  }
+  for (const event of relay.finish(outcome.status)) enqueueSdkEvent(event)
+  updateTaskState<LocalAgentTaskState>(agentId, setAppState, task => {
+    task.unregisterCleanup?.()
+    return { ...task, status: outcome.status === 'stopped' ? 'killed' : outcome.status,
+      notified: true, endTime: Date.now(), evictAfter: Date.now() + PANEL_GRACE_MS,
+      abortController: undefined, unregisterCleanup: undefined }
   })
-
-  let progressSeq = 0
-  const outcome = await spawnHeadlessStep({
-    prompt,
-    model,
-    profile,
-    permissionMode: context.getAppState().toolPermissionContext.mode,
-    cwd: process.cwd(),
-    signal: abortController.signal,
-    timeoutSec: step.timeoutSec,
-    // 实时进度（0.2.116）：子进程每产出一轮 assistant 消息就上报一条
-    // task_progress——此前只有启动/完成两个事件，长步骤在面板上像冻住
-    onProgress: summary => {
-      progressSeq += 1
-      enqueueSdkEvent({
-        type: 'system',
-        subtype: 'task_progress',
-        task_id: subTaskId,
-        description,
-        status: 'running',
-        progress: progressSeq,
-        summary,
-      })
-    },
-  })
-
-  enqueueSdkEvent({
-    type: 'system',
-    subtype: 'task_progress',
-    task_id: subTaskId,
-    description,
-    usage: {
-      total_tokens: outcome.tokens ?? 0,
-      tool_uses: 0,
-      duration_ms: Date.now() - startedAt,
-    },
-    summary: outcome.error ?? firstLine(outcome.output),
-  })
-  emitTaskTerminatedSdk(
-    subTaskId,
-    outcome.status === 'completed' ? 'completed' : 'failed',
-    { summary: description },
-  )
-
+  emitTaskTerminatedSdk(agentId, outcome.status, { summary: description,
+    usage: { total_tokens: outcome.tokens ?? 0, tool_uses: toolUses, duration_ms: Date.now() - startedAt } })
   return outcome
 }
 
-function spawnHeadlessStep(opts: {
-  prompt: string
-  model: string
-  profile: ModelProfile
-  permissionMode: string
-  cwd: string
-  signal: AbortSignal
-  timeoutSec?: number
-  /** 子进程每轮 assistant 消息的实时摘要（驱动 App 面板的步骤行） */
-  onProgress?: (summary: string) => void
-}): Promise<StepOutcome> {
-  const { prompt, model, profile, permissionMode, cwd, signal, timeoutSec, onProgress } = opts
-  return new Promise(resolve => {
-    const exe = process.env.DOGE_WORKFLOW_EXECUTABLE ?? process.execPath
-    const args = [
-      '-p',
-      prompt,
-      '--output-format',
-      'stream-json',
-      // stream-json 在 -p 模式必须配 --verbose：CLI 参数校验否则直接
-      // exit 1（跨 API 步骤「2 秒即死」的真凶，0.2.115 / CLI 2.1.284 修复）
-      '--verbose',
-      '--model',
-      model,
-      '--permission-mode',
-      permissionMode,
-    ]
-
-    const env: Record<string, string> = {
-      ...process.env,
-    } as Record<string, string>
-    // 子进程不是终端标签：剥掉 App 工作区标记，避免 OSC 7771 通知混进
-    // 步骤输出捕获（失败诊断时的纯噪音）
-    delete env.DOGE_APP_WORKSPACE_MARKER
-    // 剥掉交互会话的思考强度覆盖（setEffort 经 update_environment_variables
-    // 写进父进程 env）：工作流步骤应按 provider 默认档跑——继承「最高」
-    // 会让每一步都深度思考，长任务又慢又贵（0.2.116）
-    delete env.CLAUDE_CODE_EFFORT_LEVEL
-    for (const [name, value] of Object.entries(modelProfileEnvPatch(profile))) {
-      if (value !== undefined && value !== '') env[name] = value
-      else delete env[name]
-    }
-
-    let child: ReturnType<typeof spawn>
-    try {
-      child = spawn(exe, args, {
-        env,
-        cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
-    } catch (err) {
-      resolve({
-        status: 'failed',
-        output: '',
-        error: `无法启动子进程 ${exe}：${errorMessage(err)}`,
-      })
-      return
-    }
-
-    let stdoutBuf = ''
-    let stderrTail = ''
-    let settled = false
-    let resultText = ''
-    let isErr = false
-    let timedOut = false
-    let tokens: number | undefined
-
-    const timer = timeoutSec
-      ? setTimeout(() => {
-          timedOut = true
-          try {
-            child.kill('SIGKILL')
-          } catch {
-            /* already gone */
-          }
-        }, timeoutSec * 1000)
-      : undefined
-
-    const onAbort = () => {
-      try {
-        child.kill('SIGKILL')
-      } catch {
-        /* already gone */
-      }
-    }
-    signal.addEventListener('abort', onAbort, { once: true })
-
-    const finish = (status: 'completed' | 'failed', error?: string) => {
-      if (settled) return
-      settled = true
-      if (timer) clearTimeout(timer)
-      signal.removeEventListener('abort', onAbort)
-      resolve({ status, output: resultText, error, tokens })
-    }
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBuf += chunk.toString()
-      let nl: number
-      while ((nl = stdoutBuf.indexOf('\n')) >= 0) {
-        const line = stdoutBuf.slice(0, nl).trim()
-        stdoutBuf = stdoutBuf.slice(nl + 1)
-        if (!line) continue
-        try {
-          const msg = JSON.parse(line) as {
-            type?: string
-            result?: string
-            is_error?: boolean
-            usage?: {
-              total_tokens?: number
-              input_tokens?: number
-              output_tokens?: number
-            }
-          }
-          if (msg.type === 'assistant' && onProgress) {
-            const summary = stepProgressSummary(line)
-            if (summary) onProgress(summary)
-          }
-          if (msg.type === 'result') {
-            resultText = typeof msg.result === 'string' ? msg.result : ''
-            isErr = msg.is_error === true
-            if (msg.usage) {
-              tokens =
-                msg.usage.total_tokens ??
-                (msg.usage.input_tokens ?? 0) + (msg.usage.output_tokens ?? 0)
-            }
-          }
-        } catch {
-          // non-JSON line (banner etc.) — ignore
-        }
-      }
-    })
-
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderrTail = (stderrTail + chunk.toString()).slice(-4096)
-    })
-
-    child.on('error', err => {
-      finish('failed', `子进程错误：${errorMessage(err)}`)
-    })
-
-    child.on('close', code => {
-      if (signal.aborted) {
-        finish('failed', '步骤被用户停止')
-        return
-      }
-      if (timedOut) {
-        finish('failed', `步骤超时（> ${timeoutSec}s）`)
-        return
-      }
-      if (isErr) {
-        finish('failed', firstLine(resultText) || `子进程失败（exit ${code}）`)
-        return
-      }
-      if (code !== 0 && !resultText) {
-        finish('failed', `子进程退出码 ${code}：${meaningfulStderrLine(stderrTail)}`)
-        return
-      }
-      finish('completed')
-    })
-  })
+async function feedbackStep(context: LocalJSXCommandContext, workflowName: string, taskId: string, step: WorkflowStep, outcome: StepOutcome): Promise<void> {
+  const state = outcome.status === 'completed' ? '完成' : outcome.status === 'stopped' ? '已停止' : '失败'
+  const summary = '工作流 ' + workflowName + ' · ' + step.title + '：' + state + (outcome.error ? ' — ' + firstLine(outcome.error) : '')
+  enqueueSdkEvent({ type: 'system', subtype: 'workflow_step_feedback', task_id: taskId,
+    workflow_name: workflowName, step_id: step.id, status: outcome.status, summary })
+  const message = createUserMessage({ content: '<local-command-stdout>' + summary + '</local-command-stdout>', isVisibleInTranscriptOnly: true })
+  context.setMessages(prev => [...prev, message])
+  await recordTranscript([message])
 }
 
 /**
@@ -614,20 +475,6 @@ export function stepProgressSummary(assistantLine: string): string {
   return ''
 }
 
-/**
- * 从子进程 stderr 尾巴里取「最后一条有意义行」：CLI 的致命错误（如参数
- * 校验的 "Error: ..."）总是打在末尾，而头部是 OSC 工作区通知与
- * [DOGE-DEBUG] 引导噪音——取首行会把真错误埋掉（0.2.115 前用户看到的
- * 就是乱码开头而非错误本体）。
- */
-function meaningfulStderrLine(stderrTail: string): string {
-  const lines = stderrTail
-    .split(/\r?\n/)
-    .map(l => l.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').trim())
-    .filter(l => l !== '' && !l.startsWith('[DOGE-DEBUG]'))
-  return lines[lines.length - 1] ?? '无输出'
-}
-
 function settleWorkflow(
   setAppState: SetAppState,
   taskId: string,
@@ -636,6 +483,7 @@ function settleWorkflow(
   status: 'completed' | 'failed' | 'killed',
   steps: WorkflowStepRun[],
   failReason?: string,
+  outputs?: string,
 ): void {
   const totalMs = steps.reduce((acc, s) => acc + (s.durationMs ?? 0), 0)
   const statusText =
@@ -658,6 +506,7 @@ function settleWorkflow(
       return `- [${mark}] ${s.stepId} · ${s.title}${dur}${summary}`
     }),
   ]
+  if (outputs) lines.push('', outputs)
   if (failReason) lines.push('', `失败原因：${failReason}`)
   lines.push('', `总耗时 ${Math.round(totalMs / 1000)}s · 共 ${steps.length} 步`)
 
@@ -669,8 +518,9 @@ function settleWorkflow(
     )
   }
 
-  updateTaskState<LocalWorkflowTaskState>(taskId, setAppState, task => ({
-    ...task,
+  updateTaskState<LocalWorkflowTaskState>(taskId, setAppState, task => {
+    task.unregisterCleanup?.()
+    return { ...task,
     status:
       status === 'completed'
         ? 'completed'
@@ -680,7 +530,8 @@ function settleWorkflow(
     notified: true,
     endTime: Date.now(),
     unregisterCleanup: undefined,
-  }))
+    }
+  })
 
   enqueueTaskNotification({
     type: 'task_status',

@@ -30,27 +30,18 @@ export function parseSlashCommand(input: string): ParsedSlashCommand | null {
     return null
   }
 
-  // Remove the leading '/' and split by spaces
-  const withoutSlash = trimmedInput.slice(1)
-  const words = withoutSlash.split(' ')
-
-  if (!words[0]) {
-    return null
+  // Only consume the separator. The remaining arguments may be a multiline
+  // workflow request and must not be split/rejoined or have their indentation lost.
+  const match = /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(trimmedInput)
+  if (!match) return null
+  let commandName = match[1]!
+  let args = match[2] ?? ''
+  const marker = /^\(MCP\)(?:\s+|$)/.exec(args)
+  const isMcp = !!marker
+  if (marker) {
+    commandName += ' (MCP)'
+    args = args.slice(marker[0].length)
   }
-
-  let commandName = words[0]
-  let isMcp = false
-  let argsStartIndex = 1
-
-  // Check for MCP commands (second word is '(MCP)')
-  if (words.length > 1 && words[1] === '(MCP)') {
-    commandName = commandName + ' (MCP)'
-    isMcp = true
-    argsStartIndex = 2
-  }
-
-  // Extract arguments (everything after command name)
-  const args = words.slice(argsStartIndex).join(' ')
 
   return {
     commandName,

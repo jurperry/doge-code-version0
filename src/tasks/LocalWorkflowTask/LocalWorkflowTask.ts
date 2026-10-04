@@ -14,6 +14,7 @@
  */
 
 import type { Task, TaskStateBase } from '../../Task.js'
+import type { TaskState } from '../types.js'
 
 export type WorkflowStepStatus =
   | 'pending'
@@ -21,6 +22,7 @@ export type WorkflowStepStatus =
   | 'completed'
   | 'failed'
   | 'skipped'
+  | 'stopped'
 
 export interface WorkflowStepRun {
   stepId: string
@@ -86,4 +88,11 @@ export const LocalWorkflowTask: Task = {
     cleanup?.()
     controller?.abort()
   },
+}
+
+/** A user interrupt stops workflows even while the main model is idle. */
+export async function stopRunningWorkflows(tasks: Record<string, TaskState>, setAppState: Parameters<Task['kill']>[1]): Promise<void> {
+  for (const task of Object.values(tasks)) {
+    if (isLocalWorkflowTask(task) && task.status === 'running') await LocalWorkflowTask.kill(task.id, setAppState)
+  }
 }

@@ -12,6 +12,11 @@ afterEach(() => {
 })
 
 describe('getAgentModel — tool-specified model', () => {
+  test('workflow resolution ignores the global override while ordinary agents retain it', () => {
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'global-override'
+    expect(getAgentModel(undefined, 'parent', 'haiku', 'default')).toBe('global-override')
+    expect(getAgentModel(undefined, 'parent', 'haiku', 'default', { ignoreEnvironmentOverride: true })).not.toBe('global-override')
+  })
   test("'inherit' behaves like omitting the parameter (agent def fallback)", () => {
     delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
     const omitted = getAgentModel(

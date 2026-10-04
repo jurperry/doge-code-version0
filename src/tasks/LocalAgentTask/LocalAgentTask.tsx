@@ -19,6 +19,7 @@ import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
 import { emitTaskProgress } from '../../utils/task/sdkProgress.js';
+import { emitTaskTerminatedSdk } from '../../utils/sdkEventQueue.js';
 import type { TaskState } from '../types.js';
 export type ToolActivity = {
   toolName: string;
@@ -114,6 +115,8 @@ export function createActivityDescriptionResolver(tools: Tools): ActivityDescrip
   };
 }
 export type LocalAgentTaskState = TaskStateBase & {
+  workflowName?: string;
+  workflowRootAgentId?: string;
   type: 'local_agent';
   agentId: string;
   prompt: string;
@@ -204,7 +207,8 @@ export function enqueueAgentNotification({
   usage,
   toolUseId,
   worktreePath,
-  worktreeBranch
+  worktreeBranch,
+  notificationMode = 'conversation'
 }: {
   taskId: string;
   description: string;
@@ -220,22 +224,35 @@ export function enqueueAgentNotification({
   toolUseId?: string;
   worktreePath?: string;
   worktreeBranch?: string;
+  notificationMode?: 'conversation' | 'sdk-only';
 }): void {
   // Atomically check and set notified flag to prevent duplicate notifications.
   // If the task was already marked as notified (e.g., by TaskStopTool), skip
   // enqueueing to avoid sending redundant messages to the model.
   let shouldEnqueue = false;
+  let workflowAgent = false;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     if (task.notified) {
       return task;
     }
     shouldEnqueue = true;
+    workflowAgent = !!task.workflowName;
     return {
       ...task,
       notified: true
     };
   });
   if (!shouldEnqueue) {
+    return;
+  }
+
+  // Workflow steps are consumed by their engine. Let the UI see the terminal
+  // bookend without starting an independent main-model completion turn.
+  if (notificationMode === 'sdk-only' || workflowAgent) {
+    emitTaskTerminatedSdk(taskId, status === 'killed' ? 'stopped' : status, {
+      toolUseId, summary: description, outputFile: getTaskOutputPath(taskId),
+      usage: usage && { total_tokens: usage.totalTokens, tool_uses: usage.toolUses, duration_ms: usage.durationMs },
+    });
     return;
   }
 
@@ -471,7 +488,9 @@ export function registerAsyncAgent({
   setAppState,
   parentAbortController,
   toolUseId,
-  model
+  model,
+  workflowName,
+  workflowRootAgentId
 }: {
   agentId: string;
   description: string;
@@ -483,6 +502,8 @@ export function registerAsyncAgent({
   /** Resolved model id (getAgentModel) — shown in the CoordinatorTaskPanel
    *  row label (`sub-agent-<model>-<task>`). Undefined = inherit display. */
   model?: string;
+  workflowName?: string;
+  workflowRootAgentId?: string;
 }): LocalAgentTaskState {
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
 
@@ -497,6 +518,8 @@ export function registerAsyncAgent({
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
     model,
+    workflowName,
+    workflowRootAgentId: workflowRootAgentId ?? (workflowName ? agentId : undefined),
     abortController,
     retrieved: false,
     lastReportedToolCount: 0,
@@ -536,7 +559,10 @@ export function registerAgentForeground({
   setAppState,
   autoBackgroundMs,
   toolUseId,
-  model
+  model,
+  workflowName,
+  workflowRootAgentId,
+  parentAbortController
 }: {
   agentId: string;
   description: string;
@@ -548,13 +574,16 @@ export function registerAgentForeground({
   /** Resolved model id (getAgentModel) — shown in the CoordinatorTaskPanel
    *  row label (`sub-agent-<model>-<task>`). Undefined = inherit display. */
   model?: string;
+  workflowName?: string;
+  workflowRootAgentId?: string;
+  parentAbortController?: AbortController;
 }): {
   taskId: string;
   backgroundSignal: Promise<void>;
   cancelAutoBackground?: () => void;
 } {
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
-  const abortController = createAbortController();
+  const abortController = parentAbortController ? createChildAbortController(parentAbortController) : createAbortController();
   const unregisterCleanup = registerCleanup(async () => {
     killAsyncAgent(agentId, setAppState);
   });
@@ -568,6 +597,8 @@ export function registerAgentForeground({
     agentType: selectedAgent.agentType ?? 'general-purpose',
     model,
     abortController,
+    workflowName,
+    workflowRootAgentId,
     unregisterCleanup,
     retrieved: false,
     lastReportedToolCount: 0,

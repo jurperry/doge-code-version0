@@ -161,6 +161,7 @@ import {
   permissionPromptToolResultToPermissionDecision,
 } from 'src/utils/permissions/PermissionPromptToolResultSchema.js'
 import { createAbortController } from 'src/utils/abortController.js'
+import { stopRunningWorkflows } from '../tasks/LocalWorkflowTask/LocalWorkflowTask.js'
 import { createCombinedAbortSignal } from 'src/utils/combinedAbortSignal.js'
 import { generateSessionTitle } from 'src/utils/sessionTitle.js'
 import { buildSideQuestionFallbackParams } from 'src/utils/queryContext.js'
@@ -923,6 +924,9 @@ export async function runHeadless(
           message.subtype === 'task_notification' ||
           message.subtype === 'task_started' ||
           message.subtype === 'task_progress' ||
+          message.subtype === 'workflow_step_feedback' ||
+          message.subtype === 'agent_transcript' ||
+          message.subtype === 'network_retry_usage' ||
           message.subtype === 'post_turn_summary')
       ) &&
       message.type !== 'stream_event' &&
@@ -3000,6 +3004,7 @@ function runHeadlessStreaming(
 
       if (message.type === 'control_request') {
         if (message.request.subtype === 'interrupt') {
+          await stopRunningWorkflows(getAppState().tasks, setAppState)
           // Track escapes for attribution (ant-only feature)
           if (feature('COMMIT_ATTRIBUTION')) {
             setAppState(prev => ({
@@ -3019,6 +3024,7 @@ function runHeadlessStreaming(
           suggestionState.pendingSuggestion = null
           sendControlResponseSuccess(message)
         } else if (message.request.subtype === 'end_session') {
+          await stopRunningWorkflows(getAppState().tasks, setAppState)
           preserveWorktreeOnShutdown = message.request.reason === 'app_replace'
           logForDebugging(
             `[print.ts] end_session received, reason=${message.request.reason ?? 'unspecified'}`,

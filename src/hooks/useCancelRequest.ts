@@ -33,6 +33,7 @@ import {
   hasCommandsInQueue,
 } from '../utils/messageQueueManager.js'
 import { emitTaskTerminatedSdk } from '../utils/sdkEventQueue.js'
+import { isLocalWorkflowTask, stopRunningWorkflows } from '../tasks/LocalWorkflowTask/LocalWorkflowTask.js'
 
 /** Time window in ms during which a second press kills all background agents. */
 const KILL_AGENTS_CONFIRM_WINDOW_MS = 3000
@@ -83,8 +84,10 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
   const { addNotification, removeNotification } = useNotifications()
   const lastKillAgentsPressRef = useRef<number>(0)
   const viewSelectionMode = useAppState(s => s.viewSelectionMode)
+  const hasRunningWorkflow = useAppState(s => Object.values(s.tasks).some(t => isLocalWorkflowTask(t) && t.status === 'running'))
 
   const handleCancel = useCallback(() => {
+    void stopRunningWorkflows(store.getState().tasks, setAppState)
     const cancelProps = {
       source:
         'escape' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -94,7 +97,7 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
 
     // Priority 1: If there's an active task running, cancel it first
     // This takes precedence over queue management so users can always interrupt Claude
-    if (abortSignal !== undefined && !abortSignal.aborted) {
+    if ((abortSignal !== undefined && !abortSignal.aborted) || hasRunningWorkflow) {
       logEvent('tengu_cancel', cancelProps)
       setToolUseConfirmQueue(() => [])
       onCancel()
@@ -119,6 +122,7 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
     setToolUseConfirmQueue,
     onCancel,
     streamMode,
+    store, setAppState, hasRunningWorkflow,
   ])
 
   // Determine if this handler should be active
@@ -126,7 +130,7 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
   // Overlays (ModelPicker, ThinkingToggle, etc.) register themselves via useRegisterOverlay
   // Local JSX commands (like /model, /btw) handle their own input
   const isOverlayActive = useIsOverlayActive()
-  const canCancelRunningTask = abortSignal !== undefined && !abortSignal.aborted
+  const canCancelRunningTask = (abortSignal !== undefined && !abortSignal.aborted) || hasRunningWorkflow
   const hasQueuedCommands = queuedCommandsLength > 0
   // When in bash/background mode with empty input, escape should exit the mode
   // rather than cancel the request. Let PromptInput handle mode exit.

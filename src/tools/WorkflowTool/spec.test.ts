@@ -152,6 +152,29 @@ describe('parseWorkflowArgs', () => {
     expect(errors.some(e => e.includes('wat'))).toBe(true)
     expect(errors.some(e => e.includes('多余'))).toBe(true)
   })
+
+  const textSpec = parseWorkflowSpec({ ...baseFile, frontmatter: {
+    name: 'text-flow', inputs: [{ key: 'request', type: 'string', required: true }],
+    steps: [{ id: 'read', prompt: '{{args.request}}' }],
+  } }).spec!
+
+  test('single string input preserves a long multiline request, quotes and literal assignments', () => {
+    const request = ('请处理以下内容：\n路径 "E:\\my project\\需求.txt"\n示例 foo=bar，保留格式。\n').repeat(1000).trim()
+    expect(parseWorkflowArgs(textSpec, request)).toEqual({ values: { request }, errors: [] })
+  })
+
+  test('single named string and quoted path preserve spaces and newlines', () => {
+    expect(parseWorkflowArgs(textSpec, 'request="第一段\n第二 段"')).toEqual({ values: { request: '第一段\n第二 段' }, errors: [] })
+    expect(parseWorkflowArgs(textSpec, '"E:\\my project\\需求.txt"')).toEqual({ values: { request: 'E:\\my project\\需求.txt' }, errors: [] })
+  })
+
+  test('multiple inputs support quoted named values and keep select validation', () => {
+    expect(parseWorkflowArgs(spec, 'scope="E:\\my project\\src" mode=full')).toEqual({
+      values: { scope: 'E:\\my project\\src', mode: 'full' }, errors: [],
+    })
+    expect(parseWorkflowArgs(spec, '"第一段\n第二段" fast').values.scope).toBe('第一段\n第二段')
+    expect(parseWorkflowArgs(spec, 'scope="unterminated mode=full').errors.length).toBeGreaterThan(0)
+  })
 })
 
 describe('interpolate', () => {

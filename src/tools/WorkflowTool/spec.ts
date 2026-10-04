@@ -237,13 +237,23 @@ export function parseWorkflowArgs(
 ): { values: Record<string, string>; errors: string[] } {
   const errors: string[] = []
   const values: Record<string, string> = {}
-  const tokens = argsString.trim().length
-    ? argsString.trim().split(/\s+/)
-    : []
+  const raw = argsString.trim()
+  // A single free-text input accepts an entire request (including paragraphs,
+  // literal key=value examples and quoted paths). Multi-input flows use explicit
+  // tokens so typed/select inputs keep their existing validation.
+  const single = spec.inputs.length === 1 && spec.inputs[0]!.type === 'string' ? spec.inputs[0]! : undefined
+  const unquote = (value: string): string => {
+    const first = value[0]
+    return (first === '"' || first === "'") && value.at(-1) === first
+      ? value.slice(1, -1) : value
+  }
+  const tokens = single && raw
+    ? [`${single.key}=${unquote(raw.startsWith(`${single.key}=`) ? raw.slice(single.key.length + 1) : raw)}`]
+    : tokenizeWorkflowArgs(raw, errors)
   const keyValues = new Map<string, string>()
   const positional: string[] = []
   for (const token of tokens) {
-    const m = token.match(/^([A-Za-z0-9_-]+)=(.*)$/)
+    const m = token.match(/^([A-Za-z0-9_-]+)=([\s\S]*)$/)
     if (m) keyValues.set(m[1]!, m[2]!)
     else positional.push(token)
   }
@@ -288,6 +298,31 @@ export function parseWorkflowArgs(
     }
   }
   return { values, errors }
+}
+
+/** Quote-aware argument tokens; preserve Windows path backslashes verbatim. */
+function tokenizeWorkflowArgs(raw: string, errors: string[]): string[] {
+  const tokens: string[] = []
+  let token = '', quote = '', started = false
+  for (const char of raw) {
+    if (quote) {
+      if (char === quote) quote = ''
+      else token += char
+    } else if ((char === '"' || char === "'") && (!started || token.endsWith('='))) {
+      quote = char
+      started = true
+    } else if (/\s/.test(char)) {
+      if (started) tokens.push(token)
+      token = ''
+      started = false
+    } else {
+      token += char
+      started = true
+    }
+  }
+  if (quote) errors.push('参数引号未闭合')
+  if (started) tokens.push(token)
+  return tokens
 }
 
 export interface InterpolationContext {

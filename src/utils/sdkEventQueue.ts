@@ -16,6 +16,7 @@ type TaskStartedEvent = {
    *  May still be an alias string — subagent models are re-resolved per turn
    *  by getAgentModel. Absent for task types without a model (shell, dream). */
   model?: string
+  agent_id?: string
 }
 
 type TaskProgressEvent = {
@@ -31,6 +32,8 @@ type TaskProgressEvent = {
   }
   last_tool_name?: string
   summary?: string
+  model?: string
+  is_background?: boolean
   // Delta batch of workflow state changes. Clients upsert by
   // `${type}:${index}` then group by phaseIndex to rebuild the phase tree,
   // same fold as collectFromEvents + groupByPhase in PhaseProgress.tsx.
@@ -74,6 +77,9 @@ export type SdkEvent =
   | TaskProgressEvent
   | TaskNotificationSdkEvent
   | SessionStateChangedEvent
+  | { type: 'system'; subtype: 'agent_transcript'; agent_id: string; message: import('../types/message.js').Message }
+  | { type: 'system'; subtype: 'network_retry_usage'; model: string; usage: Record<string, unknown>; source?: { messageId: string; messageUuid: string } }
+  | { type: 'system'; subtype: 'workflow_step_feedback'; task_id: string; workflow_name: string; step_id: string; status: 'completed' | 'failed' | 'stopped'; summary: string }
 
 const MAX_QUEUE_SIZE = 1000
 const queue: SdkEvent[] = []

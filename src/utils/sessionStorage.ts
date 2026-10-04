@@ -95,6 +95,7 @@ import { getSettings_DEPRECATED } from './settings/settings.js'
 import { jsonParse, jsonStringify } from './slowOperations.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 import { validateUuid } from './uuid.js'
+import { enqueueSdkEvent } from './sdkEventQueue.js'
 
 // Cache MACRO.VERSION at module level to work around bun --define bug in async contexts
 // See: https://github.com/oven-sh/bun/issues/26168
@@ -942,7 +943,7 @@ class Project {
    * read only the tail, locate the line, and splice it out with a
    * positional write + truncate instead of rewriting the whole file.
    */
-  async removeMessageByUuid(targetUuid: UUID): Promise<void> {
+  async removeMessageByUuid(targetUuid: UUID, agentId?: string): Promise<void> {
     this.tombstonedMessageUuids.add(targetUuid)
     this.pendingEntries = this.pendingEntries.filter(entry => !this.isTombstoned(entry))
     for (const queue of this.writeQueues.values()) {
@@ -957,10 +958,11 @@ class Project {
     return this.trackWrite(async () => {
       if (this.activeDrain) await this.activeDrain
       return this.mutateFile(async () => {
-        if (this.sessionFile === null) return
+        const transcriptFile = agentId ? getAgentTranscriptPath(asAgentId(agentId)) : this.sessionFile
+        if (transcriptFile === null) return
         try {
           let fileSize = 0
-          const fh = await fsOpen(this.sessionFile, 'r+')
+          const fh = await fsOpen(transcriptFile, 'r+')
           try {
             const { size } = await fh.stat()
             fileSize = size
@@ -1018,7 +1020,7 @@ class Project {
             )
             return
           }
-          const content = await readFile(this.sessionFile, { encoding: 'utf-8' })
+          const content = await readFile(transcriptFile, { encoding: 'utf-8' })
           const lines = content.split('\n').filter((line: string) => {
             if (!line.trim()) return true
             try {
@@ -1028,7 +1030,7 @@ class Project {
               return true // Keep malformed lines
             }
           })
-          await writeFile(this.sessionFile, lines.join('\n'), {
+          await writeFile(transcriptFile, lines.join('\n'), {
             encoding: 'utf8',
           })
         } catch {
@@ -1564,8 +1566,8 @@ export async function recordQueueOperation(queueOp: QueueOperationMessage) {
  * Remove a message from the transcript by UUID.
  * Used when a tombstone is received for an orphaned message.
  */
-export async function removeTranscriptMessage(targetUuid: UUID): Promise<void> {
-  await getProject().removeMessageByUuid(targetUuid)
+export async function removeTranscriptMessage(targetUuid: UUID, agentId?: string): Promise<void> {
+  await getProject().removeMessageByUuid(targetUuid, agentId)
 }
 
 /** Billing fact or retained-attempt correction, outside the model transcript. */
@@ -1574,6 +1576,9 @@ export async function recordNetworkRetryUsage(
   usage: Record<string, unknown>,
   source?: { messageId: string; messageUuid: string },
 ): Promise<void> {
+  if (process.env.DOGE_WORKFLOW_TRANSCRIPTS === '1') {
+    enqueueSdkEvent({ type: 'system', subtype: 'network_retry_usage', model, usage, source })
+  }
   const uuid = randomUUID()
   await getProject().appendEntry({
     type: 'network-retry-usage', uuid, sessionId: getSessionId(), timestamp: new Date().toISOString(),

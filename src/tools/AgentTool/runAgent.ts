@@ -57,6 +57,7 @@ import { clearSessionHooks } from '../../utils/hooks/sessionHooks.js'
 import { executeSubagentStartHooks } from '../../utils/hooks.js'
 import { createUserMessage } from '../../utils/messages.js'
 import { getAgentModel } from '../../utils/model/agent.js'
+import { enqueueSdkEvent } from '../../utils/sdkEventQueue.js'
 import type { ModelAlias } from '../../utils/model/aliases.js'
 import {
   clearAgentTranscriptSubdir,
@@ -80,6 +81,7 @@ import {
 import type { ContentReplacementState } from '../../utils/toolResultStorage.js'
 import { createAgentId } from '../../utils/uuid.js'
 import { resolveAgentTools } from './agentToolUtils.js'
+import { scopedAgentDefinitions } from './agentScope.js'
 import { type AgentDefinition, isBuiltInAgent } from './loadAgentsDir.js'
 
 /**
@@ -252,6 +254,7 @@ export async function* runAgent({
   canUseTool,
   isAsync,
   canShowPermissionPrompts,
+  allowNestedAgents,
   forkContextMessages,
   querySource,
   override,
@@ -276,6 +279,8 @@ export async function* runAgent({
   /** Whether this agent can show permission prompts. Defaults to !isAsync.
    * Set to true for in-process teammates that run async but share the terminal. */
   canShowPermissionPrompts?: boolean
+  /** Workflow executors retain the normal tool pool while running detached. */
+  allowNestedAgents?: boolean
   forkContextMessages?: Message[]
   querySource: QuerySource
   override?: {
@@ -284,6 +289,8 @@ export async function* runAgent({
     systemPrompt?: SystemPrompt
     abortController?: AbortController
     agentId?: AgentId
+    /** A workflow already resolved the model against its selected provider. */
+    resolvedModel?: string
   }
   model?: ModelAlias
   maxTurns?: number
@@ -337,7 +344,7 @@ export async function* runAgent({
   const rootSetAppState =
     toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState
 
-  const resolvedAgentModel = getAgentModel(
+  const resolvedAgentModel = override?.resolvedModel ?? getAgentModel(
     agentDefinition.model,
     toolUseContext.options.mainLoopModel,
     model,
@@ -497,9 +504,10 @@ export async function* runAgent({
     }
   }
 
-  const resolvedTools = useExactTools
-    ? availableTools
-    : resolveAgentTools(agentDefinition, availableTools, isAsync).resolvedTools
+  const resolvedAgentTools = useExactTools
+    ? { resolvedTools: availableTools, allowedAgentTypes: undefined }
+    : resolveAgentTools(agentDefinition, availableTools, isAsync, false, allowNestedAgents)
+  const resolvedTools = resolvedAgentTools.resolvedTools
 
   const additionalWorkingDirectories = Array.from(
     appState.toolPermissionContext.additionalWorkingDirectories.keys(),
@@ -684,7 +692,7 @@ export async function* runAgent({
       : { type: 'disabled' as const },
     mcpClients: mergedMcpClients,
     mcpResources: toolUseContext.options.mcpResources,
-    agentDefinitions: toolUseContext.options.agentDefinitions,
+    agentDefinitions: scopedAgentDefinitions(toolUseContext.options.agentDefinitions, resolvedAgentTools.allowedAgentTypes),
     // Fork children (useExactTools path) need querySource on context.options
     // for the recursive-fork guard at AgentTool.tsx call() — it checks
     // options.querySource === 'agent:builtin:fork'. This survives autocompact
@@ -735,6 +743,14 @@ export async function* runAgent({
   void recordSidechainTranscript(initialMessages, agentId).catch(_err =>
     logForDebugging(`Failed to record sidechain transcript: ${_err}`),
   )
+  // Workflow children disable their own persistence. Relay sidechains to the
+  // parent, including async agents whose messages do not appear on stdout.
+  const relayTranscript = (message: Message) => {
+    if (process.env.DOGE_WORKFLOW_TRANSCRIPTS === '1') {
+      enqueueSdkEvent({ type: 'system', subtype: 'agent_transcript', agent_id: agentId, message })
+    }
+  }
+  initialMessages.forEach(relayTranscript)
   void writeAgentMetadata(agentId, {
     agentType: agentDefinition.agentType,
     ...(worktreePath && { worktreePath }),
@@ -755,6 +771,7 @@ export async function* runAgent({
       querySource,
       maxTurns: maxTurns ?? agentDefinition.maxTurns,
     })) {
+      relayTranscript(message)
       onQueryProgress?.()
       // Forward subagent API request starts to parent's metrics display
       // so TTFT/OTPS update during subagent execution.
