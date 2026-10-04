@@ -4648,7 +4648,14 @@ async function handleInitializeRequest(
         // bundled/plugin/project/user/mcp/workflow）与 local 型透传命令——
         // description 里的来源标记是给人看的，机器读这两个字段（旧壳忽略）
         type: cmd.type,
-        source: cmd.type === 'prompt' ? cmd.source : undefined,
+        // 工作流命令是 local 型（kind:'workflow'）：机器可读来源靠这里补
+        // 'workflow'（App 命令面板徽标 + /skills 清单分组；旧壳忽略）
+        source:
+          cmd.type === 'prompt'
+            ? cmd.source
+            : cmd.kind === 'workflow'
+              ? 'workflow'
+              : undefined,
       })),
     agents: agents.map(agent => ({
       name: agent.agentType,

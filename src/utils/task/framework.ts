@@ -286,7 +286,7 @@ export async function pollTasks(
 /**
  * Enqueue a task notification to the message queue.
  */
-function enqueueTaskNotification(attachment: TaskAttachment): void {
+export function enqueueTaskNotification(attachment: TaskAttachment): void {
   const statusText = getStatusText(attachment.status)
 
   const outputPath = getTaskOutputPath(attachment.taskId)

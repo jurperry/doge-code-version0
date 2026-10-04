@@ -433,13 +433,54 @@ export function getModelProfile(modelName: string): ModelProfile | undefined {
   )
 }
 
-/** Helper: set or delete an env var */
-function applyEnvVar(name: string, value: string | undefined): void {
-  if (value !== undefined && value !== '') {
-    process.env[name] = value
-  } else {
-    delete process.env[name]
+/**
+ * Pure mapping: ModelProfile → the env-var patch that fully selects that
+ * provider for a process. Single source shared by applyModelProfile() (which
+ * mutates process.env in place) and the workflow engine's cross-API steps
+ * (which build an isolated child env without touching the parent).
+ * Keys mapped to undefined (or '') mean "delete".
+ */
+export function modelProfileEnvPatch(
+  profile: ModelProfile,
+): Record<string, string | undefined> {
+  const patch: Record<string, string | undefined> = {
+    ANTHROPIC_MODEL: profile.model,
+    ANTHROPIC_BASE_URL: profile.baseURL,
+    CLAUDE_CODE_COMPATIBLE_API_PROVIDER: profile.provider,
+    CLAUDE_CODE_MODEL_CONTEXT_WINDOW:
+      profile.contextWindow !== undefined
+        ? String(profile.contextWindow)
+        : undefined,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: profile.defaultOpusModel,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: profile.defaultSonnetModel,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: profile.defaultHaikuModel,
+    CLAUDE_CODE_SUBAGENT_MODEL: profile.subagentModel,
+    ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:
+      profile.opusCapabilities,
+    ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+      profile.sonnetCapabilities,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: profile
+      .disableNonessentialTraffic
+      ? '1'
+      : undefined,
+    CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: profile
+      .disableNonstreamingFallback
+      ? '1'
+      : undefined,
   }
+  if (profile.apiKey) {
+    if (profile.authTokenType === 'ANTHROPIC_AUTH_TOKEN') {
+      patch.ANTHROPIC_AUTH_TOKEN = profile.apiKey
+      patch.DOGE_API_KEY = undefined
+    } else {
+      patch.DOGE_API_KEY = profile.apiKey
+      patch.ANTHROPIC_AUTH_TOKEN = undefined
+    }
+  } else {
+    patch.ANTHROPIC_AUTH_TOKEN = undefined
+    patch.DOGE_API_KEY = undefined
+  }
+  return patch
 }
 
 /**
@@ -470,51 +511,20 @@ function applyEnvVar(name: string, value: string | undefined): void {
  *    mutated.
  */
 export function applyModelProfile(profile: ModelProfile, opts?: { persist?: boolean }): void {
-  // --- Core config ---
-  process.env.ANTHROPIC_MODEL = profile.model
-  applyEnvVar('ANTHROPIC_BASE_URL', profile.baseURL)
-
-  // Apply API key to the correct env var based on authTokenType.
-  // When no key is present in the profile, clear both to prevent
-  // the previous model's credentials from leaking.
-  if (profile.apiKey) {
-    if (profile.authTokenType === 'ANTHROPIC_AUTH_TOKEN') {
-      process.env.ANTHROPIC_AUTH_TOKEN = profile.apiKey
-      delete process.env.DOGE_API_KEY
+  // --- Core config, credentials, tier models and behavior flags ---
+  // modelProfileEnvPatch is the single source for the env mapping; applying
+  // it here mutates process.env in place (undefined/'' → delete). The
+  // call-site contract above (clearProfileEnvVars before apply) is unchanged.
+  for (const [name, value] of Object.entries(modelProfileEnvPatch(profile))) {
+    if (value !== undefined && value !== '') {
+      process.env[name] = value
     } else {
-      process.env.DOGE_API_KEY = profile.apiKey
-      delete process.env.ANTHROPIC_AUTH_TOKEN
+      delete process.env[name]
     }
-  } else {
-    delete process.env.DOGE_API_KEY
-    delete process.env.ANTHROPIC_AUTH_TOKEN
   }
-  applyEnvVar('CLAUDE_CODE_COMPATIBLE_API_PROVIDER', profile.provider)
-  applyEnvVar('CLAUDE_CODE_MODEL_CONTEXT_WINDOW',
-    profile.contextWindow !== undefined ? String(profile.contextWindow) : undefined)
-
-  // --- Sub-agent models ---
-  // When a profile provides tier models, set them.
-  // When a profile does NOT provide tier models (undefined), delete the old
-  // ones so they inherit from the new main model. This ensures switching
-  // from DeepSeek (which has tiers) to GLM (which doesn't) clears the old
-  // DeepSeek tiers, causing Opus/Sonnet/Haiku to inherit from glm-5.
-  // Switching back to a DeepSeek profile restores its tiers.
-  applyEnvVar('ANTHROPIC_DEFAULT_OPUS_MODEL', profile.defaultOpusModel)
-  applyEnvVar('ANTHROPIC_DEFAULT_SONNET_MODEL', profile.defaultSonnetModel)
-  applyEnvVar('ANTHROPIC_DEFAULT_HAIKU_MODEL', profile.defaultHaikuModel)
-  applyEnvVar('CLAUDE_CODE_SUBAGENT_MODEL', profile.subagentModel)
-  applyEnvVar('ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES', profile.opusCapabilities)
-  applyEnvVar('ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES', profile.sonnetCapabilities)
   // Tier env changed — drop memoized capability overrides (the memo key does
   // not include env state, see modelSupportOverrides).
   clearModelCapabilityOverrideCache()
-
-  // --- Behavior config ---
-  applyEnvVar('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
-    profile.disableNonessentialTraffic ? '1' : undefined)
-  applyEnvVar('CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK',
-    profile.disableNonstreamingFallback ? '1' : undefined)
   // NOTE: Do NOT apply CLAUDE_CODE_EFFORT_LEVEL from profile.
   // Effort is a runtime user preference controlled by:
   //   - CLAUDE_CODE_EFFORT_LEVEL env var (set by PS startup scripts)

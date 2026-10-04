@@ -666,7 +666,10 @@ async function getMessagesForSlashCommand(commandName: string, args: string, set
           try {
             const syntheticCaveatMessage = createSyntheticUserCaveatMessage();
             const mod = await command.load();
-            const result = await mod.call(args, context);
+            // Mirror the local-jsx branch: merge the permission callback into
+            // the context so local commands that drive sub-work (e.g. the
+            // workflow engine's steps) can route tool permissions properly.
+            const result = await mod.call(args, { ...context, canUseTool: canUseTool ?? hasPermissionsToUseTool });
             if (result.type === 'skip') {
               return {
                 messages: [],

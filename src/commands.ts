@@ -87,11 +87,6 @@ const voiceCommand = feature('VOICE_MODE')
 const forceSnip = feature('HISTORY_SNIP')
   ? require('./commands/force-snip.js').default
   : null
-const workflowsCmd = feature('WORKFLOW_SCRIPTS')
-  ? (
-      require('./commands/workflows/index.js') as typeof import('./commands/workflows/index.js')
-    ).default
-  : null
 const webCmd = feature('CCR_REMOTE_SETUP')
   ? (
       require('./commands/remote-setup/index.js') as typeof import('./commands/remote-setup/index.js')
@@ -347,7 +342,22 @@ const COMMANDS = memoize((): Command[] => [
   passes,
   ...(peersCmd ? [peersCmd] : []),
   tasks,
-  ...(workflowsCmd ? [workflowsCmd] : []),
+  // Lazy /workflows: the implementation module pulls the workflow loader
+  // chain, which reaches back into commands.js (module-init cycle) — so the
+  // heavy part is imported only when the command actually runs.
+  {
+    name: 'workflows',
+    description: '列出/管理工作流（声明式多步骤任务编排）',
+    type: 'local',
+    userInvocable: true,
+    supportsNonInteractive: true,
+    load: async () => {
+      const mod = (await import('./commands/workflows/index.js')) as {
+        default: Command
+      }
+      return mod.default.load()
+    },
+  },
   ...(torch ? [torch] : []),
   ...(process.env.USER_TYPE === 'ant' && !process.env.IS_DEMO
     ? INTERNAL_ONLY_COMMANDS
@@ -407,11 +417,6 @@ async function getSkills(cwd: string): Promise<{
 }
 
 /* eslint-disable @typescript-eslint/no-require-imports */
-const getWorkflowCommands = feature('WORKFLOW_SCRIPTS')
-  ? (
-      require('./tools/WorkflowTool/createWorkflowCommand.js') as typeof import('./tools/WorkflowTool/createWorkflowCommand.js')
-    ).getWorkflowCommands
-  : null
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 /**
@@ -459,12 +464,27 @@ const loadAllCommands = memoize(async (cwd: string): Promise<Command[]> => {
   const [
     { skillDirCommands, pluginSkills, bundledSkills, builtinPluginSkills },
     pluginCommands,
-    workflowCommands,
+    workflowCommandsRaw,
   ] = await Promise.all([
     getSkills(cwd),
     getPluginCommands(),
-    getWorkflowCommands ? getWorkflowCommands(cwd) : Promise.resolve([]),
+    // Dynamic import breaks the commands.ts ↔ WorkflowTool/engine cycle at
+    // module-init (engine statically imports runAgent → commands.js).
+    import('./tools/WorkflowTool/createWorkflowCommand.js')
+      .then(({ getWorkflowCommands }) => getWorkflowCommands(cwd))
+      .catch(err => {
+        logError(toError(err))
+        logForDebugging('Workflow commands failed to load, continuing without them')
+        return []
+      }),
   ])
+
+  // Built-in command names always win — a workflow named "compact" must not
+  // shadow the real /compact.
+  const builtinNames = builtInCommandNames()
+  const workflowCommands = workflowCommandsRaw.filter(
+    cmd => !builtinNames.has(cmd.name),
+  )
 
   return [
     ...bundledSkills,
