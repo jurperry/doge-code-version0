@@ -36,6 +36,9 @@ import {
 import { toolMatchesName, type Tool, type Tools } from 'src/Tool.js'
 import {
   type AgentDefinition,
+  clearAgentDefinitionsCache,
+  getActiveAgentsFromList,
+  getAgentDefinitionsWithOverrides,
   isBuiltInAgent,
   parseAgentsFromJson,
 } from 'src/tools/AgentTool/loadAgentsDir.js'
@@ -133,6 +136,7 @@ import type {
   SDKControlResponse,
   SDKControlMcpSetServersResponse,
   SDKControlReloadPluginsResponse,
+  SDKControlRefreshResourcesResponse,
 } from 'src/entrypoints/sdk/controlTypes.js'
 import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk'
 import type { PermissionMode as InternalPermissionMode } from 'src/types/permissions.js'
@@ -333,7 +337,12 @@ import {
 import { asSessionId } from 'src/types/ids.js'
 import { jsonStringify } from '../utils/slowOperations.js'
 import { skillChangeDetector } from '../utils/skills/skillChangeDetector.js'
-import { getCommands, clearCommandsCache } from '../commands.js'
+import {
+  getCommands,
+  clearCommandMemoizationCaches,
+  clearCommandsCache,
+} from '../commands.js'
+import { invalidateWorkflowCache } from '../tools/WorkflowTool/createWorkflowCommand.js'
 import {
   isBareMode,
   isEnvTruthy,
@@ -3281,22 +3290,58 @@ function runHeadlessStreaming(
             }
 
             sendControlResponseSuccess(message, {
-              commands: currentCommands
-                .filter(cmd => cmd.userInvocable !== false)
-                .map(cmd => ({
-                  name: getCommandName(cmd),
-                  description: formatDescriptionWithSource(cmd),
-                  argumentHint: cmd.argumentHint || '',
-                })),
-              agents: currentAgents.map(a => ({
-                name: a.agentType,
-                description: a.whenToUse,
-                model: a.model === 'inherit' ? undefined : a.model,
-              })),
+              commands: serializeCommandsForControl(currentCommands),
+              agents: serializeAgentsForControl(currentAgents),
               plugins,
               mcpServers: buildMcpServerStatuses(),
               error_count: r.error_count,
             } satisfies SDKControlReloadPluginsResponse)
+          } catch (error) {
+            sendControlResponseError(message, errorMessage(error))
+          }
+        } else if (message.request.subtype === 'refresh_resources') {
+          // Lightweight disk-truth reload for the desktop shell's settings
+          // pages: workflow/agent markdown files were created/renamed/
+          // deleted outside the CLI. Unlike reload_plugins this skips the
+          // plugin sweep and MCP churn — only the command/agent definition
+          // caches are invalidated, then the refreshed lists are returned
+          // (and picked up by the next run()'s query options).
+          try {
+            invalidateWorkflowCache()
+            clearCommandMemoizationCaches()
+            clearAgentDefinitionsCache()
+            currentCommands = await getCommands(cwd())
+            // Same SDK-flagged-agent preservation rule as refreshPluginState:
+            // --agents / SDK initialize injections are not disk-loadable and
+            // must survive the disk resweep.
+            const freshAgents = await getAgentDefinitionsWithOverrides(cwd())
+            const sdkAgents = currentAgents.filter(
+              a => a.source === 'flagSettings',
+            )
+            currentAgents = [...freshAgents.allAgents, ...sdkAgents]
+            // AppState 消费方（get_context_usage、resumeAgent 等）读的是
+            // agentDefinitions 而非局部 currentAgents——同步写一份，与
+            // refreshPluginState 的 AppState 更新对齐
+            setAppState(prev => ({
+              ...prev,
+              agentDefinitions: {
+                activeAgents: getActiveAgentsFromList(currentAgents),
+                allAgents: currentAgents,
+              },
+            }))
+            // Mirror the startup commandsHeadless filter (main.tsx): the
+            // shell's palette must only see prompt commands without
+            // disableNonInteractive + local commands with
+            // supportsNonInteractive — not the full interactive set.
+            const headlessCommands = currentCommands.filter(
+              command =>
+                (command.type === 'prompt' && !command.disableNonInteractive) ||
+                (command.type === 'local' && command.supportsNonInteractive),
+            )
+            sendControlResponseSuccess(message, {
+              commands: serializeCommandsForControl(headlessCommands),
+              agents: serializeAgentsForControl(currentAgents),
+            } satisfies SDKControlRefreshResourcesResponse)
           } catch (error) {
             sendControlResponseError(message, errorMessage(error))
           }
@@ -4520,6 +4565,49 @@ export function getCanUseToolFn(
   }
 }
 
+/**
+ * Serialize commands for control_response payloads (initialize /
+ * refresh_resources / reload_plugins). Single source so every refresh path
+ * carries the same machine-readable type/source fields the desktop shell's
+ * command palette consumes (workflow badge, prompt/local discrimination).
+ */
+function serializeCommandsForControl(commands: Command[]): Array<{
+  name: string
+  description: string
+  argumentHint: string
+  type?: Command['type']
+  source?: string
+}> {
+  return commands
+    .filter(cmd => cmd.userInvocable !== false)
+    .map(cmd => ({
+      name: getCommandName(cmd),
+      description: formatDescriptionWithSource(cmd),
+      argumentHint: cmd.argumentHint || '',
+      type: cmd.type,
+      // 工作流命令是 local 型（kind:'workflow'）：机器可读来源靠这里补
+      // 'workflow'（App 命令面板徽标 + /skills 清单分组；旧壳忽略）
+      source:
+        cmd.type === 'prompt'
+          ? cmd.source
+          : cmd.kind === 'workflow'
+            ? 'workflow'
+            : undefined,
+    }))
+}
+
+/** Serialize agents for control_response payloads (same normalization as init). */
+function serializeAgentsForControl(
+  agents: AgentDefinition[],
+): Array<{ name: string; description: string; model?: string }> {
+  return agents.map(agent => ({
+    name: agent.agentType,
+    description: agent.whenToUse,
+    // 'inherit' is an internal sentinel; normalize to undefined for the public API
+    model: agent.model === 'inherit' ? undefined : agent.model,
+  }))
+}
+
 async function handleInitializeRequest(
   request: SDKControlInitializeRequest,
   requestId: string,
@@ -4638,31 +4726,8 @@ async function handleInitializeRequest(
     setInitJsonSchema(request.jsonSchema)
   }
   const initResponse: SDKControlInitializeResponse = {
-    commands: commands
-      .filter(cmd => cmd.userInvocable !== false)
-      .map(cmd => ({
-        name: getCommandName(cmd),
-        description: formatDescriptionWithSource(cmd),
-        argumentHint: cmd.argumentHint || '',
-        // 桌面壳的命令面板/技能清单需要区分 prompt 型技能（含 source：
-        // bundled/plugin/project/user/mcp/workflow）与 local 型透传命令——
-        // description 里的来源标记是给人看的，机器读这两个字段（旧壳忽略）
-        type: cmd.type,
-        // 工作流命令是 local 型（kind:'workflow'）：机器可读来源靠这里补
-        // 'workflow'（App 命令面板徽标 + /skills 清单分组；旧壳忽略）
-        source:
-          cmd.type === 'prompt'
-            ? cmd.source
-            : cmd.kind === 'workflow'
-              ? 'workflow'
-              : undefined,
-      })),
-    agents: agents.map(agent => ({
-      name: agent.agentType,
-      description: agent.whenToUse,
-      // 'inherit' is an internal sentinel; normalize to undefined for the public API
-      model: agent.model === 'inherit' ? undefined : agent.model,
-    })),
+    commands: serializeCommandsForControl(commands),
+    agents: serializeAgentsForControl(agents),
     output_style: outputStyle,
     available_output_styles: Object.keys(availableOutputStyles),
     models: modelInfos,

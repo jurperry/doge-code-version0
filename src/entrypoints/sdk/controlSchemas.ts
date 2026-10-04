@@ -432,6 +432,27 @@ export const SDKControlReloadPluginsResponseSchema = lazySchema(() =>
     ),
 )
 
+export const SDKControlRefreshResourcesRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('refresh_resources'),
+    })
+    .describe(
+      'Reloads workflow/agent markdown definitions from disk (no plugin/MCP churn) and returns the refreshed commands and agents.',
+    ),
+)
+
+export const SDKControlRefreshResourcesResponseSchema = lazySchema(() =>
+  z
+    .object({
+      commands: z.array(SlashCommandSchema()),
+      agents: z.array(AgentInfoSchema()),
+    })
+    .describe(
+      'Refreshed commands and agents after re-reading user/project md resources.',
+    ),
+)
+
 export const SDKControlMcpReconnectRequestSchema = lazySchema(() =>
   z
     .object({
@@ -566,6 +587,7 @@ export const SDKControlRequestInnerSchema = lazySchema(() =>
     SDKControlSeedReadStateRequestSchema(),
     SDKControlMcpSetServersRequestSchema(),
     SDKControlReloadPluginsRequestSchema(),
+    SDKControlRefreshResourcesRequestSchema(),
     SDKControlMcpReconnectRequestSchema(),
     SDKControlMcpToggleRequestSchema(),
     SDKControlStopTaskRequestSchema(),

@@ -374,6 +374,7 @@ export async function runSubprocessStep(opts: {
     model,
   })
 
+  let progressSeq = 0
   const outcome = await spawnHeadlessStep({
     prompt,
     model,
@@ -382,6 +383,20 @@ export async function runSubprocessStep(opts: {
     cwd: process.cwd(),
     signal: abortController.signal,
     timeoutSec: step.timeoutSec,
+    // 实时进度（0.2.116）：子进程每产出一轮 assistant 消息就上报一条
+    // task_progress——此前只有启动/完成两个事件，长步骤在面板上像冻住
+    onProgress: summary => {
+      progressSeq += 1
+      enqueueSdkEvent({
+        type: 'system',
+        subtype: 'task_progress',
+        task_id: subTaskId,
+        description,
+        status: 'running',
+        progress: progressSeq,
+        summary,
+      })
+    },
   })
 
   enqueueSdkEvent({
@@ -413,8 +428,10 @@ function spawnHeadlessStep(opts: {
   cwd: string
   signal: AbortSignal
   timeoutSec?: number
+  /** 子进程每轮 assistant 消息的实时摘要（驱动 App 面板的步骤行） */
+  onProgress?: (summary: string) => void
 }): Promise<StepOutcome> {
-  const { prompt, model, profile, permissionMode, cwd, signal, timeoutSec } = opts
+  const { prompt, model, profile, permissionMode, cwd, signal, timeoutSec, onProgress } = opts
   return new Promise(resolve => {
     const exe = process.env.DOGE_WORKFLOW_EXECUTABLE ?? process.execPath
     const args = [
@@ -422,6 +439,9 @@ function spawnHeadlessStep(opts: {
       prompt,
       '--output-format',
       'stream-json',
+      // stream-json 在 -p 模式必须配 --verbose：CLI 参数校验否则直接
+      // exit 1（跨 API 步骤「2 秒即死」的真凶，0.2.115 / CLI 2.1.284 修复）
+      '--verbose',
       '--model',
       model,
       '--permission-mode',
@@ -431,6 +451,13 @@ function spawnHeadlessStep(opts: {
     const env: Record<string, string> = {
       ...process.env,
     } as Record<string, string>
+    // 子进程不是终端标签：剥掉 App 工作区标记，避免 OSC 7771 通知混进
+    // 步骤输出捕获（失败诊断时的纯噪音）
+    delete env.DOGE_APP_WORKSPACE_MARKER
+    // 剥掉交互会话的思考强度覆盖（setEffort 经 update_environment_variables
+    // 写进父进程 env）：工作流步骤应按 provider 默认档跑——继承「最高」
+    // 会让每一步都深度思考，长任务又慢又贵（0.2.116）
+    delete env.CLAUDE_CODE_EFFORT_LEVEL
     for (const [name, value] of Object.entries(modelProfileEnvPatch(profile))) {
       if (value !== undefined && value !== '') env[name] = value
       else delete env[name]
@@ -507,6 +534,10 @@ function spawnHeadlessStep(opts: {
               output_tokens?: number
             }
           }
+          if (msg.type === 'assistant' && onProgress) {
+            const summary = stepProgressSummary(line)
+            if (summary) onProgress(summary)
+          }
           if (msg.type === 'result') {
             resultText = typeof msg.result === 'string' ? msg.result : ''
             isErr = msg.is_error === true
@@ -544,15 +575,57 @@ function spawnHeadlessStep(opts: {
         return
       }
       if (code !== 0 && !resultText) {
-        finish(
-          'failed',
-          `子进程退出码 ${code}：${firstLine(stderrTail) || '无输出'}`,
-        )
+        finish('failed', `子进程退出码 ${code}：${meaningfulStderrLine(stderrTail)}`)
         return
       }
       finish('completed')
     })
   })
+}
+
+/**
+ * 从子进程 stdout 的 assistant 消息行提取一行实时进度摘要（纯函数）。
+ * 优先级：正文首行 > 最后一个工具调用「名称 + 入参要点」 > thinking 首行
+ * （截断）；空消息返回空串（不上报）。只做字符串截取，不解析语义。
+ */
+export function stepProgressSummary(assistantLine: string): string {
+  let msg: {
+    message?: { content?: Array<{ type?: string; text?: string; thinking?: string; name?: string; input?: unknown }> }
+  }
+  try {
+    msg = JSON.parse(assistantLine)
+  } catch {
+    return ''
+  }
+  const blocks = msg.message?.content ?? []
+  const text = blocks.find(b => b.type === 'text' && b.text?.trim())
+  if (text?.text) return firstLine(text.text)
+  const tool = blocks.filter(b => b.type === 'tool_use').at(-1)
+  if (tool?.name) {
+    const input = tool.input as Record<string, unknown> | undefined
+    const arg = input?.file_path ?? input?.command ?? input?.path ?? input?.pattern
+    return `调用 ${tool.name}${typeof arg === 'string' && arg ? `：${arg.slice(0, 70)}` : ''}`
+  }
+  const think = blocks.find(b => b.type === 'thinking' && b.thinking?.trim())
+  if (think?.thinking) {
+    const t = think.thinking.replace(/\s+/g, ' ').trim()
+    return `思考：${t.slice(0, 80)}${t.length > 80 ? '…' : ''}`
+  }
+  return ''
+}
+
+/**
+ * 从子进程 stderr 尾巴里取「最后一条有意义行」：CLI 的致命错误（如参数
+ * 校验的 "Error: ..."）总是打在末尾，而头部是 OSC 工作区通知与
+ * [DOGE-DEBUG] 引导噪音——取首行会把真错误埋掉（0.2.115 前用户看到的
+ * 就是乱码开头而非错误本体）。
+ */
+function meaningfulStderrLine(stderrTail: string): string {
+  const lines = stderrTail
+    .split(/\r?\n/)
+    .map(l => l.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').trim())
+    .filter(l => l !== '' && !l.startsWith('[DOGE-DEBUG]'))
+  return lines[lines.length - 1] ?? '无输出'
 }
 
 function settleWorkflow(

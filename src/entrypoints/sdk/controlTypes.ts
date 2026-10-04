@@ -40,6 +40,11 @@ export type SDKControlReloadPluginsResponse = {
   [key: string]: unknown
 }
 
+export type SDKControlRefreshResourcesResponse = {
+  ok?: boolean
+  [key: string]: unknown
+}
+
 export type SDKControlResponse = {
   type: 'control_response'
   request_id?: string
