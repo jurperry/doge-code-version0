@@ -521,6 +521,35 @@ export function extractPartialResult(
 
 type SetAppState = (f: (prev: AppState) => AppState) => void
 
+/** API 错误续跑上限与退避（毫秒）——单次请求失败不整损小时级工作流步骤。
+ *  异步（runAsyncAgentLifecycle）与同步（AgentTool 收尾点）两路共用。 */
+export const AGENT_API_ERROR_RESUME_MAX = 2
+export const AGENT_API_ERROR_RESUME_BACKOFF_MS = [1500, 4000]
+
+/**
+ * Drop trailing API-error assistant records and non-conversational records
+ * (stream_event/attachment/progress) so the remainder can be fed back as
+ * promptMessages to continue the SAME agent conversation. Mirrors the shape
+ * resumeAgent reconstructs from the sidechain transcript (assistant/user
+ * records only) — query() treats that as a resumable conversation.
+ */
+export function stripTrailingApiErrorMessages(
+  messages: readonly MessageType[],
+): MessageType[] {
+  const copy = messages.filter(
+    m => m.type === 'assistant' || m.type === 'user',
+  )
+  while (copy.length > 0) {
+    const last = copy[copy.length - 1]!
+    if (last.type === 'assistant' && last.isApiErrorMessage) {
+      copy.pop()
+      continue
+    }
+    break
+  }
+  return copy
+}
+
 /**
  * Drives a background agent from spawn to terminal notification.
  * Shared between AgentTool's async-from-start path and resumeAgentBackground.
@@ -542,6 +571,7 @@ export async function runAsyncAgentLifecycle({
   abortController: AbortController
   makeStream: (
     onCacheSafeParams: ((p: CacheSafeParams) => void) | undefined,
+    resumeMessages?: MessageType[],
   ) => AsyncGenerator<MessageType, void>
   metadata: Parameters<typeof finalizeAgentTool>[2]
   description: string
@@ -573,52 +603,81 @@ export async function runAsyncAgentLifecycle({
           stopSummarization = stop
         }
       : undefined
-    for await (const message of makeStream(onCacheSafeParams)) {
-      agentMessages.push(message)
-      // Append immediately when UI holds the task (retain). Bootstrap reads
-      // disk in parallel and UUID-merges the prefix — disk-write-before-yield
-      // means live is always a suffix of disk, so merge is order-correct.
-      rootSetAppState(prev => {
-        const t = prev.tasks[taskId]
-        if (!isLocalAgentTask(t) || !t.retain) return prev
-        const base = t.messages ?? []
-        return {
-          ...prev,
-          tasks: {
-            ...prev.tasks,
-            [taskId]: { ...t, messages: [...base, message] },
-          },
-        }
-      })
-      updateProgressFromMessage(
-        tracker,
-        message,
-        resolveActivity,
-        toolUseContext.options.tools,
-      )
-      updateAsyncAgentProgress(
-        taskId,
-        getProgressUpdate(tracker),
-        rootSetAppState,
-      )
-      const lastToolName = getLastToolUseName(message)
-      const mcpEmitted = emitMcpTaskProgress(message, tracker, taskId, toolUseContext.toolUseId, description, metadata.startTime)
-      if (!mcpEmitted && lastToolName) {
-        emitTaskProgress(
+    // API 错误有界续跑：query 可能正常返回但末条 assistant 是 API 错误
+    //（isApiErrorMessage——剥图重试后仍 400、十轮重试耗尽的 5xx 等）。
+    // 剥掉错误尾巴、以既有对话续跑同一代理，工作流长任务（小时级步骤）
+    // 不因单次请求失败全损；上限 AGENT_API_ERROR_RESUME_MAX、退避递增，
+    // 续跑流末条不再是错误即按正常路径 finalize。
+    let resumeMessages: MessageType[] | undefined
+    for (let attempt = 0; ; attempt++) {
+      for await (const message of makeStream(onCacheSafeParams, resumeMessages)) {
+        agentMessages.push(message)
+        // Append immediately when UI holds the task (retain). Bootstrap reads
+        // disk in parallel and UUID-merges the prefix — disk-write-before-yield
+        // means live is always a suffix of disk, so merge is order-correct.
+        rootSetAppState(prev => {
+          const t = prev.tasks[taskId]
+          if (!isLocalAgentTask(t) || !t.retain) return prev
+          const base = t.messages ?? []
+          return {
+            ...prev,
+            tasks: {
+              ...prev.tasks,
+              [taskId]: { ...t, messages: [...base, message] },
+            },
+          }
+        })
+        updateProgressFromMessage(
           tracker,
-          taskId,
-          toolUseContext.toolUseId,
-          description,
-          metadata.startTime,
-          lastToolName,
+          message,
+          resolveActivity,
+          toolUseContext.options.tools,
         )
+        updateAsyncAgentProgress(
+          taskId,
+          getProgressUpdate(tracker),
+          rootSetAppState,
+        )
+        const lastToolName = getLastToolUseName(message)
+        const mcpEmitted = emitMcpTaskProgress(message, tracker, taskId, toolUseContext.toolUseId, description, metadata.startTime)
+        if (!mcpEmitted && lastToolName) {
+          emitTaskProgress(
+            tracker,
+            taskId,
+            toolUseContext.toolUseId,
+            description,
+            metadata.startTime,
+            lastToolName,
+          )
+        }
       }
+
+      stopSummarization?.()
+
+      const apiError = agentRequestError(agentMessages)
+      if (!apiError) break
+      // 首请求即败：agentMessages 只有错误 assistant，剥完为空——传空数组
+      // 令提供方回退原始 prompt 重启（首败无进度损失，重启即续跑）
+      const stripped = stripTrailingApiErrorMessages(agentMessages)
+      if (
+        attempt >= AGENT_API_ERROR_RESUME_MAX ||
+        abortController.signal.aborted
+      ) {
+        throw apiError
+      }
+      resumeMessages = stripped
+      logForDebugging(
+        `agent ${taskId}: API error, resuming conversation (attempt ${attempt + 1}/${AGENT_API_ERROR_RESUME_MAX}): ${errorMessage(apiError)}`,
+      )
+      await new Promise(resolve =>
+        setTimeout(
+          resolve,
+          API_ERROR_RESUME_BACKOFF_MS[
+            Math.min(attempt, API_ERROR_RESUME_BACKOFF_MS.length - 1)
+          ],
+        ),
+      )
     }
-
-    stopSummarization?.()
-
-    const apiError = agentRequestError(agentMessages)
-    if (apiError) throw apiError
 
     const agentResult = finalizeAgentTool(agentMessages, taskId, metadata)
 

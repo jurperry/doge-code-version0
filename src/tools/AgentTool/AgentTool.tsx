@@ -45,7 +45,19 @@ import { BackgroundHint } from '../BashTool/UI.js';
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js';
 import { spawnTeammate } from '../shared/spawnMultiAgent.js';
 import { setAgentColor } from './agentColorManager.js';
-import { agentToolResultSchema, classifyHandoffIfNeeded, emitMcpTaskProgress, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, runAsyncAgentLifecycle } from './agentToolUtils.js';
+import {
+  AGENT_API_ERROR_RESUME_BACKOFF_MS,
+  AGENT_API_ERROR_RESUME_MAX,
+  agentToolResultSchema,
+  classifyHandoffIfNeeded,
+  emitMcpTaskProgress,
+  emitTaskProgress,
+  extractPartialResult,
+  finalizeAgentTool,
+  getLastToolUseName,
+  runAsyncAgentLifecycle,
+  stripTrailingApiErrorMessages
+} from './agentToolUtils.js';
 import { linkForegroundAbort, takeOverAgentIterator } from './agentHandover.js';
 import { agentCompletionStatus, agentRequestError } from './agentCompletion.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
@@ -743,8 +755,14 @@ export const AgentTool = buildTool({
       void runWithAgentContext(asyncAgentContext, () => wrapWithCwd(() => runAsyncAgentLifecycle({
         taskId: agentBackgroundTask.agentId,
         abortController: agentBackgroundTask.abortController!,
-        makeStream: onCacheSafeParams => runAgent({
+        makeStream: (onCacheSafeParams, resumeMessages) => runAgent({
           ...runAgentParams,
+          // API 错误续跑（agentToolUtils）：以既有对话续跑，不重付整个代理。
+          // query 只 yield 新消息——续跑须前置原始 promptMessages 还原完整
+          // 对话（本 run 的 prompt 只在初始列表里、不会重复）
+          promptMessages: resumeMessages
+            ? [...runAgentParams.promptMessages, ...resumeMessages]
+            : runAgentParams.promptMessages,
           override: {
             ...runAgentParams.override,
             agentId: asAgentId(agentBackgroundTask.agentId),
@@ -1228,7 +1246,72 @@ export const AgentTool = buildTool({
           }
         }
 
-        const apiError = agentRequestError(agentMessages);
+        // API 错误有界续跑（同步 Task，agentToolUtils 异步版的对偶）：query
+        // 正常返回但末条 assistant 是 API 错误（或迭代器抛错且没有任何
+        // assistant 消息）时，剥错误尾巴、以既有对话续跑（前置原始
+        // promptMessages），上限 2 次、退避递增——同步是 App 对话模式 Task
+        // 的默认路径，单次请求失败不该把整个主回合拖死。worktree 已在
+        // finally 清理、后台化已交接、用户已中断三种情形不续跑。
+        let apiError = agentRequestError(agentMessages);
+        for (
+          let attempt = 0;
+          attempt < AGENT_API_ERROR_RESUME_MAX &&
+          !wasAborted &&
+          !wasBackgrounded &&
+          !worktreeResult.worktreePath &&
+          !(foregroundAbortController ?? toolUseContext.abortController).signal.aborted &&
+          (apiError || (syncAgentError && !agentMessages.some(m => m.type === 'assistant')));
+          attempt++
+        ) {
+          // 首请求即败：agentMessages 只有错误 assistant，剥完为空——空数组
+          // 令下方 [...promptMessages, ...resumeMessages] 回退原始 prompt
+          // 重启（首败无进度损失，重启即续跑）
+          const resumeMessages = stripTrailingApiErrorMessages(agentMessages);
+          logForDebugging(`sync agent ${syncAgentId}: API error, resuming conversation (attempt ${attempt + 1}/${AGENT_API_ERROR_RESUME_MAX}): ${errorMessage(apiError ?? syncAgentError)}`);
+          await new Promise(resolve =>
+            setTimeout(
+              resolve,
+              AGENT_API_ERROR_RESUME_BACKOFF_MS[
+                Math.min(attempt, AGENT_API_ERROR_RESUME_BACKOFF_MS.length - 1)
+              ],
+            ),
+          );
+          try {
+            for await (const msg of runAgent({
+              ...runAgentParams,
+              promptMessages: [...runAgentParams.promptMessages, ...resumeMessages],
+              override: {
+                ...runAgentParams.override,
+                agentId: syncAgentId,
+                abortController: foregroundAbortController ?? toolUseContext.abortController
+              }
+            })) {
+              agentMessages.push(msg);
+            }
+            syncAgentError = undefined;
+            apiError = agentRequestError(agentMessages);
+            if (!apiError && foregroundTaskId) {
+              // 纠正上面 finally 已发的 failed 通知（App 任务行按 task_id upsert）
+              const progress = getProgressUpdate(syncTracker);
+              enqueueSdkEvent({
+                type: 'system',
+                subtype: 'task_notification',
+                task_id: foregroundTaskId,
+                tool_use_id: toolUseContext.toolUseId,
+                status: 'completed',
+                output_file: '',
+                summary: description,
+                usage: {
+                  total_tokens: progress.tokenCount,
+                  tool_uses: progress.toolUseCount,
+                  duration_ms: Date.now() - agentStartTime
+                }
+              });
+            }
+          } catch {
+            break;
+          }
+        }
         if (apiError) throw apiError;
 
         // Re-throw abort errors

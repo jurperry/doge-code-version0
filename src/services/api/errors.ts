@@ -243,7 +243,13 @@ export function isImageUnsupportedError(error: unknown): boolean {
     // instead of a generic API Error on the second failure.
     (msg.includes('only support') && msg.includes('text')) ||
     msg.includes('text input only') ||
-    msg.includes('only supports text')
+    msg.includes('only supports text') ||
+    // GLM 400 [1210] "图片输入格式/解析错误"：损坏图片块触发的中文报文，
+    // 不含任何英文关键词——不补这组匹配，剥图重试永不触发、整回合被判死
+    msg.includes('[1210]') ||
+    msg.includes('图片输入') ||
+    msg.includes('图片格式') ||
+    msg.includes('图片解析')
   )
 }
 

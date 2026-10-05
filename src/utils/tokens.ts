@@ -239,12 +239,31 @@ export function getAssistantMessageContentLength(
  * bearing record we walk back to the FIRST sibling with the same message.id
  * so every interleaved tool_result is included in the rough estimate.
  */
-export function tokenCountWithEstimation(messages: readonly Message[]): number {
+export function tokenCountWithEstimation(
+  messages: readonly Message[],
+  // 模型上下文窗口（原始值，非 effective）。提供时，输入侧（input +
+  // cache 两项）超过窗口的 usage 记录视为网关虚报，向后继续找上一条
+  // 真实 usage——与全零占位同一防御形态。单次调用的输入侧物理上不可
+  // 能超过窗口（否则请求会被服务端拒绝），实测 GLM 对 glm-5.3-flash
+  // 偶发 2x/4x 的 prompt 计数 artifact，会让 1M 会话在 ~330k 真实占用
+  // 时被误判为 1.31M 而假触发自动压缩。
+  contextWindowTokens?: number,
+): number {
+  const isGatewayArtifact = (usage: Usage): boolean =>
+    contextWindowTokens !== undefined &&
+    usage.input_tokens +
+      (usage.cache_creation_input_tokens ?? 0) +
+      (usage.cache_read_input_tokens ?? 0) >
+      contextWindowTokens
   let i = messages.length - 1
   while (i >= 0) {
     const message = messages[i]
     const usage = message ? getTokenUsage(message) : undefined
     if (message && usage) {
+      if (isGatewayArtifact(usage)) {
+        i--
+        continue
+      }
       // Walk back past any earlier sibling records split from the same API
       // response (same message.id) so interleaved tool_results between them
       // are included in the estimation slice.

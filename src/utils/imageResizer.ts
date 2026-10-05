@@ -811,6 +811,169 @@ export function detectImageFormatFromBuffer(buffer: Buffer): ImageMediaType {
   return 'image/png'
 }
 
+// ---- 图片容器结构校验（纯 TS，无原生依赖） -------------------------------
+//
+// 动机：发布版 doge.exe 里 sharp 与 image-processor-napi 均为 external 且
+// 不随包分发（build-cli EXTERNALS），getImageProcessor 在生产恒抛——解码
+// 探针（isImageBufferDecodable）在真机上恒返回 null。而二进制被 shell
+// 重定向破坏（PowerShell `>` 的 UTF-16/CRLF 重编码）是结构级损伤：魔数
+// 交错、chunk 长度失配、CRC 全碎——容器走查即可确定性识别，零依赖。
+
+const PNG_CRC_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let n = 0; n < 256; n++) {
+    let c = n
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    }
+    table[n] = c >>> 0
+  }
+  return table
+})()
+
+function pngCrc32(buf: Buffer): number {
+  let c = 0xffffffff
+  for (let i = 0; i < buf.length; i++) {
+    c = PNG_CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8)
+  }
+  return (c ^ 0xffffffff) >>> 0
+}
+
+const isAsciiType = (type: string): boolean =>
+  /^[\x20-\x7e]{4}$/.test(type)
+
+/** PNG：签名 + IHDR 首 chunk + 全 chunk 长度/CRC 走查 + IEND 收尾即 EOF */
+function validatePng(buffer: Buffer): string | undefined {
+  if (buffer.length < 57) return 'too short for a PNG' // 8 sig + 25 IHDR + 12 IEND
+  if (
+    buffer[0] !== 0x89 || buffer[1] !== 0x50 || buffer[2] !== 0x4e ||
+    buffer[3] !== 0x47 || buffer[4] !== 0x0d || buffer[5] !== 0x0a ||
+    buffer[6] !== 0x1a || buffer[7] !== 0x0a
+  ) {
+    return 'bad PNG signature (binary re-encoded?)'
+  }
+  let pos = 8
+  let first = true
+  let sawIend = false
+  while (pos < buffer.length) {
+    if (pos + 12 > buffer.length) return 'truncated chunk header'
+    const len = buffer.readUInt32BE(pos)
+    const type = buffer.toString('ascii', pos + 4, pos + 8)
+    if (!isAsciiType(type)) return `garbled chunk type at ${pos}`
+    if (len > buffer.length - pos - 12) return `chunk ${type} length overruns file`
+    if (first && type !== 'IHDR') return 'first chunk is not IHDR'
+    if (first && len !== 13) return 'IHDR length != 13'
+    first = false
+    const crcStored = buffer.readUInt32BE(pos + 8 + len)
+    const crcActual = pngCrc32(buffer.subarray(pos + 4, pos + 8 + len))
+    if (crcStored !== crcActual) return `chunk ${type} CRC mismatch`
+    pos += 12 + len
+    if (type === 'IEND') {
+      sawIend = true
+      break
+    }
+  }
+  if (!sawIend) return 'missing IEND (truncated)'
+  if (pos !== buffer.length) return `${buffer.length - pos} trailing bytes after IEND`
+  return undefined
+}
+
+/**
+ * JPEG：SOI + 存在 SOS(FFDA) + 以 EOI(FFD9) 收尾。
+ * 不做严格段走查——现实里的合法小 JPEG 常有解码器容忍的结构怪癖（填充/
+ * 变长段），误拒比漏拒伤害大；而 UTF-16 交错/CRLF 插入/截断必然破坏
+ * SOI/EOI/SOS 三者之一，宽松三点已覆盖事故类。
+ */
+function validateJpeg(buffer: Buffer): string | undefined {
+  if (buffer.length < 6) return 'too short for a JPEG'
+  if (buffer[0] !== 0xff || buffer[1] !== 0xd8) return 'bad SOI'
+  let sawSos = false
+  for (let i = 2; i + 1 < buffer.length - 1; i++) {
+    if (buffer[i] === 0xff && buffer[i + 1] === 0xda) {
+      sawSos = true
+      break
+    }
+  }
+  if (!sawSos) return 'missing SOS (truncated header)'
+  if (buffer[buffer.length - 2] !== 0xff || buffer[buffer.length - 1] !== 0xd9) {
+    return 'missing EOI at end of file'
+  }
+  return undefined
+}
+
+/** GIF：头版本 + 0x3B 结尾（宽松——结构细节交给服务端） */
+function validateGif(buffer: Buffer): string | undefined {
+  if (buffer.length < 14) return 'too short for a GIF'
+  const header = buffer.toString('ascii', 0, 6)
+  if (header !== 'GIF87a' && header !== 'GIF89a') return 'bad GIF header'
+  if (buffer[buffer.length - 1] !== 0x3b) return 'missing trailer 0x3B'
+  return undefined
+}
+
+/** WebP：RIFF 头 + size 与文件长一致 + 已知编码 chunk 存在 */
+function validateWebp(buffer: Buffer): string | undefined {
+  if (buffer.length < 12) return 'too short for a WebP'
+  if (buffer.toString('ascii', 0, 4) !== 'RIFF') return 'bad RIFF header'
+  if (buffer.toString('ascii', 8, 12) !== 'WEBP') return 'bad WEBP tag'
+  const riffSize = buffer.readUInt32LE(4)
+  if (riffSize !== buffer.length - 8) {
+    return `RIFF size ${riffSize} != file length ${buffer.length - 8}`
+  }
+  const body = buffer.toString('ascii', 12, Math.min(buffer.length, 512))
+  if (!/(VP8 |VP8L|VP8X)/.test(body)) return 'no VP8/VP8L/VP8X chunk'
+  return undefined
+}
+
+/**
+ * 容器结构校验：返回 undefined = 结构完好；否则返回可读的损坏原因。
+ * 覆盖 shell 重定向类破坏（UTF-16 交错/CRLF 插入/截断/垃圾填充）。
+ */
+export function validateImageContainer(buffer: Buffer): { ok: boolean; reason?: string } {
+  let reason: string | undefined
+  if (buffer.length >= 4 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    reason = validateJpeg(buffer)
+  } else if (buffer.length >= 4 && buffer.toString('ascii', 0, 4) === 'RIFF') {
+    reason = validateWebp(buffer)
+  } else if (buffer.length >= 4 && buffer.toString('ascii', 0, 3) === 'GIF') {
+    reason = validateGif(buffer)
+  } else {
+    reason = validatePng(buffer) // 含未知格式（detect 默认 png）：走 PNG 走查即报签名错
+  }
+  return reason === undefined ? { ok: true } : { ok: false, reason }
+}
+
+/**
+ * Verify the buffer is a fully decodable image (decode-and-reencode probe).
+ *
+ * Why: detectImageFormatFromBuffer only checks the magic bytes, and the resize
+ * fallbacks in this module pass the ORIGINAL bytes through when sharp fails —
+ * so a binary corrupted by shell redirection (e.g. PowerShell `>` UTF-16/CRLF
+ * mangling) still becomes an image block, which the provider then rejects with
+ * a 400 image-parse error (GLM [1210]) that kills the whole turn. A failed
+ * full decode is unambiguous: the pixels are unreadable, no API can use it.
+ *
+ * Returns null when no image processor can be loaded at all (dev tree without
+ * sharp / native module) — callers must treat that as "cannot judge" and keep
+ * the legacy passthrough, NOT as corrupt (otherwise every valid image read in
+ * dev would be rejected).
+ */
+export async function isImageBufferDecodable(
+  buffer: Buffer,
+): Promise<boolean | null> {
+  let sharp: SharpFunction
+  try {
+    sharp = await getImageProcessor()
+  } catch {
+    return null
+  }
+  try {
+    await sharp(buffer).jpeg({ quality: 20 }).toBuffer()
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * Detect image format from base64 data using magic bytes
  * @param base64Data Base64 encoded image data

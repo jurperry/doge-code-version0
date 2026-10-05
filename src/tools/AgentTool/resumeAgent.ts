@@ -232,9 +232,15 @@ export async function resumeAgentBackground({
       runAsyncAgentLifecycle({
         taskId: agentBackgroundTask.agentId,
         abortController: agentBackgroundTask.abortController!,
-        makeStream: onCacheSafeParams =>
+        makeStream: (onCacheSafeParams, resumeMessages) =>
           runAgent({
             ...runAgentParams,
+            // API 错误续跑（agentToolUtils）：以既有对话续跑，不重付整个代理。
+            // query 只 yield 新消息——续跑须前置原始 promptMessages（旧历史
+            // + 本 run 新 prompt）还原完整对话，不会重复
+            promptMessages: resumeMessages
+              ? [...runAgentParams.promptMessages, ...resumeMessages]
+              : runAgentParams.promptMessages,
             override: {
               ...runAgentParams.override,
               agentId: asAgentId(agentBackgroundTask.agentId),

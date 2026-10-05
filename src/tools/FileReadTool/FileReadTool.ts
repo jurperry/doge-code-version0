@@ -46,7 +46,9 @@ import {
   detectImageFormatFromBuffer,
   type ImageDimensions,
   ImageResizeError,
+  isImageBufferDecodable,
   maybeResizeAndDownsampleImageBuffer,
+  validateImageContainer,
 } from '../../utils/imageResizer.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { logError } from '../../utils/log.js'
@@ -1108,6 +1110,32 @@ export async function readImageWithTokenBudget(
 
   if (originalSize === 0) {
     throw new Error(`Image file is empty: ${filePath}`)
+  }
+
+  // Decode gate: a corrupted binary (e.g. written through PowerShell `>`
+  // redirection, which re-encodes bytes as UTF-16/CRLF) must fail HERE as a
+  // readable tool error. The fallbacks below would otherwise pass the raw
+  // bytes to the API and the provider kills the turn with a 400 image-parse
+  // error — for workflow steps that trashes an hour of progress.
+  // 两层判定：容器结构走查（纯 TS，发布 exe 里原生处理器不随包分发——
+  // sharp/napi 恒 external，结构校验是生产唯一可用的确定信号）+ 解码探针
+  //（处理器可用时补充，null = 无法判定不拒）。
+  const structural = validateImageContainer(imageBuffer)
+  if (!structural.ok) {
+    throw new Error(
+      `Image file appears corrupted (${structural.reason}): ${filePath}. ` +
+        'If it was captured via shell redirection (e.g. PowerShell `>`), the ' +
+        'binary was likely re-encoded — regenerate it with a byte-preserving ' +
+        'method (adb pull, curl -o, [IO.File]::WriteAllBytes) and read again.',
+    )
+  }
+  if ((await isImageBufferDecodable(imageBuffer)) === false) {
+    throw new Error(
+      `Image file appears corrupted and cannot be decoded: ${filePath}. ` +
+        'If it was captured via shell redirection (e.g. PowerShell `>`), the ' +
+        'binary was likely re-encoded — regenerate it with a byte-preserving ' +
+        'method (adb pull, curl -o, [IO.File]::WriteAllBytes) and read again.',
+    )
   }
 
   const detectedMediaType = detectImageFormatFromBuffer(imageBuffer)

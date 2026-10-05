@@ -87,7 +87,10 @@ import {
   finalContextTokensFromLastResponse,
   tokenCountWithEstimation,
 } from './utils/tokens.js'
-import { ESCALATED_MAX_TOKENS } from './utils/context.js'
+import {
+  ESCALATED_MAX_TOKENS,
+  getContextWindowForModel,
+} from './utils/context.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from './services/analytics/growthbook.js'
 import { SLEEP_TOOL_NAME } from './tools/SleepTool/prompt.js'
 import { executePostSamplingHooks } from './utils/hooks/postSamplingHooks.js'
@@ -107,6 +110,7 @@ import type { Terminal, Continue } from './query/transitions.js'
 import { feature } from 'bun:bundle'
 import {
   getCurrentTurnTokenBudget,
+  getSdkBetas,
   getTurnOutputTokens,
   incrementBudgetContinuationCount,
 } from './bootstrap/state.js'
@@ -644,7 +648,15 @@ async function* queryLoop(
       !collapseOwnsIt
     ) {
       const { isAtBlockingLimit } = calculateTokenWarningState(
-        tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
+        // 传窗口上限跳过网关 usage 虚报（GLM 2x/4x artifact），否则虚报值
+        // 会假触发 blocking-limit 直接终结回合（autocompact 失败熔断后尤甚）。
+        tokenCountWithEstimation(
+          messagesForQuery,
+          getContextWindowForModel(
+            toolUseContext.options.mainLoopModel,
+            getSdkBetas(),
+          ),
+        ) - snipTokensFreed,
         toolUseContext.options.mainLoopModel,
       )
       if (isAtBlockingLimit) {

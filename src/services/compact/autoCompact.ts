@@ -222,7 +222,13 @@ export async function shouldAutoCompact(
     }
   }
 
-  const tokenCount = tokenCountWithEstimation(messages) - snipTokensFreed
+  // 传窗口上限：GLM 等网关偶发 2x/4x usage 虚报，输入侧超窗的记录按
+  // artifact 跳过（tokens.ts），避免 ~330k 真实占用被误判超阈值假触发。
+  const tokenCount =
+    tokenCountWithEstimation(
+      messages,
+      getContextWindowForModel(model, getSdkBetas()),
+    ) - snipTokensFreed
   const threshold = getAutoCompactThreshold(model)
   const effectiveWindow = getEffectiveContextWindowSize(model)
 

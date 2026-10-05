@@ -305,10 +305,16 @@ async function runInProcessStep(opts: {
     await runAsyncAgentLifecycle({
       taskId: agentTaskId,
       abortController: registration.abortController!,
-      makeStream: () => {
+      makeStream: (_onCacheSafeParams, resumeMessages) => {
         const iterator = runAgent({
           agentDefinition: agentDef,
-          promptMessages: [createUserMessage({ content: prompt })],
+          // API 错误续跑（agentToolUtils）：以剥离错误尾巴后的既有对话续跑
+          // 同一代理而非从原始 prompt 重来——小时级步骤不重付。query 只
+          // yield 新消息，续跑列表不含初始 user，须前置原始 prompt 还原
+          // 完整对话（否则模型丢任务、首消息成了 assistant）
+          promptMessages: resumeMessages
+            ? [createUserMessage({ content: prompt }), ...resumeMessages]
+            : [createUserMessage({ content: prompt })],
           toolUseContext: context,
           canUseTool,
           isAsync: true,

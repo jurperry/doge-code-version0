@@ -39,7 +39,10 @@ import {
   getMcpInstructionsDeltaAttachment,
 } from '../../utils/attachments.js'
 import { getMemoryPath } from '../../utils/config.js'
-import { COMPACT_MAX_OUTPUT_TOKENS } from '../../utils/context.js'
+import {
+  COMPACT_MAX_OUTPUT_TOKENS,
+  getContextWindowForModel,
+} from '../../utils/context.js'
 import {
   analyzeContext,
   tokenStatsToStatsigMetrics,
@@ -427,7 +430,11 @@ export async function compactConversation(
       throw new Error(ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
     }
 
-    const preCompactTokenCount = tokenCountWithEstimation(messages)
+    // 传窗口上限跳过网关 usage 虚报（GLM 2x/4x artifact），pre_tokens 如实
+    const preCompactTokenCount = tokenCountWithEstimation(
+      messages,
+      getContextWindowForModel(context.options.mainLoopModel),
+    )
 
     const appState = context.getAppState()
     void logPermissionContextForAnts(appState.toolPermissionContext, 'summary')
@@ -836,7 +843,11 @@ export async function partialCompactConversation(
       )
     }
 
-    const preCompactTokenCount = tokenCountWithEstimation(allMessages)
+    // 同上：partialCompact 的 pre_tokens 同口径跳过虚报 usage
+    const preCompactTokenCount = tokenCountWithEstimation(
+      allMessages,
+      getContextWindowForModel(context.options.mainLoopModel),
+    )
 
     context.onCompactProgress?.({
       type: 'hooks_start',
