@@ -290,10 +290,18 @@ async function runInProcessStep(opts: {
   // their stepProgressSummary relays). Tick a waiting line until the first
   // message arrives, then the normal per-message progress takes over.
   let firstMessageAt: number | undefined
+  // withRetry 重试轮次（system/api_error 透传后可读）：ticker 据此显示
+  //「网络波动，自动重试第 N 轮」——SSE 停滞被 gap 回收后每轮 90-180s 的
+  // 等待不再呈现为纯空转（0.2.126，用户实测「等待模型响应 150s」复发反馈）
+  let lastRetryAttempt = 0
   const liveness = setInterval(() => {
     if (firstMessageAt !== undefined || abortController.signal.aborted) return
+    const waited = Math.round((Date.now() - stepStart) / 1000)
+    // 前缀「等待模型响应」是 verify-workflow-cli 的活性契约，重试信息以
+    // 后缀追加（勿整句替换）
+    const suffix = lastRetryAttempt > 0 ? ` · 网络重试第 ${lastRetryAttempt} 轮` : ''
     enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentTaskId, description,
-      summary: `等待模型响应 ${Math.round((Date.now() - stepStart) / 1000)}s`,
+      summary: `等待模型响应 ${waited}s${suffix}`,
       usage: { total_tokens: 0, tool_uses: 0, duration_ms: Date.now() - stepStart } })
   }, 10_000)
   let timedOut = false
@@ -329,7 +337,16 @@ async function runInProcessStep(opts: {
         return (async function* () {
           for await (const message of iterator) {
             agentMessages.push(message)
-            if (firstMessageAt === undefined) firstMessageAt = Date.now()
+            // system 帧不算首条模型消息（api_error=重试信号、compact_boundary
+            // =步骤内压缩标记）：ticker 继续走并按 retryAttempt 换文案
+            if (message.type === 'system') {
+              const attemptNo = (message as { retryAttempt?: number }).retryAttempt
+              if (typeof attemptNo === 'number' && attemptNo > lastRetryAttempt) {
+                lastRetryAttempt = attemptNo
+              }
+            } else if (firstMessageAt === undefined) {
+              firstMessageAt = Date.now()
+            }
             yield message
           }
         })()

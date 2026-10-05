@@ -13,7 +13,7 @@ const proc = Bun.spawn([exe, '-p', '--input-format', 'stream-json', '--output-fo
   env: {
     ...process.env,
     CLAUDE_CONFIG_DIR: sandboxDir,
-    CLAUDE_CODE_COMPATIBLE_API_PROVIDER: 'openai',
+    CLAUDE_CODE_COMPATIBLE_API_PROVIDER: process.env.API_PROVIDER ?? 'openai',
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
     ANTHROPIC_AUTH_TOKEN: 'test-key',
     ANTHROPIC_MODEL: 'glm-5.3-flash',

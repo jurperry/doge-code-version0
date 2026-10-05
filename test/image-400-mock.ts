@@ -42,12 +42,15 @@ Bun.serve({
       )
     }
 
-    if (hasImage && MODE === 'reject') {
+    if (hasImage && (MODE === 'reject' || MODE === 'reject-unknown')) {
       log({ seq, kind: 'image-400' })
-      return new Response(
-        JSON.stringify({ error: { code: '1210', message: '图片输入格式/解析错误' } }),
-        { status: 400, headers: { 'content-type': 'application/json' } },
-      )
+      // reject-unknown：报文不含任何已知图片错误模式——区分新旧代码的判别
+      // 场景（旧代码 plain Error 逃逸分类→回合死；APIError 化后 isClientError
+      // 兜底触发剥图重试）
+      const body = MODE === 'reject'
+        ? { error: { code: '1210', message: '图片输入格式/解析错误' } }
+        : { error: { code: '499', message: 'totally unrecognized failure' } }
+      return new Response(JSON.stringify(body), { status: 400, headers: { 'content-type': 'application/json' } })
     }
 
     const reply = seq === 2 && hasImage ? '（图片被剥离后）收到，我看到了文件。' : '收到，处理完成。'

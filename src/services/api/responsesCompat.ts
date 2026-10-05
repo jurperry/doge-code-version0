@@ -449,7 +449,12 @@ export async function createResponsesCompatStream(
         lowerResponse.includes('context length') ||
         lowerResponse.includes('maximum context') ||
         lowerResponse.includes('too many tokens') ||
-        lowerResponse.includes('token limit')
+        lowerResponse.includes('token limit') ||
+        // GLM 等中文报文端点：长度类溢出措辞（「长度超过/超出上限」系，
+        // code 1214）——不匹配则 compact 的 PTL 截头重试永远不触发
+        lowerResponse.includes('长度超过') ||
+        lowerResponse.includes('超出上限') ||
+        lowerResponse.includes('超过上限')
       ) {
         throw new Error(`Prompt is too long: ${responseText}`)
       }
@@ -469,8 +474,17 @@ export async function createResponsesCompatStream(
       // error text keeps the original gateway status and payload verbatim.
       throw new APIError(normalizedStatus, undefined, detail, response.headers)
     }
-    throw new Error(
+    // Non-transient client error (e.g. GLM 400 [1210] "图片输入格式/解析错
+    // 误" on a corrupted image block): throw a real APIError with the NATIVE
+    // status（与 openaiCompat 同款修复）. 400 remains non-retryable in
+    // shouldRetry, but claude.ts's image recovery (isImageUnsupportedError /
+    // isClientError + messagesContainImage) only recognizes APIError
+    // instances — a plain Error bypassed every classifier and killed the turn.
+    throw new APIError(
+      response.status,
+      undefined,
       `Responses compatible request failed with status ${response.status}${responseText ? `: ${responseText}` : ''}`,
+      response.headers,
     )
   }
 

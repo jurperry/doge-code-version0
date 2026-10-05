@@ -687,12 +687,17 @@ export function getAssistantMessageFromError(
   // Use case-insensitive check since Vertex returns "Prompt is too long" (capitalized)
   // Also catches errors from OpenAI/Responses compat layer which throws
   // "Prompt is too long: ..." for context_length_exceeded errors.
+  // 中文措辞（GLM anthropic 端点「长度超过/超出上限」系）是共享判定的
+  // 盲区——三分支（anthropic/openai/responses）的 PTL 归一都汇于此。
   if (
     error instanceof Error &&
     (error.message.toLowerCase().includes('prompt is too long') ||
       error.message.toLowerCase().includes('context_length_exceeded') ||
       error.message.toLowerCase().includes('maximum context length') ||
-      error.message.toLowerCase().includes('too many tokens'))
+      error.message.toLowerCase().includes('too many tokens') ||
+      error.message.includes('长度超过') ||
+      error.message.includes('超出上限') ||
+      error.message.includes('超过上限'))
   ) {
     // Content stays generic (UI matches on exact string). The raw error with
     // token counts goes into errorDetails — reactive compact's retry loop

@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-05 三分支 API 容错全覆盖与步骤重试可见性（2.1.295，App 0.2.126）
+
+1. 遇到问题：App 0.2.125 实测复报工作流 agent 空转（glm 进程内步骤 235s 零消息，活性行停在「等待模型响应 150s」）；用户同时指出 0.2.125 的 4xx 修复只覆盖 openai 一条路径——而 CLI 有 anthropic/openai/responses 三种格式、用户 GLM 与 Kimi 实际都是 anthropic 格式（「GLM 走 openai 分支」是早期调研的无实证假设）。取证：requestFetch 经 buildFetch 无条件注入 Anthropic SDK、openaiCompat/responsesCompat 直用——三分支 gap/超时覆盖都全，235s=180s gap 触发后重试第二轮再停滞（机制有效但不可见）；真缺口：responsesCompat 非 transient 4xx 抛普通 Error（isClientError 不识别、图片剥图重试不触发）、共享 PTL 判定无中文关键词（anthropic 分支中文长度 400 不归一）、runAgent 静默丢弃 system/api_error 重试事件（步骤重试期间零反馈=空转观感）。
+2. 解决方法：responsesCompat 非瞬态 4xx 抛原生状态 APIError（openaiCompat 同款）；errors.ts 共享 PTL 判定补「长度超过/超出上限/超过上限」（三分支中文长度 400 统一归一）+ responsesCompat 自身列表同步；runAgent 对 system/api_error 仅 yield 不落 sidechain（重试事件透传）；引擎活性 ticker——firstMessageAt 排除 system 帧、文案追加「· 网络重试第 N 轮」（**保留「等待模型响应」前缀契约**，verify-workflow-cli 按 includes 匹配，整句替换假红）。验证：三分支×{reject/reject-unknown/corrupt} 九场景（bundled exe；reject-unknown 判别性场景旧 exe responses 分支判死、新 exe 剥图重试成功）+ anthropic-ptl 中文归一 + agent-resume/compact 回归 + verify-workflow-cli 0 失败（含 gap 停滞/活性/重试轮次）。
+3. 代码位置：src/services/api/responsesCompat.ts（4xx APIError 化+中文 PTL）、src/services/api/errors.ts（共享 PTL 中文）、src/tools/AgentTool/runAgent.ts（api_error 透传）、src/tools/WorkflowTool/engine.ts（重试可见 ticker）；复现脚本 test/image-400-{anthropic,responses}-{repro.sh,mock.ts}、test/one-shot-driver.ts（API_PROVIDER 参数化）。编译基线为本轮 feature/usage-artifact-and-image-resilience 增量源码（2.1.295）。
+
 ## 2026-10-05 网关 usage 虚报守卫、图片容器校验与代理续跑（2.1.294，App 0.2.125）
 
 1. 遇到问题：glm-5.3-flash[1m] 会话（App 实测取证 83734af8）几轮就假触发自动压缩「压缩前 1.31M tokens」——jsonl 逐帧证明 GLM 网关对主线 usage 偶发 2x/4x 虚报（611553≈2×305280、1306312≈4×319269），tokenCountWithEstimation 采信虚报值越阈值；工作流步骤 Read 经 PowerShell `>` 重定向破坏的截图 PNG，发布 exe 里 sharp/image-processor-napi 恒 external 不加载、resize 失败兜底裸透传原文 bytes，GLM 400 [1210] 中文报文又不匹配 isImageUnsupportedError 英文关键词、openaiCompat 非瞬态 400 抛普通 Error（非 APIError）令 claude.ts 剥图重试与一切分类失效，回合死、工作流首败即停 64 分钟全损。

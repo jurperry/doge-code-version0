@@ -840,6 +840,17 @@ export async function* runAgent({
         continue
       }
 
+      // withRetry 的重试事件（system/api_error）不落 sidechain 但必须透传：
+      // 步骤级「网络重试中」可见性靠它——此前被 isRecordableMessage 静默
+      // 丢弃，步骤重试期间面板零反馈＝「空转」观感的直接来源（0.2.126）
+      if (
+        message.type === 'system' &&
+        (message as { subtype?: string }).subtype === 'api_error'
+      ) {
+        yield message
+        continue
+      }
+
       if (isRecordableMessage(message)) {
         // Record only the new message with correct parent (O(1) per message)
         await recordSidechainTranscript(

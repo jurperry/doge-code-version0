@@ -46,6 +46,15 @@ Bun.serve({
     }
 
     if (isSubagent && seq === 2) {
+      // RETRY=1：瞬时 500（TRANSIENT_UPSTREAM_PATTERN 命中→503 可重试），
+      // 用于验证 system/api_error 重试事件经 runAgent 透传（0.2.26 前被丢弃）
+      if (process.env.RETRY === '1') {
+        log({ seq, kind: 'subagent-500' })
+        return new Response(
+          JSON.stringify({ error: { code: '500', message: 'upstream request failed (transient)' } }),
+          { status: 500, headers: { 'content-type': 'application/json' } },
+        )
+      }
       log({ seq, kind: 'subagent-400' })
       return new Response(
         JSON.stringify({ error: { code: '400', message: 'invalid_request: boom (simulated terminal failure)' } }),
