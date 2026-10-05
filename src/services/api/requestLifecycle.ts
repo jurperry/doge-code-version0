@@ -1,6 +1,11 @@
 import { APIConnectionError, APIConnectionTimeoutError, APIUserAbortError } from '@anthropic-ai/sdk'
 
 const DEFAULT_TIMEOUT_MS = 90_000
+/** A keep-alive-only SSE stream is a stall in disguise: comment frames renew
+ * the idle clock forever while the request never makes progress. The event
+ * gap bounds how long comment-only traffic may continue without a single
+ * real event frame before the request is aborted (then retried upstream). */
+const DEFAULT_EVENT_GAP_MS = 180_000
 export function validateModelEndpoint(input: Parameters<typeof fetch>[0]): void {
   let endpoint: URL
   try { endpoint = new URL(input instanceof Request ? input.url : String(input)) }
@@ -12,10 +17,28 @@ export function validatedTimeout(value: string | undefined, fallback = DEFAULT_T
   return value?.trim() && Number.isInteger(parsed) && parsed >= 10 && parsed <= 600_000
     ? parsed : fallback
 }
-export function requestTimeouts(): { headerMs: number; idleMs: number } {
+export function requestTimeouts(): { headerMs: number; idleMs: number; eventGapMs: number } {
   return {
     headerMs: validatedTimeout(process.env.API_TIMEOUT_MS),
     idleMs: validatedTimeout(process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS),
+    eventGapMs: validatedTimeout(process.env.CLAUDE_STREAM_EVENT_GAP_MS, DEFAULT_EVENT_GAP_MS),
+  }
+}
+
+/** Line scanner for SSE framing: true when the chunk completes at least one
+ * non-comment frame (event:/data: lines). Comment (`: ping`) and blank lines
+ * never count. Carries the trailing partial line across chunks. */
+function createEventFrameScanner(): (chunk: Uint8Array) => boolean {
+  const decoder = new TextDecoder()
+  let carry = ''
+  return chunk => {
+    carry += decoder.decode(chunk, { stream: true })
+    const lines = carry.split('\n')
+    carry = lines.pop() ?? ''
+    return lines.some(line => {
+      const trimmed = line.trimStart()
+      return trimmed.startsWith('event:') || trimmed.startsWith('data:')
+    })
   }
 }
 
@@ -24,8 +47,9 @@ export async function requestFetch(
   inner: typeof fetch,
   input: Parameters<typeof fetch>[0],
   init: RequestInit = {},
-  timeouts = requestTimeouts(),
+  partialTimeouts: Partial<{ headerMs: number; idleMs: number; eventGapMs: number }> = requestTimeouts(),
 ): Promise<Response> {
+  const timeouts = { ...requestTimeouts(), ...partialTimeouts }
   validateModelEndpoint(input)
   const controller = new AbortController()
   const parentSignal = init.signal ?? (input instanceof Request ? input.signal : undefined)
@@ -83,13 +107,26 @@ export async function requestFetch(
     const response = await bounded(Promise.resolve().then(() => inner(input, { ...init, headers, ...(method.toUpperCase() === 'POST' ? { keepalive: false } : {}), signal: controller.signal })), timeouts.headerMs, 'Response headers')
     if (!response.body) { cleanup(); return response }
     reader = response.body.getReader()
+    const isEventStream = (response.headers.get('content-type') ?? '').includes('text/event-stream')
+    const scanEventFrame = isEventStream ? createEventFrameScanner() : undefined
+    let lastEventAt = isEventStream ? Date.now() : 0
     const body = new ReadableStream<Uint8Array>({
       async pull(output) {
         if (finished) return
         try {
           const next = await bounded(reader!.read(), timeouts.idleMs, 'Response body idle')
           if (next.done) { cleanup(); reader!.releaseLock(); output.close() }
-          else output.enqueue(next.value)
+          else {
+            if (scanEventFrame) {
+              if (scanEventFrame(next.value)) lastEventAt = Date.now()
+              else if (Date.now() - lastEventAt > timeouts.eventGapMs) {
+                // Only evaluated right after received bytes, never on pull
+                // entry, so consumer-side read delays cannot fire it.
+                throw new APIConnectionTimeoutError({ message: `SSE event gap timeout after ${timeouts.eventGapMs}ms of keep-alive-only stream` })
+              }
+            }
+            output.enqueue(next.value)
+          }
         } catch (error) {
           cancel(); cleanup(); output.error(error)
         }

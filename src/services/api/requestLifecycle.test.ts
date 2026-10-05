@@ -38,6 +38,55 @@ test('heartbeat bytes keep a stream alive until the real payload', async () => {
   expect(await result.text()).toContain(': ping')
 })
 
+test('a ping-only SSE stream is bounded by the event gap instead of renewing idle forever', async () => {
+  const { requestFetch } = await load()
+  let canceled = false
+  let timer: ReturnType<typeof setInterval> | undefined
+  const body = new ReadableStream({ start(controller) {
+    timer = setInterval(() => controller.enqueue(new TextEncoder().encode(': ping\n\n')), 10)
+  }, cancel() { canceled = true; if (timer) clearInterval(timer) } })
+  const result = await requestFetch(
+    (async () => new Response(body, { headers: { 'content-type': 'text/event-stream' } })) as typeof fetch,
+    'http://test', {}, { headerMs: 15, idleMs: 40, eventGapMs: 120 })
+  await expect(result.text()).rejects.toBeInstanceOf(APIConnectionError)
+  expect(canceled).toBe(true)
+  if (timer) clearInterval(timer)
+}, 3000)
+
+test('real SSE event frames reset the gap clock so slow-but-alive streams finish', async () => {
+  const { requestFetch } = await load()
+  const encoder = new TextEncoder()
+  const body = new ReadableStream({ async start(controller) {
+    for (let i = 0; i < 6; i++) {
+      await Bun.sleep(15)
+      controller.enqueue(encoder.encode(': ping\n\n'))
+      controller.enqueue(encoder.encode(`event: message_delta\ndata: {"type":"message_delta"}\n\n`))
+    }
+    controller.close()
+  } })
+  const result = await requestFetch(
+    (async () => new Response(body, { headers: { 'content-type': 'text/event-stream' } })) as typeof fetch,
+    'http://test', {}, { headerMs: 15, idleMs: 60, eventGapMs: 40 })
+  const text = await result.text()
+  expect(text).toContain('message_delta')
+}, 3000)
+
+test('the event gap only applies to text/event-stream responses', async () => {
+  const { requestFetch } = await load()
+  const encoder = new TextEncoder()
+  const body = new ReadableStream({ async start(controller) {
+    for (let i = 0; i < 5; i++) {
+      await Bun.sleep(12)
+      controller.enqueue(encoder.encode(': keep-alive comment bytes\n'))
+    }
+    controller.close()
+  } })
+  const result = await requestFetch(
+    (async () => new Response(body, { headers: { 'content-type': 'application/json' } })) as typeof fetch,
+    'http://test', {}, { headerMs: 15, idleMs: 60, eventGapMs: 30 })
+  expect(await result.text()).toContain('keep-alive')
+}, 3000)
+
 test('user cancellation interrupts a silent body immediately', async () => {
   const { requestFetch } = await load()
   const controller = new AbortController()

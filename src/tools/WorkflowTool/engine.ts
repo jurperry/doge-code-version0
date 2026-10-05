@@ -283,6 +283,19 @@ async function runInProcessStep(opts: {
   })
 
   const agentMessages: Message[] = []
+  const stepStart = Date.now()
+  // Liveness for the task panel: an in-process step emits nothing between
+  // complete messages, so a slow or stalled first model response looks like
+  // the agent never started (subprocess steps get the same visibility from
+  // their stepProgressSummary relays). Tick a waiting line until the first
+  // message arrives, then the normal per-message progress takes over.
+  let firstMessageAt: number | undefined
+  const liveness = setInterval(() => {
+    if (firstMessageAt !== undefined || abortController.signal.aborted) return
+    enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentTaskId, description,
+      summary: `等待模型响应 ${Math.round((Date.now() - stepStart) / 1000)}s`,
+      usage: { total_tokens: 0, tool_uses: 0, duration_ms: Date.now() - stepStart } })
+  }, 10_000)
   let timedOut = false
   const timeout = step.timeoutSec ? setTimeout(() => {
     timedOut = true
@@ -310,6 +323,7 @@ async function runInProcessStep(opts: {
         return (async function* () {
           for await (const message of iterator) {
             agentMessages.push(message)
+            if (firstMessageAt === undefined) firstMessageAt = Date.now()
             yield message
           }
         })()
@@ -337,6 +351,7 @@ async function runInProcessStep(opts: {
       await new Promise(resolve => setTimeout(resolve, 50))
     }
   } finally {
+    clearInterval(liveness)
     if (timeout) clearTimeout(timeout)
     await flushSessionStorage()
     clearAgentTranscriptSubdir(agentTaskId)

@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-05 SSE 心跳空转的请求边界与进程内步骤活性（2.1.293）
+
+1. 遇到问题：App 对话模式跑跨 API 工作流，kimi 步骤完成后进入同 API 进程内步骤（glm-5.3-flash），agent 注册却零工具零 token 空转 350s+，无重试无用量无报错，用户中断才恢复（无痕静默）。排查证据：sidechain 只有初始 user 消息与中断记录、主会话无 network-retry-usage、同进程 1 分钟后请求机件健康——响应头/连接期已有 90s 超时兜底（若是连接挂死必留重试痕），唯一无痕路径是「响应已建立、注释帧（`: ping`）无限续命空闲钟、事件帧永不到达」的请求级无限等待。
+2. 解决方法：requestLifecycle 增加事件间隔上限——text/event-stream 响应逐块扫描 SSE 帧（跨块携带残行；`event:`/`data:` 行为真进度重置时钟，注释/空行不算），keep-alive-only 流超过 `CLAUDE_STREAM_EVENT_GAP_MS`（默认 180s，10–600000 整数校验同款）即抛 APIConnectionTimeoutError 进入既有重试预算；判定只发生在刚收到字节后，消费侧读延迟不误伤；非 event-stream 响应不受影响。engine 进程内步骤加 10s 活性 ticker：首条消息到达前发 task_progress「等待模型响应 Ns」，到达后由常规逐消息进度接管（与子进程步骤 stepProgressSummary 对齐，长首响不再像冻结）。验证：requestLifecycle 9/9（ping-only 旧代码连测试进程都挂死＝失败态实证）；受影响面 107/107；全套按文件隔离见本轮 runner 输出。真实端点沙箱复现（glm/kimi 经本地代理、含 cloudcompare MCP、冷缓存、230s 慢步骤）六组全部正常——触发依赖外部停滞性流，修复以边界兜底而非复现为准。
+3. 代码位置：src/services/api/requestLifecycle.ts（eventGapMs + createEventFrameScanner + pull 内 gap 判定）与 requestLifecycle.test.ts（ping-only 有界/事件帧重置/仅 event-stream 三测）；src/tools/WorkflowTool/engine.ts（runInProcessStep 活性 ticker，firstMessageAt 停表、finally 清理）。CLAUDE_STREAM_EVENT_GAP_MS 与既有 API_TIMEOUT_MS/CLAUDE_STREAM_IDLE_TIMEOUT_MS 同款校验（10–600000ms），文档口径同走 development_logs 不进 AGENTS.md 变量表。编译基线 `59a5f5a73398552bdbfaf5bbcb9b2f7acfe5d797`（2.1.292）加本轮 feature/stream-event-gap 源码。
+
 ## 2026-10-05 MCP 调用回收、实时进度边界与后台交接（2.1.292，App 0.2.123）
 
 1. 遇到问题：MCP 工具默认超时 100,000,000ms，原竞争没有取消请求，挂起时工作流无法回收决策权。跨 API 同步子代理等待事件被父查询阻塞至工具结束；转发活动还可能误归祖先任务。自动后台化在途 next() 被遗弃，return() 一秒后重启 runAgent，重放风险与旧 finally 干扰并存；后台 hook allow 执行门和迟到摘要清理有漏洞。workflow slash 请求回显被壳当提示，失败校验前未落盘需求。
