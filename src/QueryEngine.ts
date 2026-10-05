@@ -347,7 +347,13 @@ export class QueryEngine {
       // slash-command processing) keeps the no-op — nothing else calls
       // setMessages past that point.
       setMessages: fn => {
-        this.mutableMessages = fn(this.mutableMessages)
+        const updated = fn(this.mutableMessages)
+        // print.ts and detached local commands share this array. Replacing
+        // it would drop command requests/feedback from the next model turn.
+        if (updated !== this.mutableMessages) {
+          this.mutableMessages.length = 0
+          for (const message of updated) this.mutableMessages.push(message)
+        }
       },
       onChangeAPIKey: () => {},
       handleElicitation: this.config.handleElicitation,

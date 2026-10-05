@@ -20,6 +20,7 @@ import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
 import { emitTaskProgress } from '../../utils/task/sdkProgress.js';
 import { emitTaskTerminatedSdk } from '../../utils/sdkEventQueue.js';
+import { AgentUsageTracker } from '../../utils/agentUsage.js';
 import type { TaskState } from '../types.js';
 export type ToolActivity = {
   toolName: string;
@@ -41,23 +42,20 @@ export type AgentProgress = {
 const MAX_RECENT_ACTIVITIES = 5;
 export type ProgressTracker = {
   toolUseCount: number;
-  // Track input and output separately to avoid double-counting.
-  // input_tokens in Claude API is cumulative per turn (includes all previous context),
-  // so we keep the latest value. output_tokens is per-turn, so we sum those.
-  latestInputTokens: number;
-  cumulativeOutputTokens: number;
+  usage: AgentUsageTracker;
+  toolUseIds: Set<string>;
   recentActivities: ToolActivity[];
 };
 export function createProgressTracker(): ProgressTracker {
   return {
     toolUseCount: 0,
-    latestInputTokens: 0,
-    cumulativeOutputTokens: 0,
+    usage: new AgentUsageTracker(),
+    toolUseIds: new Set(),
     recentActivities: []
   };
 }
 export function getTokenCountFromTracker(tracker: ProgressTracker): number {
-  return tracker.latestInputTokens + tracker.cumulativeOutputTokens;
+  return tracker.usage.totalTokens();
 }
 
 /**
@@ -70,12 +68,11 @@ export function updateProgressFromMessage(tracker: ProgressTracker, message: Mes
   if (message.type !== 'assistant') {
     return;
   }
-  const usage = message.message.usage;
-  // Keep latest input (it's cumulative in the API), sum outputs
-  tracker.latestInputTokens = usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
-  tracker.cumulativeOutputTokens += usage.output_tokens;
+  tracker.usage.observe(message);
   for (const content of message.message.content) {
     if (content.type === 'tool_use') {
+      if (tracker.toolUseIds.has(content.id)) continue;
+      tracker.toolUseIds.add(content.id);
       tracker.toolUseCount++;
       // Omit StructuredOutput from preview - it's an internal tool
       if (content.name !== SYNTHETIC_OUTPUT_TOOL_NAME) {

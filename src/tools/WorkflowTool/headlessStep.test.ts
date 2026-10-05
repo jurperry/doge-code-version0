@@ -27,7 +27,7 @@ beforeAll(async () => {
 afterAll(() => {
   if (previousExecutable === undefined) delete process.env.DOGE_WORKFLOW_EXECUTABLE
   else process.env.DOGE_WORKFLOW_EXECUTABLE = previousExecutable
-  rmSync(sandbox, { recursive: true, force: true })
+  rmSync(sandbox, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 const run = (prompt: string, controller = new AbortController(), timeoutSec?: number) => spawnHeadlessStep({ prompt, model: 'p-small', profile,
   cwd: sandbox, signal: controller.signal, permissionMode: 'default', timeoutSec, onMessage: async () => {} })

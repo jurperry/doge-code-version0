@@ -4,6 +4,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { modelProfileEnvPatch, type ModelProfile } from '../../utils/customApiStorage.js'
 import { errorMessage } from '../../utils/errors.js'
 import { killPosixProcessTree } from '../../utils/processTree.js'
+import { AgentUsageTracker } from '../../utils/agentUsage.js'
 
 export interface StepOutcome {
   status: 'completed' | 'failed' | 'stopped'
@@ -42,7 +43,7 @@ export function spawnHeadlessStep(opts: {
     // Sending long prompts on stdin avoids Windows' 32KB command-line limit.
     // The parent records these messages as a sidechain, so the child must not
     // create an independent conversation that appears in /resume or the sidebar.
-    const args = ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence',
+    const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--no-session-persistence',
       '--model', model, '--permission-mode', permissionMode,
       ...(agent ? ['--agent', agent] : [])]
     const env = { ...process.env } as Record<string, string>
@@ -63,21 +64,19 @@ export function spawnHeadlessStep(opts: {
       return
     }
     let buffer = '', stderr = '', resultText = '', resultSeen = false, isError = false, timedOut = false
-    let tokens: number | undefined
+    const usage = new AgentUsageTracker()
     let records = Promise.resolve()
     let recordError: string | undefined
     const decoder = new StringDecoder('utf8')
     const consume = (line: string) => {
       let message: Record<string, any>
       try { message = JSON.parse(line) } catch { return }
+      usage.observe(message as Parameters<AgentUsageTracker['observe']>[0])
       if (message.type === 'result') {
         resultSeen = true
         resultText = typeof message.result === 'string' ? message.result : ''
         isError = message.is_error === true || (message.subtype && message.subtype !== 'success')
         if (isError && !resultText && Array.isArray(message.errors)) resultText = message.errors.join('\n')
-        const usage = message.usage
-        if (usage) tokens = usage.total_tokens ?? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0)
-          + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0)
       }
       records = records.then(() => onMessage(message)).catch(err => { recordError ??= errorMessage(err) })
     }
@@ -119,7 +118,7 @@ export function spawnHeadlessStep(opts: {
       if (buffer.trim()) consume(buffer)
       await killing
       await records
-      const outcome = (status: StepOutcome['status'], error?: string) => resolve({ status, output: resultText, error, tokens })
+      const outcome = (status: StepOutcome['status'], error?: string) => resolve({ status, output: resultText, error, tokens: usage.totalTokens() })
       if (signal.aborted) return outcome('stopped', '步骤被用户停止')
       if (timedOut) return outcome('failed', `步骤超时（> ${timeoutSec}s）`)
       if (spawnError) return outcome('failed', `子进程错误：${spawnError}`)

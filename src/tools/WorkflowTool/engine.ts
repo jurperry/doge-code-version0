@@ -47,9 +47,11 @@ import { errorMessage } from '../../utils/errors.js'
 import { extractResultText } from '../../utils/forkedAgent.js'
 import { getAgentModel } from '../../utils/model/agent.js'
 import { createUserMessage, SYNTHETIC_MODEL } from '../../utils/messages.js'
-import { recordTranscript, recordSidechainTranscript, flushSessionStorage, setAgentTranscriptSubdir, clearAgentTranscriptSubdir, removeTranscriptMessage, recordNetworkRetryUsage } from '../../utils/sessionStorage.js'
+import { recordSidechainTranscript, flushSessionStorage, setAgentTranscriptSubdir, clearAgentTranscriptSubdir, removeTranscriptMessage, recordNetworkRetryUsage } from '../../utils/sessionStorage.js'
 import { spawnHeadlessStep, profileStepModel, type StepOutcome } from './headlessStep.js'
 import { StepTranscriptChain, StepTranscriptRelay } from './stepTranscript.js'
+import { AgentUsageTracker } from '../../utils/agentUsage.js'
+import { appendWorkflowTranscript } from './workflowTranscript.js'
 import {
   emitTaskTerminatedSdk,
   enqueueSdkEvent,
@@ -381,6 +383,7 @@ export async function runSubprocessStep(opts: {
   const transcriptIds = new Set<string>([agentId])
   const relay = new StepTranscriptRelay(agentId, spec.name)
   const ids = new Set<string>()
+  const usage = new AgentUsageTracker()
   let outcome: StepOutcome
   try {
     await recordSidechainTranscript([initial], agentId)
@@ -388,6 +391,7 @@ export async function runSubprocessStep(opts: {
       permissionMode: context.getAppState().toolPermissionContext.mode,
       cwd: process.cwd(), signal: registration.abortController!.signal, timeoutSec: step.timeoutSec,
       onMessage: async wire => {
+        usage.observe(wire as Parameters<AgentUsageTracker['observe']>[0])
         if (wire.type === 'system' && wire.subtype === 'network_retry_usage') {
           await recordNetworkRetryUsage(wire.model, wire.usage, wire.source)
         }
@@ -405,13 +409,14 @@ export async function runSubprocessStep(opts: {
           await recordSidechainTranscript([record.message], record.agentId, chain.parent(record.agentId))
           chain.append(record.agentId, record.message.uuid)
         }
-        if (wire.type === 'assistant' && !wire.parent_tool_use_id) {
+        const usageDelta = wire.type === 'stream_event' && wire.event?.type === 'message_delta'
+        if ((wire.type === 'assistant' || usageDelta) && !wire.parent_tool_use_id) {
           for (const block of wire.message?.content ?? []) if (block.type === 'tool_use' && !ids.has(block.id)) { ids.add(block.id); toolUses++ }
           enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentId, description,
             summary: stepProgressSummary(JSON.stringify(wire)),
             model: wire.message?.model === SYNTHETIC_MODEL ? undefined : wire.message?.model,
             last_tool_name: wire.message?.content?.filter(b => b.type === 'tool_use').at(-1)?.name,
-            usage: { total_tokens: 0, tool_uses: toolUses, duration_ms: Date.now() - startedAt } })
+            usage: { total_tokens: usage.totalTokens(), tool_uses: toolUses, duration_ms: Date.now() - startedAt } })
         }
       },
     })
@@ -440,8 +445,7 @@ async function feedbackStep(context: LocalJSXCommandContext, workflowName: strin
   enqueueSdkEvent({ type: 'system', subtype: 'workflow_step_feedback', task_id: taskId,
     workflow_name: workflowName, step_id: step.id, status: outcome.status, summary })
   const message = createUserMessage({ content: '<local-command-stdout>' + summary + '</local-command-stdout>', isVisibleInTranscriptOnly: true })
-  context.setMessages(prev => [...prev, message])
-  await recordTranscript([message])
+  await appendWorkflowTranscript(context, message)
 }
 
 /**

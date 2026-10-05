@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-05 工作流进度用量与主会话转录一致性（2.1.287，App 0.2.118）
+
+1. 遇到问题：跨 API 进度取 result 的多轮累计输入，同 API 末跳 usage mutation 漏读且拆块输出重复计；旧 assistant 快照可覆盖新 SSE delta。工作流只有命令噪音，壳侧运行任务未索引；孤立请求/反馈断父链，固定工作流父 UUID 又绕过后台期间普通问答。QueryEngine setMessages 重新赋数组令 print.ts 继续持有旧历史。
+2. 解决方法：AgentUsageTracker 共享最新可信输入（含缓存）＋响应 ID 去重输出的进度口径，最终 delta 优先，保存同进程消息引用读取 GLM 延迟用量；子进程开 partial messages 并实时发用量，独立永久账单不改。启动前保存原 /name args 意图并 flush；appendWorkflowTranscript 捕获同步 setter 最新完整历史，请求与反馈单点追加；QueryEngine 保留共享数组身份。独立审查闭环；86/86 文件、681 单测通过，App 安装版工作流 31/31、安装 CLI 43/43 含真实 120 秒后台交接，--version=2.1.287。测试 exe 清理 EACCES 补有限重试，最终全套绿。
+3. 代码位置：src/utils/agentUsage.ts 与单测、src/tasks/LocalAgentTask/LocalAgentTask.tsx、src/tools/WorkflowTool/{headlessStep,engine,createWorkflowCommand,workflowTranscript}.ts 与转录/transport 单测、src/QueryEngine.ts。编译基线 `a114697138e4107a532a7650cfac07a48865d26e` 加本轮 feature/workflow-status-usage 源码；最终源码 commit 见本条 2.1.287 对应 git log 及 App 验收记录。构建 CLI SHA256=09F426C9B4B923A3EEFA4EBA286C883841DA739ED7AA92285B25DB7295DE20A4，安装副本一致。用户已授权两仓提交、合并 main、删除已合并分支；最终 CLI commit 记录在 App 本轮提交说明。验收及收尾状态见 App docs/workflow-status-usage-validation-2026-10-05.md。
+
 ## 一、API 兼容与上下文
 
 ### 65. 三协议网络恢复、十轮预算与工具安全续接（2.1.277，2026-10-02）

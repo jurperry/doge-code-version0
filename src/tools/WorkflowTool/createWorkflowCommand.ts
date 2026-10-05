@@ -119,6 +119,14 @@ function workflowToCommand(spec: WorkflowSpec): Command {
         if (runErrors.length > 0) {
           return { type: 'text', value: `无法启动：\n- ${runErrors.join('\n- ')}` }
         }
+        // Local-command wrappers are index noise. Save the real user intent
+        // before the detached steps start, without sending it to the main model.
+        const { createUserMessage } = await import('../../utils/messages.js')
+        const { flushSessionStorage } = await import('../../utils/sessionStorage.js')
+        const { appendWorkflowTranscript } = await import('./workflowTranscript.js')
+        const request = createUserMessage({ content: `/${fresh.name}${args ? ` ${args}` : ''}`, isVisibleInTranscriptOnly: true })
+        await appendWorkflowTranscript(context, request)
+        await flushSessionStorage()
         startWorkflowTask({
           spec: fresh,
           argsString: args,
