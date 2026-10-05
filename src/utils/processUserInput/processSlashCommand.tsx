@@ -779,7 +779,8 @@ async function getMessagesForSlashCommand(commandName: string, args: string, set
   }
 }
 function formatCommandInput(command: CommandBase, args: string): string {
-  return formatCommandInputTags(getCommandName(command), args);
+  const source = 'kind' in command && command.kind === 'workflow' ? '\n<command-source>workflow</command-source>' : '';
+  return formatCommandInputTags(getCommandName(command), args) + source;
 }
 
 /**

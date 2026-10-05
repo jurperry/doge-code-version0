@@ -1663,6 +1663,7 @@ export const SDKHookResponseMessageSchema = lazySchema(() =>
 export const SDKToolProgressMessageSchema = lazySchema(() =>
   z.object({
     type: z.literal('tool_progress'),
+    progress_message: z.string().optional(),
     tool_use_id: z.string(),
     tool_name: z.string(),
     parent_tool_use_id: z.string().nullable(),

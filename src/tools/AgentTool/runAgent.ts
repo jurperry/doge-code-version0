@@ -253,6 +253,7 @@ export async function* runAgent({
   toolUseContext,
   canUseTool,
   isAsync,
+  isBackgrounded,
   canShowPermissionPrompts,
   allowNestedAgents,
   forkContextMessages,
@@ -276,6 +277,8 @@ export async function* runAgent({
   toolUseContext: ToolUseContext
   canUseTool: CanUseToolFn
   isAsync: boolean
+  /** A foreground iterator may transfer ownership without restarting its query. */
+  isBackgrounded?: () => boolean
   /** Whether this agent can show permission prompts. Defaults to !isAsync.
    * Set to true for in-process teammates that run async but share the terminal. */
   canShowPermissionPrompts?: boolean
@@ -449,7 +452,7 @@ export async function* runAgent({
         ? !canShowPermissionPrompts
         : agentPermissionMode === 'bubble'
           ? false
-          : isAsync
+          : isAsync || !!isBackgrounded?.()
     if (shouldAvoidPrompts) {
       toolPermissionContext = {
         ...toolPermissionContext,
@@ -462,7 +465,7 @@ export async function* runAgent({
     // Since these are background agents, waiting is fine — the user should
     // only be interrupted when automated checks can't resolve the permission.
     // This applies to bubble mode (always) and explicit canShowPermissionPrompts.
-    if (isAsync && !shouldAvoidPrompts) {
+    if ((isAsync || isBackgrounded?.()) && !shouldAvoidPrompts) {
       toolPermissionContext = {
         ...toolPermissionContext,
         awaitAutomatedChecksBeforeDialog: true,
@@ -714,12 +717,43 @@ export async function* runAgent({
     abortController: agentAbortController,
     getAppState: agentGetAppState,
     // Sync agents share these callbacks with parent
-    shareSetAppState: !isAsync,
+    // Transferable agents own denial tracking from startup; their stable setter
+    // below forwards foreground updates and isolates them after handover.
+    shareSetAppState: !isAsync && !isBackgrounded,
     shareSetResponseLength: true, // Both sync and async contribute to response metrics
     criticalSystemReminder_EXPERIMENTAL:
       agentDefinition.criticalSystemReminder_EXPERIMENTAL,
     contentReplacementState,
   })
+  if (isBackgrounded && !isAsync) {
+    // PreToolUse hook allow must still pass the dynamic background execution gate.
+    agentToolUseContext.requireCanUseTool = isBackgrounded
+    agentToolUseContext.setAppState = update => {
+      if (!isBackgrounded()) toolUseContext.setAppState(update)
+    }
+  }
+  const backgroundTools = useExactTools ? allTools : uniqBy([
+    ...resolveAgentTools(agentDefinition, availableTools, true, false, allowNestedAgents).resolvedTools,
+    ...agentMcpTools,
+  ], 'name')
+  const currentTools = () => isBackgrounded?.() ? backgroundTools : allTools
+  if (isBackgrounded) {
+    // query invokes this method on its current options at each tool boundary.
+    // Also gate permission checks: an in-flight response can cross the transfer.
+    agentOptions.refreshTools = function () {
+      if (!useExactTools && isBackgrounded()) this.isNonInteractiveSession = true
+      return currentTools()
+    }
+  }
+  const agentCanUseTool: CanUseToolFn = async (tool, input, context, message, toolUseId, decision) => {
+    if (isBackgrounded?.()) {
+      if (!useExactTools) context.options.isNonInteractiveSession = true
+      if (!currentTools().some(candidate => candidate.name === tool.name)) {
+        return { behavior: 'deny', message: `Tool ${tool.name} is unavailable after this agent moved to background.` }
+      }
+    }
+    return canUseTool(tool, input, context, message, toolUseId, decision)
+  }
 
   // Preserve tool use results for subagents with viewable transcripts (in-process teammates)
   if (preserveToolUseResults) {
@@ -766,7 +800,7 @@ export async function* runAgent({
       systemPrompt: agentSystemPrompt,
       userContext: resolvedUserContext,
       systemContext: resolvedSystemContext,
-      canUseTool,
+      canUseTool: isBackgrounded ? agentCanUseTool : canUseTool,
       toolUseContext: agentToolUseContext,
       querySource,
       maxTurns: maxTurns ?? agentDefinition.maxTurns,

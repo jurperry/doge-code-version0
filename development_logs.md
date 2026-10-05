@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-05 MCP 调用回收、实时进度边界与后台交接（2.1.292，App 0.2.123）
+
+1. 遇到问题：MCP 工具默认超时 100,000,000ms，原竞争没有取消请求，挂起时工作流无法回收决策权。跨 API 同步子代理等待事件被父查询阻塞至工具结束；转发活动还可能误归祖先任务。自动后台化在途 next() 被遗弃，return() 一秒后重启 runAgent，重放风险与旧 finally 干扰并存；后台 hook allow 执行门和迟到摘要清理有漏洞。workflow slash 请求回显被壳当提示，失败校验前未落盘需求。
+2. 解决方法：每请求生命周期独立 idle/total/AbortController，默认 120s/600s，30s 等待，SDK 无视取消仍本地及时结算；工具错误说明远端结果未知，不盲重试副作用。MCP 进度接真实 task 事件及同步 Agent 的 onProgress，父查询及时 yield 排空；共享直接/转发身份映射保留 parent_tool_use_id，仅实际工具所属任务记活动。后台接管同一迭代器、在途结果与 controller，动态权限/状态/工具池，hook allow 经稳定动态执行门，迟到摘要由后台 finally 回收。canonical workflow-request 在校验前保存并标记机器回显。全套按文件隔离 91/91、705/705；独立复审 18 测试/51 断言通过。安装 CLI MCP 20/20 含真实 120s 交接与 Bash 文件仅写一次，工作流 43/43；App 严格周期 UI 50/50与切换17/17，完整回归/数据恢复见 App 验收文档。
+3. 代码位置：src/services/mcp/{client,toolCallLifecycle}.ts 与单测、src/tools/AgentTool/{AgentTool,agentHandover,mcpProgress,agentToolUtils,runAgent}、src/services/tools/toolHooks.ts 与后台门单测、src/Tool.ts、src/tasks/LocalAgentTask/LocalAgentTask.tsx、src/utils/{queryHelpers,processUserInput/processSlashCommand}、src/entrypoints/sdk/coreSchemas.ts、src/tools/WorkflowTool/{engine,createWorkflowCommand}.ts。App tools/verify-workflow-mcp.mjs 比较收件与服务 cancel 时刻（至少早 500ms）并拒绝父任务污染；35s UI 预算实测 30s 周期提示。编译基线 `f687d882e368b5a595c12f0e2c371e00c070ce9d` 加本轮 feature/workflow-session-reliability 源码，产物 SHA256=`71C4B2C31DA1E2591ACC131594A89312F6D238DDE054E3CFECCACEB0BED598E7`，安装副本一致。用户已批准提交、合并及删除已合并分支；本次提交对应已验收的 CLI 2.1.292 源码，实际 CLI commit 将记录于 App 提交说明。App 完整对话回归 262/262；原配置已恢复，受策略阻止的 test/ 清理由用户自行完成。验收见 App docs/workflow-session-reliability-validation-2026-10-05.md。
+
 ## 2026-10-05 工作流进度用量与主会话转录一致性（2.1.287，App 0.2.118）
 
 1. 遇到问题：跨 API 进度取 result 的多轮累计输入，同 API 末跳 usage mutation 漏读且拆块输出重复计；旧 assistant 快照可覆盖新 SSE delta。工作流只有命令噪音，壳侧运行任务未索引；孤立请求/反馈断父链，固定工作流父 UUID 又绕过后台期间普通问答。QueryEngine setMessages 重新赋数组令 print.ts 继续持有旧历史。

@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { mcpProgressParentToolUseId, mcpProgressSummary } from './mcpProgress.js'
 import { z } from 'zod/v4'
 import { clearInvokedSkillsForAgent } from '../../bootstrap/state.js'
 import {
@@ -379,6 +380,7 @@ export function emitTaskProgress(
   description: string,
   startTime: number,
   lastToolName: string,
+  summary?: string,
 ): void {
   const progress = getProgressUpdate(tracker)
   emitTaskProgressEvent({
@@ -389,7 +391,19 @@ export function emitTaskProgress(
     totalTokens: progress.tokenCount,
     toolUses: progress.toolUseCount,
     lastToolName,
+    summary,
   })
+}
+
+/** Both foreground and background agents relay activity under their own task. */
+export function emitMcpTaskProgress(
+  message: MessageType, tracker: ProgressTracker, taskId: string,
+  toolUseId: string | undefined, description: string, startTime: number,
+): boolean {
+  const activity = mcpProgressSummary(message)
+  if (!activity || mcpProgressParentToolUseId(message)) return false
+  emitTaskProgress(tracker, taskId, toolUseId, description, startTime, activity.toolName, activity.summary)
+  return true
 }
 
 export async function classifyHandoffIfNeeded({
@@ -588,7 +602,8 @@ export async function runAsyncAgentLifecycle({
         rootSetAppState,
       )
       const lastToolName = getLastToolUseName(message)
-      if (lastToolName) {
+      const mcpEmitted = emitMcpTaskProgress(message, tracker, taskId, toolUseContext.toolUseId, description, metadata.startTime)
+      if (!mcpEmitted && lastToolName) {
         emitTaskProgress(
           tracker,
           taskId,

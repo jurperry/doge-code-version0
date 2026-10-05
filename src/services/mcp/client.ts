@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { runMcpToolCall, mcpToolCallLimits } from './toolCallLifecycle.js'
 import type {
   Base64ImageSource,
   ContentBlockParam,
@@ -206,27 +207,11 @@ export function isMcpSessionExpiredError(error: Error): boolean {
 }
 
 /**
- * Default timeout for MCP tool calls (effectively infinite - ~27.8 hours).
- */
-const DEFAULT_MCP_TOOL_TIMEOUT_MS = 100_000_000
-
-/**
  * Cap on MCP tool descriptions and server instructions sent to the model.
  * OpenAPI-generated MCP servers have been observed dumping 15-60KB of endpoint
  * docs into tool.description; this caps the p95 tail without losing the intent.
  */
 const MAX_MCP_DESCRIPTION_LENGTH = 2048
-
-/**
- * Gets the timeout for MCP tool calls in milliseconds.
- * Uses MCP_TOOL_TIMEOUT environment variable if set, otherwise defaults to ~27.8 hours.
- */
-function getMcpToolTimeoutMs(): number {
-  return (
-    parseInt(process.env.MCP_TOOL_TIMEOUT || '', 10) ||
-    DEFAULT_MCP_TOOL_TIMEOUT_MS
-  )
-}
 
 import { isClaudeInChromeMCPServer } from '../../utils/claudeInChrome/common.js'
 
@@ -3040,50 +3025,14 @@ async function callMCPTool({
   structuredContent?: Record<string, unknown>
 }> {
   const toolStartTime = Date.now()
-  let progressInterval: NodeJS.Timeout | undefined
 
   try {
     logMCPDebug(name, `Calling MCP tool: ${tool}`)
 
-    // Set up progress logging for long-running tools (every 30 seconds)
-    progressInterval = setInterval(
-      (startTime, name, tool) => {
-        const elapsed = Date.now() - startTime
-        const elapsedSeconds = Math.floor(elapsed / 1000)
-        const duration = `${elapsedSeconds}s`
-        logMCPDebug(name, `Tool '${tool}' still running (${duration} elapsed)`)
-      },
-      30000, // Log every 30 seconds
-      toolStartTime,
-      name,
-      tool,
-    )
-
-    // Use Promise.race with our own timeout to handle cases where SDK's
-    // internal timeout doesn't work (e.g., SSE stream breaks mid-request)
-    const timeoutMs = getMcpToolTimeoutMs()
-    let timeoutId: NodeJS.Timeout | undefined
-
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(
-        (reject, name, tool, timeoutMs) => {
-          reject(
-            new TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS(
-              `MCP server "${name}" tool "${tool}" timed out after ${Math.floor(timeoutMs / 1000)}s`,
-              'MCP tool timeout',
-            ),
-          )
-        },
-        timeoutMs,
-        reject,
-        name,
-        tool,
-        timeoutMs,
-      )
-    })
-
-    const result = await Promise.race([
-      client.callTool(
+    const limits = mcpToolCallLimits()
+    const result = await runMcpToolCall({
+      signal, serverName: name, toolName: tool, limits,
+      invoke: (requestSignal, progress) => client.callTool(
         {
           name: tool,
           arguments: args,
@@ -3091,28 +3040,22 @@ async function callMCPTool({
         },
         CallToolResultSchema,
         {
-          signal,
-          timeout: timeoutMs,
-          onprogress: onProgress
-            ? sdkProgress => {
-                onProgress({
-                  type: 'mcp_progress',
-                  status: 'progress',
-                  serverName: name,
-                  toolName: tool,
-                  progress: sdkProgress.progress,
-                  total: sdkProgress.total,
-                  progressMessage: sdkProgress.message,
-                })
-              }
-            : undefined,
+          signal: requestSignal,
+          // Our guard owns idle renewal and the hard cap; SDK cancellation
+          // disposes its pending request and sends notifications/cancelled.
+          timeout: limits.totalMs,
+          onprogress: progress,
         },
       ),
-      timeoutPromise,
-    ]).finally(() => {
-      if (timeoutId) {
-        clearTimeout(timeoutId)
-      }
+      onProgress: progress => onProgress?.({ type: 'mcp_progress', status: 'progress',
+        serverName: name, toolName: tool, progress: progress.progress, total: progress.total,
+        progressMessage: `MCP ${name} · ${tool}：${progress.message || `${progress.progress}${progress.total ? '/' + progress.total : ''}`}` }),
+      onWait: wait => {
+        logMCPDebug(name, `Tool '${tool}' waiting (${Math.floor(wait.elapsedMs / 1000)}s elapsed, ${Math.floor(wait.idleMs / 1000)}s without advancing progress)`)
+        onProgress?.({ type: 'mcp_progress', status: 'progress', serverName: name, toolName: tool,
+          elapsedTimeMs: wait.elapsedMs,
+          progressMessage: `等待 MCP ${name} · ${tool} 返回结果 · ${Math.floor(wait.elapsedMs / 1000)}s（无新进展 ${Math.floor(wait.idleMs / 1000)}s）` })
+      },
     })
 
     if ('isError' in result && result.isError) {
@@ -3171,11 +3114,6 @@ async function callMCPTool({
         | undefined,
     }
   } catch (e) {
-    // Clear intervals on error
-    if (progressInterval !== undefined) {
-      clearInterval(progressInterval)
-    }
-
     const elapsed = Date.now() - toolStartTime
 
     if (e instanceof Error && e.name !== 'AbortError') {
@@ -3230,11 +3168,6 @@ async function callMCPTool({
       throw e
     }
     return { content: undefined }
-  } finally {
-    // Always clear intervals
-    if (progressInterval !== undefined) {
-      clearInterval(progressInterval)
-    }
   }
 }
 

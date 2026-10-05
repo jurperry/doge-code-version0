@@ -1,4 +1,5 @@
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
+import { mcpProgressParentToolUseId, mcpProgressSummary } from '../tools/AgentTool/mcpProgress.js'
 import last from 'lodash-es/last.js'
 import {
   getSessionId,
@@ -118,7 +119,13 @@ export function* normalizeMessage(message: Message): Generator<SDKMessage> {
       }
       return
     case 'progress':
-      if (
+      if (message.data.type === 'mcp_progress') {
+        const activity = mcpProgressSummary(message)
+        if (activity) yield { type: 'tool_progress', tool_use_id: message.toolUseID,
+          tool_name: activity.toolName, parent_tool_use_id: mcpProgressParentToolUseId(message),
+          elapsed_time_seconds: (message.data.elapsedTimeMs ?? 0) / 1000,
+          progress_message: activity.summary, session_id: getSessionId(), uuid: message.uuid }
+      } else if (
         message.data.type === 'agent_progress' ||
         message.data.type === 'skill_progress'
       ) {

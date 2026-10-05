@@ -29,6 +29,7 @@
  */
 
 import { createChildAbortController } from '../../utils/abortController.js'
+import { mcpProgressSummary } from '../AgentTool/mcpProgress.js'
 import { createTaskStateBase, generateTaskId } from '../../Task.js'
 import {
   isLocalAgentTask,
@@ -410,6 +411,12 @@ export async function runSubprocessStep(opts: {
           chain.append(record.agentId, record.message.uuid)
         }
         const usageDelta = wire.type === 'stream_event' && wire.event?.type === 'message_delta'
+        const mcpActivity = mcpProgressSummary(wire)
+        if (mcpActivity && !wire.parent_tool_use_id) {
+          enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentId, description,
+            summary: mcpActivity.summary, last_tool_name: mcpActivity.toolName,
+            usage: { total_tokens: usage.totalTokens(), tool_uses: toolUses, duration_ms: Date.now() - startedAt } })
+        }
         if ((wire.type === 'assistant' || usageDelta) && !wire.parent_tool_use_id) {
           for (const block of wire.message?.content ?? []) if (block.type === 'tool_use' && !ids.has(block.id)) { ids.add(block.id); toolUses++ }
           enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentId, description,

@@ -248,7 +248,7 @@ export type ToolUseContext = {
   agentType?: string // Subagent type name. For the main thread's --agent type, hooks fall back to getMainThreadAgentType().
   /** When true, canUseTool must always be called even when hooks auto-approve.
    *  Used by speculation for overlay file path rewriting. */
-  requireCanUseTool?: boolean
+  requireCanUseTool?: boolean | (() => boolean)
   messages: Message[]
   fileReadingLimits?: {
     maxTokens?: number

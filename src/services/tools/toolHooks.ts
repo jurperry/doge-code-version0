@@ -343,7 +343,9 @@ export async function resolveHookPermissionDecision(
   input: Record<string, unknown>
 }> {
   const requiresInteraction = tool.requiresUserInteraction?.()
-  const requireCanUseTool = toolUseContext.requireCanUseTool
+  const requireCanUseTool = typeof toolUseContext.requireCanUseTool === 'function'
+    ? toolUseContext.requireCanUseTool()
+    : toolUseContext.requireCanUseTool
 
   // Hooks must not force a user dialog or allow writes during Auto planning.
   // Keep explicit hook denials; route every other decision through the same
