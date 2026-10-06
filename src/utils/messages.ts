@@ -83,6 +83,7 @@ import {
 import { quote } from './bash/shellQuote.js'
 import { formatNumber, formatTokens } from './format.js'
 import { getPewterLedgerVariant } from './planModeV2.js'
+import { flattenServerToolBlocksForAPI } from './serverToolReplay.js'
 import { jsonStringify } from './slowOperations.js'
 
 // Hook attachments that have a hookName field (excludes HookPermissionDecisionAttachment)
@@ -2296,6 +2297,13 @@ export function normalizeMessagesForAPI(
       }
     })
 
+  // Server-side tool blocks recorded from provider gateways (GLM's built-in
+  // webReader, server web search…) are not replayable across providers:
+  // Kimi 400s on the converted-but-unanswered tool_calls pair, the openai
+  // converter silently drops the result content. Flatten them into labeled
+  // text so every protocol branch sees a portable transcript.
+  const flattened = flattenServerToolBlocksForAPI(result)
+
   // Relocate text siblings off tool_reference messages — prevents the
   // anomalous two-consecutive-human-turns pattern that teaches the model
   // to emit the stop sequence after tool results. See #21049.
@@ -2305,8 +2313,8 @@ export function normalizeMessagesForAPI(
   const relocated = checkStatsigFeatureGate_CACHED_MAY_BE_STALE(
     'tengu_toolref_defer_j8m',
   )
-    ? relocateToolReferenceSiblings(result)
-    : result
+    ? relocateToolReferenceSiblings(flattened)
+    : flattened
 
   // Filter orphaned thinking-only assistant messages (likely introduced by
   // compaction slicing away intervening messages between a failed streaming
