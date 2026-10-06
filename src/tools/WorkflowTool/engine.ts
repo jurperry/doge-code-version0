@@ -29,6 +29,7 @@
  */
 
 import { createChildAbortController } from '../../utils/abortController.js'
+import { retryErrorClass } from '../../services/api/withRetry.js'
 import { mcpProgressSummary } from '../AgentTool/mcpProgress.js'
 import { createTaskStateBase, generateTaskId } from '../../Task.js'
 import {
@@ -294,12 +295,14 @@ async function runInProcessStep(opts: {
   //「网络波动，自动重试第 N 轮」——SSE 停滞被 gap 回收后每轮 90-180s 的
   // 等待不再呈现为纯空转（0.2.126，用户实测「等待模型响应 150s」复发反馈）
   let lastRetryAttempt = 0
+  // 0.2.128：重试分类化——网络类沿用旧文案，其余按「API Error, 第x/N 次重试」
+  let lastRetryText = ''
   const liveness = setInterval(() => {
     if (firstMessageAt !== undefined || abortController.signal.aborted) return
     const waited = Math.round((Date.now() - stepStart) / 1000)
     // 前缀「等待模型响应」是 verify-workflow-cli 的活性契约，重试信息以
     // 后缀追加（勿整句替换）
-    const suffix = lastRetryAttempt > 0 ? ` · 网络重试第 ${lastRetryAttempt} 轮` : ''
+    const suffix = lastRetryAttempt > 0 ? ` · ${lastRetryText || `网络重试第 ${lastRetryAttempt} 轮`}` : ''
     enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentTaskId, description,
       summary: `等待模型响应 ${waited}s${suffix}`,
       usage: { total_tokens: 0, tool_uses: 0, duration_ms: Date.now() - stepStart } })
@@ -343,6 +346,12 @@ async function runInProcessStep(opts: {
               const attemptNo = (message as { retryAttempt?: number }).retryAttempt
               if (typeof attemptNo === 'number' && attemptNo > lastRetryAttempt) {
                 lastRetryAttempt = attemptNo
+                const maxNo = (message as { maxRetries?: number }).maxRetries
+                // 分类单点：retryErrorClass（网络类=断连/超时，其余=API Error）
+                const network = retryErrorClass((message as { error?: unknown }).error) === 'network'
+                lastRetryText = network
+                  ? `网络重试第 ${attemptNo} 轮`
+                  : `API Error, 第 ${attemptNo}/${typeof maxNo === 'number' ? maxNo : attemptNo} 次重试…`
               }
             } else if (firstMessageAt === undefined) {
               firstMessageAt = Date.now()

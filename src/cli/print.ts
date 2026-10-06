@@ -2592,6 +2592,16 @@ function runHeadlessStreaming(
             break
           }
 
+          // Drain SDK events every poll tick — teammates keep emitting
+          // task_progress/task_notification while the lead blocks in this
+          // loop, and every other drain site (query loop, do-while, finally)
+          // has already returned. Without this, the desktop shell's subagent
+          // panel freezes at its last state until the next mailbox message
+          // triggers a full run() (and the 1000-event queue drops oldest).
+          for (const event of drainSdkEvents()) {
+            output.enqueue(event)
+          }
+
           const unread = await readUnreadMessages(
             agentName,
             refreshedState.teamContext?.teamName,

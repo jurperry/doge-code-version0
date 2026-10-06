@@ -34,6 +34,9 @@ type TaskProgressEvent = {
   summary?: string
   model?: string
   is_background?: boolean
+  /** 长驻任务（in-process 队友）的空闲标记：true=空闲待命（不占用会话）、
+   *  false/缺省=在跑。壳侧占用锁（绿圈/防关闭）据 false/缺省判定。 */
+  is_idle?: boolean
   // Delta batch of workflow state changes. Clients upsert by
   // `${type}:${index}` then group by phaseIndex to rebuild the phase tree,
   // same fold as collectFromEvents + groupByPhase in PhaseProgress.tsx.

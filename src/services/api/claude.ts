@@ -268,6 +268,7 @@ import {
   CannotRetryError,
   FallbackTriggeredError,
   is529Error,
+  retryErrorClass,
   type RetryContext,
   RetryBudget,
   withRetry,
@@ -2833,10 +2834,15 @@ async function* queryModel(
           return
         }
 
-        yield getAssistantMessageFromError(error, errorModel, {
-          messages,
-          messagesForAPI,
-        })
+        // 标注错误传输类（network=连接级断连/超时）：代理级有界续跑只救
+        // API 类（429/5xx 等）——网络类已跑满 10 轮预算，续跑只会整额重付
+        yield {
+          ...getAssistantMessageFromError(error, errorModel, {
+            messages,
+            messagesForAPI,
+          }),
+          apiErrorTransport: retryErrorClass(error),
+        }
         releaseStreamResources()
         return
       }
@@ -2906,10 +2912,14 @@ async function* queryModel(
         messagesForAPI = stripImagesFromMessages(messagesForAPI)
       }
 
-      yield getAssistantMessageFromError(error, errorModel, {
-        messages,
-        messagesForAPI,
-      })
+      // 同上：错误传输类标注（见上方注释）
+      yield {
+        ...getAssistantMessageFromError(error, errorModel, {
+          messages,
+          messagesForAPI,
+        }),
+        apiErrorTransport: retryErrorClass(error),
+      }
       releaseStreamResources()
       return
     }

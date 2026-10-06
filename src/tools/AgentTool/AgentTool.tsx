@@ -58,8 +58,9 @@ import {
   runAsyncAgentLifecycle,
   stripTrailingApiErrorMessages
 } from './agentToolUtils.js';
+import { emitTaskApiRetryProgress, isAgentApiRetryMessage } from '../../utils/task/sdkProgress.js';
 import { linkForegroundAbort, takeOverAgentIterator } from './agentHandover.js';
-import { agentCompletionStatus, agentRequestError } from './agentCompletion.js';
+import { agentCompletionStatus, agentRequestError, agentRequestErrorClass } from './agentCompletion.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
@@ -1120,6 +1121,20 @@ export const AgentTool = buildTool({
                   updateAsyncAgentProgress(foregroundTaskId, getProgressUpdate(syncTracker), rootSetAppState);
                 }
               }
+              // withRetry 重试帧（system/api_error）转成任务行活动摘要——同步
+              // 子代理的重试同样要「API Error, 第x/N 次重试…」可见
+              if (isAgentApiRetryMessage(message)) {
+                const progress = getProgressUpdate(syncTracker);
+                emitTaskApiRetryProgress({
+                  taskId: foregroundTaskId,
+                  toolUseId: toolUseContext.toolUseId,
+                  description,
+                  startTime: agentStartTime,
+                  totalTokens: progress.tokenCount,
+                  toolUses: progress.toolUseCount,
+                  message,
+                });
+              }
             }
 
             // Forward tool activity so a blocked parent query keeps yielding
@@ -1251,11 +1266,13 @@ export const AgentTool = buildTool({
         // assistant 消息）时，剥错误尾巴、以既有对话续跑（前置原始
         // promptMessages），上限 2 次、退避递增——同步是 App 对话模式 Task
         // 的默认路径，单次请求失败不该把整个主回合拖死。worktree 已在
-        // finally 清理、后台化已交接、用户已中断三种情形不续跑。
+        // finally 清理、后台化已交接、用户已中断三种情形不续跑；网络类
+        // 终结（断连/超时，已跑满 10 轮预算）同样不续跑——续跑只会整额重付。
         let apiError = agentRequestError(agentMessages);
         for (
           let attempt = 0;
           attempt < AGENT_API_ERROR_RESUME_MAX &&
+          agentRequestErrorClass(agentMessages) !== 'network' &&
           !wasAborted &&
           !wasBackgrounded &&
           !worktreeResult.worktreePath &&

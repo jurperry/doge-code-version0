@@ -63,8 +63,15 @@ import {
 } from '../../utils/messages.js'
 import { evictTaskOutput } from '../../utils/task/diskOutput.js'
 import { PANEL_GRACE_MS } from '../../utils/task/framework.js'
-import { emitTaskProgress } from '../../utils/task/sdkProgress.js'
+import { emitTaskApiRetryProgress, emitTaskProgress, isAgentApiRetryMessage } from '../../utils/task/sdkProgress.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
+import { createAgentId } from '../../utils/uuid.js'
+import { agentRequestError, agentRequestErrorClass } from '../../tools/AgentTool/agentCompletion.js'
+import {
+  AGENT_API_ERROR_RESUME_BACKOFF_MS,
+  AGENT_API_ERROR_RESUME_MAX,
+  stripTrailingApiErrorMessages,
+} from '../../tools/AgentTool/agentApiResume.js'
 import { createAbortController } from '../abortController.js'
 import { type AgentContext, runWithAgentContext } from '../agentContext.js'
 import { count } from '../array.js'
@@ -1025,6 +1032,12 @@ export async function runInProcessTeammate(
   )
   let currentPrompt = wrappedInitialPrompt
   let shouldExit = false
+  // 生命周期时间戳与跨轮累计用量：声明在 try 外——catch 路径的终态
+  // task_notification 也要带上 duration/usage（此前不带，收尾后面板的
+  // 工具/token 数停在最后一次 task_progress 的值）
+  const runnerStartTime = Date.now()
+  let cumulativeToolUses = 0
+  let cumulativeTokens = 0
 
   // Try to claim an available task immediately so the UI can show activity
   // from the very start. The idle loop handles claiming for subsequent tasks.
@@ -1059,7 +1072,6 @@ export async function runInProcessTeammate(
       : undefined
 
     // Main teammate loop - runs until abort or shutdown approved
-    const runnerStartTime = Date.now()
     while (!abortController.signal.aborted && !shouldExit) {
       logForDebugging(
         `[inProcessRunner] ${identity.agentId} processing prompt: ${currentPrompt.substring(0, 50)}...`,
@@ -1170,6 +1182,9 @@ export async function runInProcessTeammate(
 
       // Track if this iteration was interrupted by work abort (not lifecycle abort)
       let workWasAborted = false
+      // 本轮续跑耗尽后仍残留的 API 错误——空闲通知与任务行要如实上报，
+      // 不再呈现为「正常空闲/仍在工作」
+      let roundApiError: Error | undefined
 
       // Run agent within contexts
       await runWithTeammateContext(teammateContext, async () => {
@@ -1180,6 +1195,17 @@ export async function runInProcessTeammate(
             task => ({ ...task, status: 'running', isIdle: false }),
             setAppState,
           )
+          // 开工标记（is_idle=false）：壳侧占用锁按「running 且非空闲」判定，
+          // 队友空闲待命即解锁标签，干活时重新占住
+          emitTaskProgress({
+            taskId,
+            toolUseId: undefined,
+            description,
+            startTime: runnerStartTime,
+            totalTokens: cumulativeTokens,
+            toolUses: cumulativeToolUses,
+            isIdle: false,
+          })
 
           // Run the normal agent loop - same runAgent() used by AgentTool/subagents.
           // This calls query() internally, so we share the core API infrastructure.
@@ -1187,124 +1213,180 @@ export async function runInProcessTeammate(
           // In-process teammates are async but run in the same process as the leader,
           // so they CAN show permission prompts (unlike true background agents).
           // Use currentWorkAbortController so Escape stops this turn only, not the teammate.
-          for await (const message of runAgent({
-            agentDefinition: iterationAgentDefinition,
-            promptMessages,
-            toolUseContext,
-            canUseTool: createInProcessCanUseTool(
-              identity,
-              currentWorkAbortController,
-              (waitMs: number) => {
-                updateTaskState(
-                  taskId,
-                  task => ({
-                    ...task,
-                    totalPausedMs: (task.totalPausedMs ?? 0) + waitMs,
-                  }),
-                  setAppState,
+          // API 错误有界续跑（agentApiResume 共享件，AgentTool 对偶）：query 正常
+          // 返回但末条 assistant 是 API 错误时剥掉错误尾巴、前置本轮 prompt 续跑
+          // 同一对话——限额重置/网关抖动不整损队友整轮工作。roundAgentId 固定
+          // 本轮，续跑追加同一 sidechain 文件（与 AgentTool 同步路径同款）。
+          const roundAgentId = createAgentId()
+          const roundMessages: Message[] = []
+          for (let resumeAttempt = 0; ; resumeAttempt++) {
+            const attemptPromptMessages = resumeAttempt === 0
+              ? promptMessages
+              : [...promptMessages, ...stripTrailingApiErrorMessages(roundMessages)]
+            for await (const message of runAgent({
+              agentDefinition: iterationAgentDefinition,
+              promptMessages: attemptPromptMessages,
+              toolUseContext,
+              canUseTool: createInProcessCanUseTool(
+                identity,
+                currentWorkAbortController,
+                (waitMs: number) => {
+                  updateTaskState(
+                    taskId,
+                    task => ({
+                      ...task,
+                      totalPausedMs: (task.totalPausedMs ?? 0) + waitMs,
+                    }),
+                    setAppState,
+                  )
+                },
+              ),
+              isAsync: true,
+              canShowPermissionPrompts: allowPermissionPrompts ?? true,
+              forkContextMessages,
+              querySource: 'agent:custom',
+              override: { abortController: currentWorkAbortController, agentId: roundAgentId },
+              model: model as ModelAlias | undefined,
+              preserveToolUseResults: true,
+              availableTools: toolUseContext.options.tools,
+              allowedTools,
+              contentReplacementState: teammateReplacementState,
+            })) {
+              // Check lifecycle abort first (kills whole teammate)
+              if (abortController.signal.aborted) {
+                logForDebugging(
+                  `[inProcessRunner] ${identity.agentId} lifecycle aborted`,
                 )
-              },
-            ),
-            isAsync: true,
-            canShowPermissionPrompts: allowPermissionPrompts ?? true,
-            forkContextMessages,
-            querySource: 'agent:custom',
-            override: { abortController: currentWorkAbortController },
-            model: model as ModelAlias | undefined,
-            preserveToolUseResults: true,
-            availableTools: toolUseContext.options.tools,
-            allowedTools,
-            contentReplacementState: teammateReplacementState,
-          })) {
-            // Check lifecycle abort first (kills whole teammate)
-            if (abortController.signal.aborted) {
-              logForDebugging(
-                `[inProcessRunner] ${identity.agentId} lifecycle aborted`,
+                break
+              }
+
+              // Check work abort (stops current turn only)
+              if (currentWorkAbortController.signal.aborted) {
+                logForDebugging(
+                  `[inProcessRunner] ${identity.agentId} current work aborted (Escape pressed)`,
+                )
+                workWasAborted = true
+                break
+              }
+
+              iterationMessages.push(message)
+              roundMessages.push(message)
+              allMessages.push(message)
+
+              updateProgressFromMessage(
+                tracker,
+                message,
+                resolveActivity,
+                toolUseContext.options.tools,
               )
-              break
-            }
+              const progress = getProgressUpdate(tracker)
 
-            // Check work abort (stops current turn only)
-            if (currentWorkAbortController.signal.aborted) {
-              logForDebugging(
-                `[inProcessRunner] ${identity.agentId} current work aborted (Escape pressed)`,
-              )
-              workWasAborted = true
-              break
-            }
+              // Stream teammate progress to headless/SDK consumers (desktop
+              // shell subagent panel). Mirrors AgentTool's per-tool_use
+              // task_progress emission — without it, in-process teammates only
+              // wrote AppState (TUI panel) and headless stdout stayed silent
+              // between spawn and the closing task_notification. enqueueSdkEvent
+              // is a no-op outside non-interactive sessions, so the TUI is
+              // unaffected.
+              const lastTool = lastToolUseName(message)
+              if (lastTool) {
+                emitTaskProgress({
+                  taskId,
+                  toolUseId: undefined,
+                  description,
+                  startTime: runnerStartTime,
+                  // 累计口径（前轮累计 + 本轮 tracker）：面板 token 数不在轮
+                  // 边界回退（轮内 tracker 每轮清零）
+                  totalTokens: cumulativeTokens + progress.tokenCount,
+                  toolUses: cumulativeToolUses + progress.toolUseCount,
+                  lastToolName: lastTool,
+                  summary: progress.lastActivity?.activityDescription,
+                })
+              }
+              // withRetry 重试帧（system/api_error 透传）转成任务行活动摘要
+              // ——队友的「API Error, 第x/N 次重试…」也要在面板可见
+              if (isAgentApiRetryMessage(message)) {
+                emitTaskApiRetryProgress({
+                  taskId,
+                  toolUseId: undefined,
+                  description,
+                  startTime: runnerStartTime,
+                  totalTokens: cumulativeTokens + progress.tokenCount,
+                  toolUses: cumulativeToolUses + progress.toolUseCount,
+                  message,
+                })
+              }
 
-            iterationMessages.push(message)
-            allMessages.push(message)
-
-            updateProgressFromMessage(
-              tracker,
-              message,
-              resolveActivity,
-              toolUseContext.options.tools,
-            )
-            const progress = getProgressUpdate(tracker)
-
-            // Stream teammate progress to headless/SDK consumers (desktop
-            // shell subagent panel). Mirrors AgentTool's per-tool_use
-            // task_progress emission — without it, in-process teammates only
-            // wrote AppState (TUI panel) and headless stdout stayed silent
-            // between spawn and the closing task_notification. enqueueSdkEvent
-            // is a no-op outside non-interactive sessions, so the TUI is
-            // unaffected.
-            const lastTool = lastToolUseName(message)
-            if (lastTool) {
-              emitTaskProgress({
+              updateTaskState(
                 taskId,
-                toolUseId: undefined,
-                description,
-                startTime: runnerStartTime,
-                totalTokens: progress.tokenCount,
-                toolUses: progress.toolUseCount,
-                lastToolName: lastTool,
-                summary: progress.lastActivity?.activityDescription,
-              })
-            }
-
-            updateTaskState(
-              taskId,
-              task => {
-                // Track in-progress tool use IDs for animation in transcript view
-                let inProgressToolUseIDs = task.inProgressToolUseIDs
-                if (message.type === 'assistant') {
-                  for (const block of message.message.content) {
-                    if (block.type === 'tool_use') {
-                      inProgressToolUseIDs = new Set([
-                        ...(inProgressToolUseIDs ?? []),
-                        block.id,
-                      ])
+                task => {
+                  // Track in-progress tool use IDs for animation in transcript view
+                  let inProgressToolUseIDs = task.inProgressToolUseIDs
+                  if (message.type === 'assistant') {
+                    for (const block of message.message.content) {
+                      if (block.type === 'tool_use') {
+                        inProgressToolUseIDs = new Set([
+                          ...(inProgressToolUseIDs ?? []),
+                          block.id,
+                        ])
+                      }
                     }
-                  }
-                } else if (message.type === 'user') {
-                  const content = message.message.content
-                  if (Array.isArray(content)) {
-                    for (const block of content) {
-                      if (
-                        typeof block === 'object' &&
-                        'type' in block &&
-                        block.type === 'tool_result'
-                      ) {
-                        if (inProgressToolUseIDs) {
-                          inProgressToolUseIDs = new Set(inProgressToolUseIDs)
-                          inProgressToolUseIDs.delete(block.tool_use_id)
+                  } else if (message.type === 'user') {
+                    const content = message.message.content
+                    if (Array.isArray(content)) {
+                      for (const block of content) {
+                        if (
+                          typeof block === 'object' &&
+                          'type' in block &&
+                          block.type === 'tool_result'
+                        ) {
+                          if (inProgressToolUseIDs) {
+                            inProgressToolUseIDs = new Set(inProgressToolUseIDs)
+                            inProgressToolUseIDs.delete(block.tool_use_id)
+                          }
                         }
                       }
                     }
                   }
-                }
 
-                return {
-                  ...task,
-                  progress,
-                  messages: appendCappedMessage(task.messages, message),
-                  inProgressToolUseIDs,
-                }
-              },
-              setAppState,
+                  return {
+                    ...task,
+                    progress,
+                    messages: appendCappedMessage(task.messages, message),
+                    inProgressToolUseIDs,
+                  }
+                },
+                setAppState,
+              )
+            }
+
+            // Abort broke the stream — don't resume on top of an aborted turn
+            if (
+              abortController.signal.aborted ||
+              currentWorkAbortController.signal.aborted
+            ) {
+              break
+            }
+
+            const apiError = agentRequestError(roundMessages)
+            if (!apiError) {
+              // 续跑成功：清掉上一attempt记录的错误，整轮按成功收尾
+              roundApiError = undefined
+              break
+            }
+            roundApiError = apiError
+            // 网络类终结不续跑（agentCompletion.agentRequestErrorClass）：
+            // 断连/超时已跑满 10 轮网络预算，续跑只会整额重付；API 类
+            //（429/5xx——限额重置/网关抖动）才值得剥尾续跑
+            if (agentRequestErrorClass(roundMessages) === 'network') break
+            if (resumeAttempt >= AGENT_API_ERROR_RESUME_MAX) break
+            logForDebugging(
+              `[inProcessRunner] ${identity.agentId}: API error, resuming round (attempt ${resumeAttempt + 1}/${AGENT_API_ERROR_RESUME_MAX}): ${apiError.message}`,
+            )
+            await sleep(
+              AGENT_API_ERROR_RESUME_BACKOFF_MS[
+                Math.min(resumeAttempt, AGENT_API_ERROR_RESUME_BACKOFF_MS.length - 1)
+              ],
             )
           }
 
@@ -1318,6 +1400,11 @@ export async function runInProcessTeammate(
         task => ({ ...task, currentWorkAbortController: undefined }),
         setAppState,
       )
+
+      // 本轮用量入账（tracker 每轮新建，终态通知取跨轮累计）
+      const roundProgress = getProgressUpdate(tracker)
+      cumulativeToolUses += roundProgress.toolUseCount
+      cumulativeTokens += roundProgress.tokenCount
 
       // Check if lifecycle aborted during agent run (kills whole teammate)
       if (abortController.signal.aborted) {
@@ -1361,6 +1448,36 @@ export async function runInProcessTeammate(
         setAppState,
       )
 
+      // 空闲标记（is_idle=true）＋本轮结局：续跑耗尽仍失败时如实把错误写上
+      // 任务行（此前面板会永远停在最后一次活动的旧状态），正常空闲则标
+      // 「空闲待命」。壳侧占用锁见 isIdle 语义——空闲即解锁标签。
+      if (roundApiError) {
+        const brief =
+          roundApiError.message.split('\n')[0]?.slice(0, 160) ??
+          roundApiError.message
+        emitTaskProgress({
+          taskId,
+          toolUseId: undefined,
+          description,
+          startTime: runnerStartTime,
+          totalTokens: cumulativeTokens,
+          toolUses: cumulativeToolUses,
+          summary: `API Error：${brief}（空闲待命）`,
+          isIdle: true,
+        })
+      } else {
+        emitTaskProgress({
+          taskId,
+          toolUseId: undefined,
+          description,
+          startTime: runnerStartTime,
+          totalTokens: cumulativeTokens,
+          toolUses: cumulativeToolUses,
+          summary: '空闲待命',
+          isIdle: true,
+        })
+      }
+
       // Note: We do NOT automatically send the teammate's response to the leader.
       // Teammates should use the Teammate tool to communicate with the leader.
       // This matches process-based teammates where output is not visible to the leader.
@@ -1372,8 +1489,16 @@ export async function runInProcessTeammate(
           identity.color,
           identity.teamName,
           {
-            idleReason: workWasAborted ? 'interrupted' : 'available',
+            // 续跑耗尽的 API 错误按失败上报——lead 与用户要看到真实原因，
+            // 不能装作「正常空闲」（0.2.128 用户实报：限额期内面板一直
+            // 显示在工作、无重试提示、点进详情才发现错误且无续接）
+            idleReason: roundApiError
+              ? 'failed'
+              : workWasAborted
+                ? 'interrupted'
+                : 'available',
             summary: getLastPeerDmSummary(allMessages),
+            failureReason: roundApiError?.message,
           },
         )
       } else {
@@ -1503,6 +1628,11 @@ export async function runInProcessTeammate(
       emitTaskTerminatedSdk(taskId, 'completed', {
         toolUseId,
         summary: identity.agentId,
+        usage: {
+          total_tokens: cumulativeTokens,
+          tool_uses: cumulativeToolUses,
+          duration_ms: Date.now() - runnerStartTime,
+        },
       })
     }
 
@@ -1560,7 +1690,12 @@ export async function runInProcessTeammate(
     if (!alreadyTerminal) {
       emitTaskTerminatedSdk(taskId, 'failed', {
         toolUseId,
-        summary: identity.agentId,
+        summary: errorMessage,
+        usage: {
+          total_tokens: cumulativeTokens,
+          tool_uses: cumulativeToolUses,
+          duration_ms: Date.now() - runnerStartTime,
+        },
       })
     }
 

@@ -54,13 +54,13 @@ import {
   buildTranscriptForClassifier,
   classifyYoloAction,
 } from '../../utils/permissions/yoloClassifier.js'
-import { emitTaskProgress as emitTaskProgressEvent } from '../../utils/task/sdkProgress.js'
+import { emitTaskApiRetryProgress, emitTaskProgress as emitTaskProgressEvent, isAgentApiRetryMessage } from '../../utils/task/sdkProgress.js'
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { getTokenCountFromUsage } from '../../utils/tokens.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../ExitPlanModeTool/constants.js'
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME } from './constants.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
-import { agentRequestError } from './agentCompletion.js'
+import { agentRequestError, agentRequestErrorClass } from './agentCompletion.js'
 export type ResolvedAgentTools = {
   hasWildcard: boolean
   validTools: string[]
@@ -521,33 +521,18 @@ export function extractPartialResult(
 
 type SetAppState = (f: (prev: AppState) => AppState) => void
 
-/** API 错误续跑上限与退避（毫秒）——单次请求失败不整损小时级工作流步骤。
- *  异步（runAsyncAgentLifecycle）与同步（AgentTool 收尾点）两路共用。 */
-export const AGENT_API_ERROR_RESUME_MAX = 2
-export const AGENT_API_ERROR_RESUME_BACKOFF_MS = [1500, 4000]
-
-/**
- * Drop trailing API-error assistant records and non-conversational records
- * (stream_event/attachment/progress) so the remainder can be fed back as
- * promptMessages to continue the SAME agent conversation. Mirrors the shape
- * resumeAgent reconstructs from the sidechain transcript (assistant/user
- * records only) — query() treats that as a resumable conversation.
- */
-export function stripTrailingApiErrorMessages(
-  messages: readonly MessageType[],
-): MessageType[] {
-  const copy = messages.filter(
-    m => m.type === 'assistant' || m.type === 'user',
-  )
-  while (copy.length > 0) {
-    const last = copy[copy.length - 1]!
-    if (last.type === 'assistant' && last.isApiErrorMessage) {
-      copy.pop()
-      continue
-    }
-    break
-  }
-  return copy
+// API 错误续跑共享件移至 agentApiResume.ts（in-process 队友也要用——直接
+// import agentToolUtils 会成环 AgentTool → spawnMultiAgent → inProcessRunner）；
+// 此处 re-export 保持既有 import 路径不变
+import {
+  AGENT_API_ERROR_RESUME_BACKOFF_MS,
+  AGENT_API_ERROR_RESUME_MAX,
+  stripTrailingApiErrorMessages,
+} from './agentApiResume.js'
+export {
+  AGENT_API_ERROR_RESUME_MAX,
+  AGENT_API_ERROR_RESUME_BACKOFF_MS,
+  stripTrailingApiErrorMessages,
 }
 
 /**
@@ -650,12 +635,31 @@ export async function runAsyncAgentLifecycle({
             lastToolName,
           )
         }
+        // withRetry 重试帧（system/api_error）转成任务行活动摘要——后台代理
+        // 的重试也要「API Error, 第x/N 次重试…」可见，不只主线程有提示
+        if (isAgentApiRetryMessage(message)) {
+          const progress = getProgressUpdate(tracker)
+          emitTaskApiRetryProgress({
+            taskId,
+            toolUseId: toolUseContext.toolUseId,
+            description,
+            startTime: metadata.startTime,
+            totalTokens: progress.tokenCount,
+            toolUses: progress.toolUseCount,
+            message,
+          })
+        }
       }
 
       stopSummarization?.()
 
       const apiError = agentRequestError(agentMessages)
       if (!apiError) break
+      // 网络类终结不续跑：连接级断连/超时已跑满 10 轮网络预算，续跑会把
+      // 整个预算重付一遍（停滞流场景 3 批 ≈ 10 分钟才失败）；API 类
+      //（429/5xx 等）才有「单次失败不整损小时级步骤」的续跑价值。
+      // 抛出走失败收尾——break 会被 finalize 记成 completed。
+      if (agentRequestErrorClass(agentMessages) === 'network') throw apiError
       // 首请求即败：agentMessages 只有错误 assistant，剥完为空——传空数组
       // 令提供方回退原始 prompt 重启（首败无进度损失，重启即续跑）
       const stripped = stripTrailingApiErrorMessages(agentMessages)
@@ -672,8 +676,8 @@ export async function runAsyncAgentLifecycle({
       await new Promise(resolve =>
         setTimeout(
           resolve,
-          API_ERROR_RESUME_BACKOFF_MS[
-            Math.min(attempt, API_ERROR_RESUME_BACKOFF_MS.length - 1)
+          AGENT_API_ERROR_RESUME_BACKOFF_MS[
+            Math.min(attempt, AGENT_API_ERROR_RESUME_BACKOFF_MS.length - 1)
           ],
         ),
       )

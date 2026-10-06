@@ -49,7 +49,11 @@ import { extractConnectionErrorDetails } from './errorUtils.js'
 
 const abortError = () => new APIUserAbortError()
 
+// 双类重试预算（0.2.128 用户修正版）：网络与服务类（断连/请求超时/408、
+// 5xx、529 过载）10 轮；其余可重试 API 错误（429/409/瞬态上游 4xx）5 轮。
+// 两类独立计数、同一回合共享一个 budget。
 const DEFAULT_MAX_RETRIES = 10
+export const DEFAULT_OTHER_ERROR_MAX_RETRIES = 5
 const FLOOR_OUTPUT_TOKENS = 3000
 const MAX_529_RETRIES = 3
 export const BASE_DELAY_MS = 500
@@ -117,6 +121,34 @@ function isStaleConnectionError(error: unknown): boolean {
   return details?.code === 'ECONNRESET' || details?.code === 'EPIPE'
 }
 
+export type RetryErrorClass = 'network' | 'api'
+
+/**
+ * 传输类分类（展示与续跑豁免用）：network=连接级（APIConnectionError 含
+ * 超时、408 请求超时），api=其余。与 SystemAPIErrorMessage / 壳
+ * NetworkRetryStatus 的展示前缀同口径；代理级续跑豁免门只认 network。
+ */
+export function retryErrorClass(error: unknown): RetryErrorClass {
+  if (error instanceof APIConnectionError) return 'network'
+  if (error instanceof APIError && error.status === 408) return 'network'
+  return 'api'
+}
+
+/** 预算类：infra=网络与服务类（断连/超时/5xx/529，10 轮），
+ *  other=其余可重试错误（429/409/瞬态上游 4xx，5 轮）。 */
+export type RetryBudgetClass = 'infra' | 'other'
+
+export function retryBudgetClass(error: unknown): RetryBudgetClass {
+  if (retryErrorClass(error) === 'network') return 'infra'
+  if (
+    error instanceof APIError &&
+    (is529Error(error) || (error.status !== undefined && error.status >= 500))
+  ) {
+    return 'infra'
+  }
+  return 'other'
+}
+
 export interface RetryContext {
   maxTokensOverride?: number
   model: string
@@ -146,15 +178,46 @@ interface RetryOptions {
 
 export class RetryBudget {
   retriesUsed = 0
+  infraRetriesUsed = 0
+  otherRetriesUsed = 0
   terminalError: unknown
+  /** 网络与服务类上限（断连/超时/5xx/529）。兼容别名：旧代码读它当总上限。 */
   readonly maxRetries: number
-  constructor(maxRetries = getDefaultMaxRetries()) {
-    this.maxRetries = Number.isInteger(maxRetries) && maxRetries >= 0 ? Math.min(10, maxRetries) : 10
+  /** 其余类上限（429/409/瞬态上游 4xx），恒 ≤ infra 类上限。 */
+  readonly otherMaxRetries: number
+  constructor(maxRetries = getDefaultMaxRetries(), otherMaxRetries?: number) {
+    const infra = Number.isInteger(maxRetries) && maxRetries >= 0 ? Math.min(10, maxRetries) : 10
+    this.maxRetries = infra
+    // 显式传入 otherMaxRetries（= 调用方指定了 options.maxRetries 的场景）时
+    // 保持旧「单一总预算」语义：other = infra；默认走 5 轮上限
+    this.otherMaxRetries = Math.min(infra, otherMaxRetries ?? DEFAULT_OTHER_ERROR_MAX_RETRIES)
   }
-  consume(): boolean {
-    if (this.retriesUsed >= this.maxRetries) return false
+  /** 按预算类扣减；该类预算耗尽返回 false（调用方应终止）。 */
+  consumeClass(errorClass: RetryBudgetClass): boolean {
+    if (errorClass === 'infra') {
+      if (this.infraRetriesUsed >= this.maxRetries) return false
+      this.infraRetriesUsed++
+    } else {
+      if (this.otherRetriesUsed >= this.otherMaxRetries) return false
+      this.otherRetriesUsed++
+    }
     this.retriesUsed++
     return true
+  }
+  countFor(errorClass: RetryBudgetClass): number {
+    return errorClass === 'infra' ? this.infraRetriesUsed : this.otherRetriesUsed
+  }
+  maxFor(errorClass: RetryBudgetClass): number {
+    return errorClass === 'infra' ? this.maxRetries : this.otherMaxRetries
+  }
+  exhaustedFor(errorClass: RetryBudgetClass): boolean {
+    return errorClass === 'infra'
+      ? this.infraRetriesUsed >= this.maxRetries
+      : this.otherRetriesUsed >= this.otherMaxRetries
+  }
+  /** 未分类扣减（历史外部调用点：剥图重试等 4xx 驱动路径）——按 other 类计。 */
+  consume(): boolean {
+    return this.consumeClass('other')
   }
 }
 
@@ -193,8 +256,10 @@ export async function* withRetry<T>(
   ) => Promise<T>,
   options: RetryOptions,
 ): AsyncGenerator<SystemAPIErrorMessage, T> {
-  const maxRetries = getMaxRetries(options)
-  const budget = options.retryBudget ?? new RetryBudget(maxRetries)
+  const budget = options.retryBudget ?? new RetryBudget(options.maxRetries ?? getDefaultMaxRetries(), options.maxRetries)
+  // 循环硬上限＝两类预算之和（混合错误序列的最坏情形）。真正的终止判定
+  // 按错误类走 budget.exhaustedFor：网络类 10 轮、API 错误类 5 轮，互不挪用。
+  const maxRetries = budget.maxRetries + budget.otherMaxRetries
   const retryContext: RetryContext = {
     model: options.model,
     thinkingConfig: options.thinkingConfig,
@@ -295,7 +360,7 @@ export async function* withRetry<T>(
         error instanceof APIError &&
         (error.status === 429 || is529Error(error))
       ) {
-        if (!budget.consume()) throw terminalError(error)
+        if (!budget.consumeClass(retryBudgetClass(error))) throw terminalError(error)
         // If the 429 is specifically because extra usage (overage) is not
         // available, permanently disable fast mode with a specific message.
         const overageReason = error.headers?.get(
@@ -334,7 +399,7 @@ export async function* withRetry<T>(
       // (e.g., org doesn't have fast mode enabled), permanently disable fast
       // mode and retry at standard speed.
       if (wasFastModeActive && isFastModeNotEnabledError(error)) {
-        if (!budget.consume()) throw terminalError(error)
+        if (!budget.consumeClass(retryBudgetClass(error))) throw terminalError(error)
         handleFastModeRejectedByAPI()
         retryContext.fastMode = false
         continue
@@ -362,7 +427,7 @@ export async function* withRetry<T>(
         if (consecutive529Errors >= MAX_529_RETRIES) {
           // Check if fallback model is specified
           if (options.fallbackModel) {
-            if (!budget.consume()) throw terminalError(error)
+            if (!budget.consumeClass(retryBudgetClass(error))) throw terminalError(error)
             logEvent('tengu_api_opus_fallback_triggered', {
               original_model:
                 options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -395,7 +460,9 @@ export async function* withRetry<T>(
       // Only retry if the error indicates we should
       const persistent =
         isPersistentRetryEnabled() && isTransientCapacityError(error)
-      if (attempt > maxRetries || budget.retriesUsed >= budget.maxRetries) {
+      // 持久模式（ant-only）的容量错误沿用 infra 预算，保持旧 ≤10 轮语义
+      const errorClass: RetryBudgetClass = persistent ? 'infra' : retryBudgetClass(error)
+      if (budget.exhaustedFor(errorClass) || attempt > maxRetries) {
         throw terminalError(error)
       }
 
@@ -409,7 +476,7 @@ export async function* withRetry<T>(
         throw terminalError(error)
       }
 
-      if (!budget.consume()) throw terminalError(error)
+      if (!budget.consumeClass(errorClass)) throw terminalError(error)
 
       // Handle max tokens context overflow errors by adjusting max_tokens for the next attempt
       // NOTE: With extended-context-window beta, this 400 error should not occur.
@@ -494,7 +561,8 @@ export async function* withRetry<T>(
 
       // In persistent mode the for-loop `attempt` is clamped at maxRetries+1;
       // use persistentAttempt for telemetry/yields so they show the true count.
-      const reportedAttempt = budget.retriesUsed
+      // 展示计数按错误类（网络 x/10、API 错误 x/5），不与另一类混计。
+      const reportedAttempt = budget.countFor(errorClass)
       logEvent('tengu_api_retry', {
         attempt: reportedAttempt,
         delayMs: delayMs,
@@ -521,7 +589,7 @@ export async function* withRetry<T>(
           if (options.signal?.aborted) throw new APIUserAbortError()
           if (error instanceof APIError) {
             yield {
-              ...createSystemAPIErrorMessage(error, remaining, reportedAttempt, budget.maxRetries),
+              ...createSystemAPIErrorMessage(error, remaining, reportedAttempt, budget.maxFor(errorClass)),
               discardPartial: options.discardPartial ?? false,
             }
           }
@@ -535,7 +603,7 @@ export async function* withRetry<T>(
       } else {
         if (error instanceof APIError) {
           yield {
-            ...createSystemAPIErrorMessage(error, delayMs, reportedAttempt, budget.maxRetries),
+            ...createSystemAPIErrorMessage(error, delayMs, reportedAttempt, budget.maxFor(errorClass)),
             discardPartial: options.discardPartial ?? false,
           }
         }
@@ -836,9 +904,6 @@ export function getDefaultMaxRetries(): number {
     }
   }
   return DEFAULT_MAX_RETRIES
-}
-function getMaxRetries(options: RetryOptions): number {
-  return options.retryBudget?.maxRetries ?? new RetryBudget(options.maxRetries ?? getDefaultMaxRetries()).maxRetries
 }
 
 const DEFAULT_FAST_MODE_FALLBACK_HOLD_MS = 30 * 60 * 1000 // 30 minutes
