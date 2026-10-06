@@ -13,7 +13,18 @@ import { isLocalShellTask } from './guards.js'
 
 type SetAppStateFn = (updater: (prev: AppState) => AppState) => void
 
+/** 在途 OS 级树杀（taskId → 完成承诺）。killTask 异步发射 treeKill；即将
+ *  退出进程的调用方（工作流步骤子进程清扫）必须先等它们落地，否则
+ *  taskkill 随父进程退出而死，被"杀"的命令沦为孤儿继续跑。 */
+const pendingTreeKills = new Map<string, Promise<void>>()
+
+/** 全部在途树杀落定后 resolve（调用方应与自己的超时 race；空表立即 resolve）。 */
+export function pendingShellKills(): Promise<unknown> {
+  return Promise.allSettled([...pendingTreeKills.values()])
+}
+
 export function killTask(taskId: string, setAppState: SetAppStateFn): void {
+  let killSettled: Promise<void> | null = null
   updateTaskState(taskId, setAppState, task => {
     if (task.status !== 'running' || !isLocalShellTask(task)) {
       return task
@@ -22,6 +33,7 @@ export function killTask(taskId: string, setAppState: SetAppStateFn): void {
     try {
       logForDebugging(`LocalShellTask ${taskId} kill requested`)
       task.shellCommand?.kill()
+      killSettled = task.shellCommand?.killSettled ?? null
       task.shellCommand?.cleanup()
     } catch (error) {
       logError(error)
@@ -42,6 +54,12 @@ export function killTask(taskId: string, setAppState: SetAppStateFn): void {
       endTime: Date.now(),
     }
   })
+  if (killSettled) {
+    pendingTreeKills.set(
+      taskId,
+      killSettled.finally(() => pendingTreeKills.delete(taskId)),
+    )
+  }
   void evictTaskOutput(taskId)
 }
 

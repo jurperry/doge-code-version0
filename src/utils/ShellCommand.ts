@@ -2,6 +2,7 @@ import type { ChildProcess } from 'child_process'
 import { stat } from 'fs/promises'
 import type { Readable } from 'stream'
 import treeKill from 'tree-kill'
+import { logError } from './log.js'
 import { generateTaskId } from '../Task.js'
 import { formatDuration } from './format.js'
 import {
@@ -120,6 +121,9 @@ class ShellCommandImpl implements ShellCommand {
   #timeoutId: NodeJS.Timeout | null = null
   #sizeWatchdog: NodeJS.Timeout | null = null
   #killedForSize = false
+  // treeKill 完成承诺（kill() 后非空）：供将退出的进程（工作流步骤子进程
+  // 清扫）等待 OS 级树杀真正落地——不等的话 taskkill 会随父进程退出而死。
+  #killSettled: Promise<void> | null = null
   #maxOutputBytes: number
   #abortSignal: AbortSignal
   #onTimeoutCallback:
@@ -337,13 +341,30 @@ class ShellCommandImpl implements ShellCommand {
   #doKill(code?: number): void {
     this.#status = 'killed'
     if (this.#childProcess.pid) {
-      treeKill(this.#childProcess.pid, 'SIGKILL')
+      // 完成承诺：调用方若即将退出进程（工作流步骤子进程清扫），必须等
+      // taskkill 真正落地——不等的话它会随父进程退出而死，命令变孤儿。
+      this.#killSettled = new Promise(resolve => {
+        treeKill(this.#childProcess.pid, 'SIGKILL', err => {
+          if (err) {
+            logError(
+              new Error(
+                `treeKill pid=${this.#childProcess.pid} failed: ${String(err)}`,
+              ),
+            )
+          }
+          resolve()
+        })
+      })
     }
     this.#resolveExitCode(code ?? SIGKILL)
   }
 
   kill(): void {
     this.#doKill()
+  }
+
+  get killSettled(): Promise<void> | null {
+    return this.#killSettled
   }
 
   background(taskId: string): boolean {

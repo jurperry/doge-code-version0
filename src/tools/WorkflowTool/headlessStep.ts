@@ -5,6 +5,7 @@ import { modelProfileEnvPatch, type ModelProfile } from '../../utils/customApiSt
 import { errorMessage } from '../../utils/errors.js'
 import { killPosixProcessTree } from '../../utils/processTree.js'
 import { AgentUsageTracker } from '../../utils/agentUsage.js'
+import { WORKFLOW_STEP_CHILD_ENV } from './stepChildEnv.js'
 
 export interface StepOutcome {
   status: 'completed' | 'failed' | 'stopped'
@@ -52,6 +53,9 @@ export function spawnHeadlessStep(opts: {
     delete env.CLAUDE_CODE_EFFORT_LEVEL
     delete env.CLAUDE_CODE_SUBAGENT_MODEL
     env.DOGE_WORKFLOW_TRANSCRIPTS = '1'
+    // 步骤子进程身份标记：print.ts 据此在模型答完后跳过「等后台任务清零」
+    // 并清理遗留后台命令（语义契约见 stepChildEnv.ts）
+    env[WORKFLOW_STEP_CHILD_ENV] = '1'
     for (const [name, value] of Object.entries(modelProfileEnvPatch(profile))) {
       if (value) env[name] = value
       else delete env[name]

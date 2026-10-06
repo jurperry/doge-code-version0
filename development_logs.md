@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-06 工作流步骤子进程退出清扫与 shell 停止事件潜伏 bug（2.1.297，App 0.2.130）
+
+1. 遇到问题：App 用户实测（0.2.128 会话 6d663946）：跨 API 工作流步骤里 2 分钟超时自动后台化的 PowerShell 死循环脚本把步骤子进程无限挂住——headless 收尾 do-while「等后台任务清零再退出」对步骤语境是错误语义（模型答完即产出定格，遗留命令不可能再被任何模型轮次消费），整工作流卡死在该步骤不前进；本地 mock 三格式复现实证（anthropic/openai/responses 各一步骤 + 后台 ping）。顺藤摸出两个潜伏 bug：①stopTask 的 shell 抑制检查在 kill 之后读 notified 标志，而 killTask 会先盖上 notified:true——直发 SDK stopped 终态恒被静默跳过（SDK 消费方从未见过 shell 任务正常 stopped）；②treeKill 异步发射后不等落地，即将退出的进程里 taskkill 随父进程而死，被"杀"的命令沦为孤儿继续跑。
+2. 解决方法：①spawnHeadlessStep 注入 `DOGE_WORKFLOW_STEP_CHILD=1`（零依赖契约模块 stepChildEnv.ts，print.ts 上游不反向拉重量模块）；②print.ts 收尾按任务族拆分——shell 族（local_bash/monitor_mcp/dream）在步骤子进程模型答完后直接 stopTask 清扫（终态经 finally 排水先于输出流关闭上送，壳行正常收 stopped）、代理族（local_agent/remote_agent）保持等待（输出经 relay 流式记录进父会话转录＝wf-nested 契约，且模型有界）；heldBackResult 对步骤子进程豁免；③stopTask 的 notified 检查挪到 kill 之前（notifiedBefore）；④ShellCommand.#doKill 暴露 killSettled 完成承诺 + killShellTasks.pendingShellKills 注册表，清扫退出前 `Promise.race([pendingShellKills(), sleep(2000)])` 有界等树杀落地。首版曾把代理族也清扫——verify-workflow-cli wf-nested-xapi 转录断言抓回（嵌套后台代理被杀丢尾），按族拆分后归位。验证：CLI 单测 15 + App verify-workflow-cli 0 败（新增 wf-bgexit 场景：三格式各后台化 ping 60s，断言步骤秒级完成、3 行全收 stopped、四步骤+伞 settle）+ verify-workflow-app 50/50 + 进程级断言残留 ping=0。
+3. 代码位置：src/tools/WorkflowTool/{stepChildEnv.ts 新、headlessStep.ts}、src/cli/print.ts（hold 豁免+do-while 拆分+清扫）、src/tasks/stopTask.ts（notifiedBefore）、src/utils/ShellCommand.ts（killSettled）、src/tasks/LocalShellTask/killShellTasks.ts（pendingShellKills）；回归 App 仓 tools/workflow-test-fixture.mjs（openai/responses 分路径 mock + OaiFormat/RespFormat profile + wf-bgexit）与 tools/verify-workflow-cli.mjs。
+
 ## 2026-10-06 双类重试预算、代理级续跑全覆盖与 teams 实时事件（2.1.296，App 0.2.128）
 
 1. 遇到问题：App 用户三联报障（teams 限额无重试提示且无续接／子代理面板停在初值／teams 会话无占用锁）。取证：所有可重试错误共用 10 轮单桶预算、文案「服务重试中」不分类；in-process 队友裸调 runAgent 没有 2.1.294 的代理级续跑（同步 Task/异步生命周期/工作流进程内步骤有）；lead 回合结束后的 teammate 邮箱轮询循环从不 drainSdkEvents——task_progress 积压（1000 上限丢最旧）直到下条邮箱消息触发 run() 才冲刷＝面板「冻结→跳变」；headless 无 turn 边界信号供壳判占用。另修存量雷：agentToolUtils 异步续跑退避引用 `API_ERROR_RESUME_BACKOFF_MS`（缺 AGENT_ 前缀）——后台代理/进程内步骤一进续跑即 ReferenceError，也即 verify-workflow-cli 停滞流用例「一批即败」校准所依据的（坏）行为。

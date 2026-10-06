@@ -368,6 +368,8 @@ import { unassignTeammateTasks } from '../utils/tasks.js'
 import { getRunningTasks } from '../utils/task/framework.js'
 import { isBackgroundTask } from '../tasks/types.js'
 import { stopTask } from '../tasks/stopTask.js'
+import { isWorkflowStepChild } from '../tools/WorkflowTool/stepChildEnv.js'
+import { pendingShellKills } from '../tasks/LocalShellTask/killShellTasks.js'
 import { drainSdkEvents } from '../utils/sdkEventQueue.js'
 import { initializeGrowthBook } from '../services/analytics/growthbook.js'
 import { errorMessage, toError } from '../utils/errors.js'
@@ -1039,6 +1041,7 @@ function runHeadlessStreaming(
   let runPhase:
     | 'draining_commands'
     | 'waiting_for_agents'
+    | 'sweeping_step_background_tasks'
     | 'finally_flush'
     | 'finally_post_flush'
     | undefined
@@ -2280,9 +2283,14 @@ function runHeadlessStreaming(
                   output.enqueue(event)
                 }
 
-                // Hold-back: don't emit result while background agents are running
+                // Hold-back: don't emit result while background agents are running.
+                // Workflow step children are exempt: their output is final the
+                // moment the model answers — the exit sweep (do-while below)
+                // closes leftover background tasks, and holding the result would
+                // only delay the step for tasks that can never be consumed.
                 const currentState = getAppState()
                 if (
+                  !isWorkflowStepChild() &&
                   getRunningTasks(currentState).some(
                     t =>
                       (t.type === 'local_agent' ||
@@ -2450,11 +2458,25 @@ function runHeadlessStreaming(
         waitingForAgents = false
         {
           const state = getAppState()
-          const hasRunningBg = getRunningTasks(state).some(
+          const runningBg = getRunningTasks(state).filter(
             t => isBackgroundTask(t) && t.type !== 'in_process_teammate',
           )
           const hasMainThreadQueued = peek(isMainThread) !== undefined
-          if (hasRunningBg || hasMainThreadQueued) {
+          // Step-child split of leftover background tasks: shell-family commands
+          // (local_bash/monitor_mcp/dream) are abandoned process helpers — no
+          // future model turn can consume them, so waiting only deadlocks the
+          // workflow on a runaway command; stop them instead. Agent-family
+          // tasks (local_agent/remote_agent) still wait: their streamed output
+          // is recorded into the parent conversation transcript (wf-nested
+          // contract) and they are model-bounded, so the wait terminates.
+          const stepChild = isWorkflowStepChild()
+          const waitTargets = stepChild
+            ? runningBg.filter(t => t.type === 'local_agent' || t.type === 'remote_agent')
+            : runningBg
+          const sweepTargets = stepChild
+            ? runningBg.filter(t => t.type !== 'local_agent' && t.type !== 'remote_agent')
+            : []
+          if (hasMainThreadQueued || waitTargets.length > 0) {
             waitingForAgents = true
             if (!hasMainThreadQueued) {
               runPhase = 'waiting_for_agents'
@@ -2462,6 +2484,34 @@ function runHeadlessStreaming(
               await sleep(100)
             }
             // Loop back to drain any newly queued commands
+          } else if (sweepTargets.length > 0) {
+            // Workflow step child: the model has answered, so the step's
+            // output is final. Leftover background tasks are abandoned
+            // commands no future model turn can consume — waiting for them
+            // deadlocks the whole workflow on a runaway command (verified
+            // 2026-10-06: a two-minute-timeout auto-backgrounded infinite
+            // loop kept the step child alive forever). Stop them instead;
+            // the terminal SDK events land in the queue and drain in the
+            // finally block below, before the output stream closes, so the
+            // shell's task rows close too. (Agent-family tasks never reach
+            // this branch — they stay in waitTargets above; the engine's
+            // relay.finish() bookend remains the backstop for any straggler.)
+            runPhase = 'sweeping_step_background_tasks'
+            logForDebugging(
+              `[print.ts] step child exit sweep: stopping ${sweepTargets.length} abandoned shell task(s): ${sweepTargets.map(t => `${t.id}(${t.type})`).join(', ')}`,
+            )
+            for (const task of sweepTargets) {
+              await stopTask(task.id, { getAppState, setAppState }).catch(err =>
+                logForDebugging(
+                  `[print.ts] step child exit sweep: stop ${task.id} failed: ${errorMessage(err)}`,
+                  { level: 'warn' },
+                ),
+              )
+            }
+            // Wait for the OS tree kills to land (bounded): we are about to
+            // exit this process, and an un-awaited taskkill dies with it —
+            // the swept commands would keep running orphaned.
+            await Promise.race([pendingShellKills(), sleep(2000)])
           }
         }
       } while (waitingForAgents)
