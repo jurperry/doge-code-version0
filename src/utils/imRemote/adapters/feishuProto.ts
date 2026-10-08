@@ -19,7 +19,7 @@
  *
  * Field numbers and wire types were extracted from the official generated
  * pbbp2.js (larksuite/node-sdk) and are pinned by golden vectors in
- * test/feishu-ws-probe.ts — change anything here and that probe goes red.
+ * tools/feishu-ws-probe.ts — change anything here and that probe goes red.
  * Unknown fields are skipped on decode so protocol additions don't break us.
  */
 

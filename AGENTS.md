@@ -11,9 +11,10 @@
    - ③ 是否删除该功能分支（确认合并后 `git branch -d`；若要删除尚未合并的分支，必须由用户明确授权 `-D`）。
 
    三问均有着落任务才算收尾；用户明确表示"都不用"可跳过。
-3. **测试产物规定**：本项目下建 `test/` 文件夹用于测试，脚本、图片、视频、样例文件等测试产物均写入 `test/` 下。测试结束后，除对测试有利的可复用脚本外，其余测试脚本与数据全部删除。
+3. **测试目录分工（test=临时，tools=可复用）**：`test/` 只存放临时测试产物（脚本、图片、视频、日志、沙箱、样例文件等），测试结束后全部删除，不在 git 内跟踪；`tools/` 是可复用测试脚本（e2e、repro、probe、mock、验证脚本等）的唯一存放地，受 git 跟踪。任何测试类脚本禁止散落在仓库其他位置——要复用的进 `tools/`，一次性用完即删的进 `test/`。
 4. **C 盘写入纪律**：向 C 盘（或任何系统盘/系统临时目录）写入任何内容必须遵守——测试期间如需写入，测试结束后必须删除本次产生的全部测试数据，不允许留存在 C 盘内。
 5. **提交与风格**：提交信息用简短祈使句（历史风格如 `Support web search for openai and responses API formats`，中英文均有）；坚持最小化、可审计的改动；带 `ANT-ONLY import markers must not be reordered` 注释的 import 禁止重排序。
+6. **收尾必过 code-review 与回归**：每次完成开发，必须发起子代理（subagent）对本轮改动做 code-review，并做好全量的功能测试与回归验证（单测 + 相关 e2e + `bun run version` 冒烟），review 与回归通过才算完成。编码全程遵循高内聚低耦合、代码规范清晰，调试文字要少（能删则删，不留临时 console/debug 输出）。
 
 ## 二、项目概述
 
@@ -50,7 +51,7 @@
 | `DOGE_HEADLESS_BUILTIN_MCP` | headless 模式下启用内置 MCP（含 Playwright） |
 | `DOGE_PLAYWRIGHT_MCP` / `DOGE_PLAYWRIGHT_*` | 内置 Playwright MCP 开关与浏览器配置（`DOGE_PLAYWRIGHT_MCP=0` 关闭） |
 
-- **Auto 自动计划（2.1.280）**：`autoPlan` 只标记模型从 bypassPermissions 进入的 Plan，手动 Plan（含旗标启动会话）保留交互；只读工具和当前计划文件可执行，配置/hook allow 不可越过边界。ExitPlan 自动回 Auto；切到其他模式统一清 prePlanMode/autoPlan。远程接入/新 prompt 保留自动 Plan；`plan_mode` attachment（含 compact）记录来源，历史按 snapshot 渲染。MCP 表单/URL retry 走共享自动应答并过 ElicitationResult hooks 与 SDK schema 校验，不挂询问队列；显式 deny 与 killswitch 保留。测试：test/auto-plan.test.ts、test/auto-elicitation.test.ts，App tools/verify-auto-plan.mjs 与 verify-im-remote R18。
+- **Auto 自动计划（2.1.280）**：`autoPlan` 只标记模型从 bypassPermissions 进入的 Plan，手动 Plan（含旗标启动会话）保留交互；只读工具和当前计划文件可执行，配置/hook allow 不可越过边界。ExitPlan 自动回 Auto；切到其他模式统一清 prePlanMode/autoPlan。远程接入/新 prompt 保留自动 Plan；`plan_mode` attachment（含 compact）记录来源，历史按 snapshot 渲染。MCP 表单/URL retry 走共享自动应答并过 ElicitationResult hooks 与 SDK schema 校验，不挂询问队列；显式 deny 与 killswitch 保留。测试：tools/auto-plan.test.ts、tools/auto-elicitation.test.ts，App tools/verify-auto-plan.mjs 与 verify-im-remote R18。
 
 ## 三、仓库地图（src 之外的关键目录，勿误解/误删）
 
@@ -59,7 +60,8 @@
 - `packages/@ant/` — 本地实体包：`computer-use-input`（键鼠注入）、`computer-use-mcp`、`computer-use-swift`、`claude-for-chrome-mcp`
 - `vendor/` — 原生模块源码（`audio-capture-src`、`image-processor-src`、`modifiers-napi-src`、`url-handler-src`）
 - 根级 `image-processor.node`、`build/bin/` — 原生二进制与脚本
-- `docs/superpowers/`、`test/`（e2e）、`development_logs.md`、`README.md`、`computer_use.md`
+- `tools/` — 可复用测试脚本（e2e、repro、probe、mock，git-tracked）；`test/` — 临时测试产物（用完即删，不跟踪）
+- `development_logs.md`、`README.md`、`computer_use.md`
 
 ### src 内 fork 特有子系统（无上游可对照，改动前先读对应模块）
 
@@ -78,11 +80,11 @@
 bun install / bun link      # 安装依赖并注册全局 doge 命令
 bun run dev                 # 启动 CLI/TUI（入口 src/bootstrap-entry.ts）
 bun run version             # 输出版本号，冒烟验证 CLI 可启动
-bun test <路径>             # bun:test 单测；裸跑会执行 src/ 下全部约 54 个测试文件（bun 自动跳过 node_modules），较慢，建议按路径过滤
-bun test/e2e-xxx.ts         # e2e 为独立脚本直接运行（非 bun:test），自建 CLAUDE_CONFIG_DIR 临时沙箱并自清理
+bun test <路径>             # bun:test 单测；裸跑会执行 src/ 与 tools/ 下全部测试文件（bun 自动跳过 node_modules），较慢，建议按路径过滤
+bun tools/e2e-xxx.ts        # e2e 为独立脚本直接运行（非 bun:test），自建 CLAUDE_CONFIG_DIR 临时沙箱并自清理
 ```
 
-- package.json **没有** `lint`/`test`/`build` 脚本；单测与代码同目录（`*.test.ts`）；实机 e2e 脚本在 `test/` 下（git-tracked、自带沙箱清理、可重复运行）
+- package.json **没有** `lint`/`test`/`build` 脚本；单测与代码同目录（`*.test.ts`）；实机 e2e/repro/probe 脚本在 `tools/` 下（git-tracked、自带沙箱清理、可重复运行）
 - 改动后除单测外，`bun run version` 冒烟 + `bun run dev` 手动验证受影响路径
 - 调试：`--debug`（`--debug=<pattern>` 白名单、`!` 前缀黑名单，另有 `--debug-to-stderr`/`--debug-file`）、`/debug` 命令；日志在 `~/.doge/debug/<sessionId>.txt`
 - `~/.doge/` 布局：`settings.json`/`settings.local.json`、`.claude.json`（全局配置）、`projects`/`sessions`/`tasks`/`teams`/`plans`/`plugins`/`cache`/`file-history`/`shell-snapshots`/`backups`/`debug`

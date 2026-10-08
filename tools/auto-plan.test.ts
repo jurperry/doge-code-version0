@@ -100,7 +100,7 @@ test('a hook allow cannot bypass the automatic plan write boundary', async () =>
 })
 
 test('path allow rules cannot permit implementation writes during automatic Plan', async () => {
-  const context = ctx({ ...automaticPlan, additionalWorkingDirectories: new Map(), alwaysAllowRules: { userSettings: ['Edit(./test/auto-implementation/**)'] } })
+  const context = ctx({ ...automaticPlan, additionalWorkingDirectories: new Map(), alwaysAllowRules: { userSettings: ['Edit(./tools/auto-implementation/**)'] } })
   const input = { file_path: join(import.meta.dir, 'auto-implementation', 'implementation.ts'), content: 'changed' }
   expect((await FileWriteTool.checkPermissions(input, context)).behavior).toBe('allow')
   const result = await hasPermissionsToUseTool(FileWriteTool, input, context, {} as any, 'write-allow')

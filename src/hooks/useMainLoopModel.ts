@@ -25,7 +25,7 @@ export interface ResolveMainLoopModelInput {
  * NOTE: `customApiStorage.model` is intentionally NOT in the fallback chain.
  * It is a persistence layer with write latency; including it makes the
  * status bar lag behind AppState after a /model switch (root cause of the
- * earlier misalignment bug — see docs/superpowers/specs/2026-06-29-model-switch-fix-design.md §1.1).
+ * earlier misalignment bug — see development_logs.md §25 模型切换统一入口).
  */
 export function resolveMainLoopModel(input: ResolveMainLoopModelInput): ModelName {
   const raw =
