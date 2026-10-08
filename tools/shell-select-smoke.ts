@@ -1,6 +1,6 @@
 // Smoke for /shell + tool-pool exclusivity. Runs in a CLAUDE_CONFIG_DIR
 // sandbox under test/ so real ~/.doge settings are never touched.
-// Usage: bun test/shell-select-smoke.ts  (self-cleaning)
+// Usage: bun tools/shell-select-smoke.ts  (self-cleaning)
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'

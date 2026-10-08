@@ -1,5 +1,5 @@
 // 客户端重试链探针：先 attach（无配置）→ 后补配置 + 起 daemon → 应最终连上。
-// 运行：bun run test/im-retry-probe.ts（自清理）
+// 运行：bun run tools/im-retry-probe.ts（自清理）
 import { mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'

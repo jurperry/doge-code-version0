@@ -1,5 +1,5 @@
 // 只读探针：用真实凭据连飞书长连接，dump 前 6 个入站帧的 hex 与解码结果。
-// 不发送任何业务消息（只按协议回 ping/ACK）。运行：bun run test/feishu-real-dump.ts
+// 不发送任何业务消息（只按协议回 ping/ACK）。运行：bun run tools/feishu-real-dump.ts
 import { readFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'

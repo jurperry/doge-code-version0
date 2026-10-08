@@ -3,7 +3,7 @@
 #   reject：GLM [1210] 中文报文 → isImageUnsupportedError 文本匹配 → 剥图重试
 #   reject-unknown：不可识别文本 → APIError + isClientError 兜底 → 剥图重试
 #   corrupt：IHDR 完好 IDAT 垃圾 → Read 容器校验在工具层拒绝
-# 用法：bash test/image-400-anthropic-repro.sh [reject|reject-unknown|corrupt] [exePath]
+# 用法：bash tools/image-400-anthropic-repro.sh [reject|reject-unknown|corrupt] [exePath]
 set -u
 cd "$(dirname "$0")/.."   # CLI 仓库根
 ROOT="$(pwd)"
@@ -25,7 +25,7 @@ else
   bun -e "await Bun.write(process.argv[1], Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==','base64'))" "$SANDBOX_W\\shot.png"
 fi
 
-env MOCK_PORT=$PORT IMG_MODE=$MODE IMG_FILE="$SANDBOX_W\\shot.png" bun run test/image-400-anthropic-mock.ts > "$SANDBOX/run/mock.log" 2>&1 &
+env MOCK_PORT=$PORT IMG_MODE=$MODE IMG_FILE="$SANDBOX_W\\shot.png" bun run tools/image-400-anthropic-mock.ts > "$SANDBOX/run/mock.log" 2>&1 &
 MOCK_PID=$!
 trap 'kill $MOCK_PID 2>/dev/null' EXIT
 for _ in $(seq 1 50); do grep -q mockReady "$SANDBOX/run/mock.log" 2>/dev/null && break; sleep 0.1; done
@@ -33,7 +33,7 @@ grep -q mockReady "$SANDBOX/run/mock.log" || { echo "FAIL: mock 未启动"; exit
 
 echo "请用 Read 工具读取 $SANDBOX_W\\shot.png 并描述内容" > "$SANDBOX/run/prompt.txt"
 EXE_W=$(cygpath -w "$EXE")
-env API_PROVIDER=anthropic bun run test/one-shot-driver.ts "$EXE_W" "$SANDBOX_W" "$PORT" "$(cygpath -w "$SANDBOX/run/prompt.txt")" 2>&1 | grep -v "^\[" | head -4
+env API_PROVIDER=anthropic bun run tools/one-shot-driver.ts "$EXE_W" "$SANDBOX_W" "$PORT" "$(cygpath -w "$SANDBOX/run/prompt.txt")" 2>&1 | grep -v "^\[" | head -4
 
 echo "== mock 调用日志 =="
 grep -v mockReady "$SANDBOX/run/mock.log"

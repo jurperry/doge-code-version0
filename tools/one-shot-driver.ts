@@ -1,6 +1,6 @@
 /**
  * 单发提问驱动：发一条 prompt、等一个 result、落盘 stream.ndjson 后退出。
- * 用法：bun run test/one-shot-driver.ts <exe> <sandboxDir> <port> <promptFile> [extraEnv...]
+ * 用法：bun run tools/one-shot-driver.ts <exe> <sandboxDir> <port> <promptFile> [extraEnv...]
  */
 const [exe, sandboxDir, portArg, promptFile] = process.argv.slice(2)
 const port = Number(portArg)

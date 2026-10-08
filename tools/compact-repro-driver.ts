@@ -1,7 +1,7 @@
 /**
  * 压缩复现驱动：以 App 同款方式（-p --input-format stream-json 持久 stdin）
  * 发两轮提问——自动压缩在第 2 轮 query 迭代开始时才有机会触发。
- * 用法：bun run test/compact-repro-driver.ts <cliEntry> <sandboxDir> <port> <overridePct>
+ * 用法：bun run tools/compact-repro-driver.ts <cliEntry> <sandboxDir> <port> <overridePct>
  */
 const [cliEntry, sandboxDir, portArg, overridePct] = process.argv.slice(2)
 const port = Number(portArg)

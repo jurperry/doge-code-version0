@@ -6,7 +6,7 @@
 #     pre_tokens 未采信 mock 虚报值。
 #   场景 B（ARTIFACT=1）：mock 对第 2 次普通请求的 usage 报 4x（GLM 虚报
 #     artifact）、真实阈值（200k 窗口）——断言不触发假压缩（无 boundary）。
-# 用法：bash test/compact-repro.sh [A|B]
+# 用法：bash tools/compact-repro.sh [A|B]
 set -u
 cd "$(dirname "$0")/.."   # 仓库根
 ROOT="$(pwd)"
@@ -24,13 +24,13 @@ if [ "$SCENARIO" = "B" ]; then
   OVERRIDE=""   # 真实阈值（200k 窗口）：真实 ~150k 低于阈值、4x 虚报 ~600k 超窗
 fi
 
-env MOCK_PORT=$PORT $MOCK_ENV bun run test/compact-repro-mock.ts > "$SANDBOX/run/mock.log" 2>&1 &
+env MOCK_PORT=$PORT $MOCK_ENV bun run tools/compact-repro-mock.ts > "$SANDBOX/run/mock.log" 2>&1 &
 MOCK_PID=$!
 trap 'kill $MOCK_PID 2>/dev/null' EXIT
 for _ in $(seq 1 50); do grep -q mockReady "$SANDBOX/run/mock.log" 2>/dev/null && break; sleep 0.1; done
 grep -q mockReady "$SANDBOX/run/mock.log" || { echo "FAIL: mock 未启动"; cat "$SANDBOX/run/mock.log"; exit 1; }
 
-env $PAD_ENV bun run test/compact-repro-driver.ts "$ROOT/src/bootstrap-entry.ts" "$SANDBOX" "$PORT" "$OVERRIDE" 2>&1 | grep -v "^\[" | head -8
+env $PAD_ENV bun run tools/compact-repro-driver.ts "$ROOT/src/bootstrap-entry.ts" "$SANDBOX" "$PORT" "$OVERRIDE" 2>&1 | grep -v "^\[" | head -8
 DRV_RC=${PIPESTATUS[0]}
 
 echo "== mock 调用日志 =="

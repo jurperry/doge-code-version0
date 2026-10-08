@@ -1,7 +1,7 @@
 /**
  * validateImageContainer 契约单测（0.2.125 工作流容错）：
  * shell 重定向类破坏（UTF-16 交错/CRLF 插入/截断/垃圾填充）必须确定性拒绝，
- * 合法 PNG/JPEG/GIF 不得误伤。用法：bun run test/check-image-container.ts
+ * 合法 PNG/JPEG/GIF 不得误伤。用法：bun run tools/check-image-container.ts
  */
 import { validateImageContainer } from '../src/utils/imageResizer.js'
 

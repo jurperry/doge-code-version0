@@ -4,7 +4,7 @@
  * ask relay with callback picks, tool-tick summaries, agent notices and
  * turn reporting — without any real network or model.
  *
- * Run: bun run test/e2e-im-remote.ts  (self-cleaning)
+ * Run: bun run tools/e2e-im-remote.ts  (self-cleaning)
  */
 import { spawn } from 'child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'

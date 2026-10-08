@@ -6,7 +6,7 @@
 #   reject：模型 Read 合法 PNG，图片进上下文后 mock 回 400 [1210]
 #     「图片输入格式/解析错误」——断言剥图重试生效：回合不死于 API Error、
 #     mock 收到剥图后的第三次请求、最终 result 成功。
-# 用法：bash test/image-400-repro.sh [corrupt|reject] [exePath]
+# 用法：bash tools/image-400-repro.sh [corrupt|reject] [exePath]
 set -u
 cd "$(dirname "$0")/.."   # CLI 仓库根
 ROOT="$(pwd)"
@@ -31,7 +31,7 @@ else
   bun -e "await Bun.write(process.argv[1], Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==','base64'))" "$SANDBOX_W\\shot.png"
 fi
 
-env MOCK_PORT=$PORT IMG_MODE=$MODE IMG_FILE="$SANDBOX_W\\shot.png" bun run test/image-400-mock.ts > "$SANDBOX/run/mock.log" 2>&1 &
+env MOCK_PORT=$PORT IMG_MODE=$MODE IMG_FILE="$SANDBOX_W\\shot.png" bun run tools/image-400-mock.ts > "$SANDBOX/run/mock.log" 2>&1 &
 MOCK_PID=$!
 trap 'kill $MOCK_PID 2>/dev/null' EXIT
 for _ in $(seq 1 50); do grep -q mockReady "$SANDBOX/run/mock.log" 2>/dev/null && break; sleep 0.1; done
@@ -39,7 +39,7 @@ grep -q mockReady "$SANDBOX/run/mock.log" || { echo "FAIL: mock 未启动"; exit
 
 echo "请用 Read 工具读取 $SANDBOX_W\\shot.png 并描述内容" > "$SANDBOX/run/prompt.txt"
 EXE_W=$(cygpath -w "$EXE")
-bun run test/one-shot-driver.ts "$EXE_W" "$SANDBOX_W" "$PORT" "$(cygpath -w "$SANDBOX/run/prompt.txt")" 2>&1 | grep -v "^\[" | head -4
+bun run tools/one-shot-driver.ts "$EXE_W" "$SANDBOX_W" "$PORT" "$(cygpath -w "$SANDBOX/run/prompt.txt")" 2>&1 | grep -v "^\[" | head -4
 
 echo "== mock 调用日志 =="
 grep -v mockReady "$SANDBOX/run/mock.log"

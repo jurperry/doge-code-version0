@@ -6,7 +6,7 @@
  * the full main import, right past the migration hook), then verifies the
  * directory was renamed to the v2 encoding with the session inside.
  *
- * Run: bun test/e2e-migrate-projects.ts   (from the doge-code repo root)
+ * Run: bun tools/e2e-migrate-projects.ts   (from the doge-code repo root)
  */
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'

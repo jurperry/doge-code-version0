@@ -3,7 +3,7 @@
  *  A) 429×5 后成功：恰好 5 次 api_retry（max_retries=5）+ 成功 result
  *  B) 恒 429：5 次重试后诚实报错（is_error=true，总请求=6）
  *  C) 连接拒绝：10 次 api_retry（max_retries=10）后报错
- * 用法：bun test/api-retry-blackbox.mjs
+ * 用法：bun tools/api-retry-blackbox.mjs
  */
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'

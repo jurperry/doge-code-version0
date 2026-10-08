@@ -9,7 +9,7 @@
  *   4. the server-wide allow rule must match every advertised tool
  *   5. live round-trip: navigate to a real page, snapshot it, close
  *
- * Usage: bun test/e2e-playwright-mcp.ts
+ * Usage: bun tools/e2e-playwright-mcp.ts
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'

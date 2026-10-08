@@ -1,7 +1,7 @@
 // One-off probe: real PowerShell execution through src/utils/Shell.ts exec()
 // after the 2.1.276 provider changes (UTF-8 preamble + ExecutionPolicy Bypass).
 // Verifies: command runs, Chinese output is not mojibake, exit code captured.
-// Usage: bun test/pwsh-exec-probe.ts  (self-cleaning)
+// Usage: bun tools/pwsh-exec-probe.ts  (self-cleaning)
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'

@@ -5,7 +5,7 @@
  * CLI executor → platforms/win32 后端，即 TUI 会话里一次真实
  * mcp__computer-use__* 工具调用的完整执行路径（不含权限对话框 UI）。
  *
- * 运行：bun run test/computer-use-e2e.ts
+ * 运行：bun run tools/computer-use-e2e.ts
  * 只做只读操作（screenshot / zoom / cursor_position），不动鼠标键盘。
  * 锁文件与截图落在 test/ 下的临时目录，结束即清理，不触碰 ~/.doge。
  */

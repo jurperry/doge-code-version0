@@ -4,7 +4,7 @@
  *    （print.ts 邮箱轮询循环排水——此前事件积压在 1000 上限队列里冻结面板）
  *  - 队友开工/空闲发 is_idle 标记（壳侧占用锁口径）
  *  - 空闲通知走邮箱驱动 lead 下一回合（链路存活）
- * 用法：bun test/teams-live-events.mjs（源码直跑，无需预编译）
+ * 用法：bun tools/teams-live-events.mjs（源码直跑，无需预编译）
  */
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'

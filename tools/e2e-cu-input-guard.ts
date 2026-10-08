@@ -10,7 +10,7 @@
  *     绝不静默无效。
  *  5. 重新 open → 绑定恢复；最小化后 needForeground 路径能恢复窗口并置前。
  *
- * 运行：bun run test/e2e-cu-input-guard.ts
+ * 运行：bun run tools/e2e-cu-input-guard.ts
  * 影响面：会短暂打开/激活一个 notepad 窗口（第 5 步短暂抢占前台），结束即清理。
  * 不写任何文件到 C 盘测试目录之外；notepad 不落盘。
  */

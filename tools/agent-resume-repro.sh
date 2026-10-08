@@ -3,7 +3,7 @@
 # 子代理首请求 400 非瞬态错误——旧代码直接判死代理；新代码剥错误尾巴
 # 以既有对话续跑（前置原始 prompt），断言：Task 工具结果成功、mock 收到
 # 续跑后的第三次请求、主对话正常收尾（无 API Error 顶到主线）。
-# 用法：bash test/agent-resume-repro.sh [exePath]
+# 用法：bash tools/agent-resume-repro.sh [exePath]
 set -u
 cd "$(dirname "$0")/.."   # CLI 仓库根
 ROOT="$(pwd)"
@@ -14,7 +14,7 @@ rm -rf "$SANDBOX" 2>/dev/null || true
 mkdir -p "$SANDBOX/projects" "$SANDBOX/run"
 SANDBOX_W=$(cygpath -w "$SANDBOX")
 
-env MOCK_PORT=$PORT bun run test/agent-resume-mock.ts > "$SANDBOX/run/mock.log" 2>&1 &
+env MOCK_PORT=$PORT bun run tools/agent-resume-mock.ts > "$SANDBOX/run/mock.log" 2>&1 &
 MOCK_PID=$!
 trap 'kill $MOCK_PID 2>/dev/null' EXIT
 for _ in $(seq 1 50); do grep -q mockReady "$SANDBOX/run/mock.log" 2>/dev/null && break; sleep 0.1; done
@@ -22,7 +22,7 @@ grep -q mockReady "$SANDBOX/run/mock.log" || { echo "FAIL: mock 未启动"; exit
 
 echo "请用 Task 工具派出一个 general-purpose 子代理去数到三" > "$SANDBOX/run/prompt.txt"
 EXE_W=$(cygpath -w "$EXE")
-bun run test/one-shot-driver.ts "$EXE_W" "$SANDBOX_W" "$PORT" "$(cygpath -w "$SANDBOX/run/prompt.txt")" 2>&1 | grep -v "^\[" | head -4
+bun run tools/one-shot-driver.ts "$EXE_W" "$SANDBOX_W" "$PORT" "$(cygpath -w "$SANDBOX/run/prompt.txt")" 2>&1 | grep -v "^\[" | head -4
 
 echo "== mock 调用日志 =="
 grep -v mockReady "$SANDBOX/run/mock.log"

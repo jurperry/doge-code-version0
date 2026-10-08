@@ -9,7 +9,7 @@
  *  2. Legacy v1 directories are still discovered for listing/resume.
  *  3. Cross-project resume (no dir) finds sessions regardless of encoding.
  *
- * Run: bun test/e2e-project-dirs.ts   (from the doge-code repo root)
+ * Run: bun tools/e2e-project-dirs.ts   (from the doge-code repo root)
  */
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'

@@ -1,5 +1,5 @@
 // 飞书长连接探针：pbbp2 帧编解码 golden 对拍 + mock 长连接服务器全链路。
-// 运行：bun run test/feishu-ws-probe.ts（自清理，不触碰真实 ~/.doge）
+// 运行：bun run tools/feishu-ws-probe.ts（自清理，不触碰真实 ~/.doge）
 //
 // golden 向量由官方 @larksuiteoapi/node-sdk 的 proto-buf/pbbp2.js +
 // protobufjs 生成（见 doge-code-app test/lark-ws-ref/gen-golden.mjs），

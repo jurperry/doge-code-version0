@@ -1,7 +1,7 @@
 /**
  * wecom 适配器 mock-WSS 金样例探针（0.2.94）：协议帧对照官方
  * @wecom/aibot-node-sdk 行为，本地起 Bun.serve ws:// 模拟服务器逐帧验证。
- * Run: bun run test/wecom-probe.ts (self-cleaning)
+ * Run: bun run tools/wecom-probe.ts (self-cleaning)
  */
 import { WecomAdapter } from '../src/utils/imRemote/adapters/wecom.js'
 import type { ImInboundMessage } from '../src/utils/imRemote/types.js'

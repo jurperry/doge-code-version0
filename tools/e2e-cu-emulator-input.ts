@@ -9,7 +9,7 @@
  * adb 可用（默认 E:\Android\Sdk\platform-tools\adb.exe，PATH 里的 adb 兜底）。
  * 缺模拟器/adb 时相应检查报 SKIP 而非 FAIL。
  *
- * 运行：bun run test/e2e-cu-emulator-input.ts
+ * 运行：bun run tools/e2e-cu-emulator-input.ts
  * 影响面：会激活模拟器窗口并在客户机里点击/拖拽（对当前打开的应用无破坏性
  * 操作假设——测试 app 网格）。不写任何文件。
  */

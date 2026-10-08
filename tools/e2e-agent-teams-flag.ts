@@ -12,7 +12,7 @@
 // short-circuit BEFORE option parsing, so they exit 0 even when the flag is
 // broken — never use them alone to assert flag availability.
 //
-// Runnable repeatedly: `bun run test/e2e-agent-teams-flag.ts`
+// Runnable repeatedly: `bun run tools/e2e-agent-teams-flag.ts`
 // Uses a throwaway CLAUDE_CONFIG_DIR sandbox, cleaned up on exit.
 import { spawnSync } from 'child_process'
 import { rmSync } from 'fs'
