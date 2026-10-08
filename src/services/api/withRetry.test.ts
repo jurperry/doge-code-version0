@@ -4,14 +4,18 @@ import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
 
 const KEY = 'CLAUDE_CODE_MAX_RETRIES'
 const saved = process.env[KEY]
+const savedApiKey = process.env.DOGE_API_KEY
 
 beforeEach(() => {
   delete process.env[KEY]
+  process.env.DOGE_API_KEY = 'sk-retry-test'
 })
 
 afterEach(() => {
   if (saved === undefined) delete process.env[KEY]
   else process.env[KEY] = saved
+  if (savedApiKey === undefined) delete process.env.DOGE_API_KEY
+  else process.env.DOGE_API_KEY = savedApiKey
 })
 
 test('getDefaultMaxRetries: unset → default 10', () => {

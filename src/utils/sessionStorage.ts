@@ -95,6 +95,7 @@ import { getSettings_DEPRECATED } from './settings/settings.js'
 import { jsonParse, jsonStringify } from './slowOperations.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 import { validateUuid } from './uuid.js'
+import { isApiRetryStatus, relinkDeferredApiRetries } from './apiRetryTranscript.js'
 import { enqueueSdkEvent } from './sdkEventQueue.js'
 
 // Cache MACRO.VERSION at module level to work around bun --define bug in async contexts
@@ -154,8 +155,8 @@ export function isTranscriptMessage(entry: Entry): entry is TranscriptMessage {
  * parentUuid. Old transcripts with progress already in the chain are handled
  * by the progressBridge rewrite in loadTranscriptFile.
  */
-export function isChainParticipant(m: Pick<Message, 'type'>): boolean {
-  return m.type !== 'progress'
+export function isChainParticipant(m: Pick<Message, 'type'> & { subtype?: string }): boolean {
+  return m.type !== 'progress' && !isApiRetryStatus(m)
 }
 
 type LegacyProgressEntry = {
@@ -3690,6 +3691,9 @@ export async function loadTranscriptFile(
     if (
       !opts?.keepAllLeaves &&
       !hasPreservedSegment &&
+      // Deferred retry batches can hide a valid branch. Repair after parsing,
+      // before pruning can discard its ancestors (legacy transcripts only).
+      !buf.includes(Buffer.from('"api_error"')) &&
       !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP) &&
       buf.length > SKIP_PRECOMPACT_THRESHOLD
     ) {
@@ -3831,6 +3835,8 @@ export async function loadTranscriptFile(
   // handle cases where the last message is a system/metadata message.
   // For each conversation chain (identified by following parent links), the leaf
   // is the most recent user/assistant message.
+  relinkDeferredApiRetries(messages)
+
   const allMessages = [...messages.values()]
 
   // Standard leaf computation using parent relationships
@@ -4483,7 +4489,7 @@ export async function loadAllSubagentTranscriptsFromDisk(): Promise<{
 // Exported so useLogMessages can sync-compute the last loggable uuid
 // without awaiting recordTranscript's return value (race-free hint tracking).
 export function isLoggableMessage(m: Message): boolean {
-  if (m.type === 'progress') return false
+  if (m.type === 'progress' || isApiRetryStatus(m)) return false
   // IMPORTANT: We deliberately filter out most attachments for non-ants because
   // they have sensitive info for training that we don't want exposed to the public.
   // When enabled, we allow hook_additional_context through since it contains

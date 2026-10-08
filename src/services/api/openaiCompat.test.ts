@@ -72,7 +72,7 @@ test('gateway 422 "Upstream request failed" wrapper → retryable APIError norma
   expect((error as APIError).status).toBe(503)
 })
 
-test('genuine 400 validation error stays a non-retryable plain Error', async () => {
+test('genuine 400 validation error preserves its non-retryable API status', async () => {
   const error = await expectError(
     createOpenAICompatStream(
       {
@@ -85,7 +85,8 @@ test('genuine 400 validation error stays a non-retryable plain Error', async () 
     ),
   )
   expect(error).toBeInstanceOf(Error)
-  expect(error).not.toBeInstanceOf(APIError)
+  expect(error).toBeInstanceOf(APIError)
+  expect((error as APIError).status).toBe(400)
   expect((error as Error).message).toContain('status 400')
 })
 

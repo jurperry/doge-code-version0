@@ -1,10 +1,11 @@
 /** Real localhost faults against the source headless CLI. Self-cleaning; no real credentials. */
-import { mkdir, rm, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 const root = resolve(import.meta.dir, '..')
-const sandbox = join(root, 'test', 'network-recovery-sandbox')
+await mkdir(join(root, 'test'), { recursive: true })
+const sandbox = await mkdtemp(join(root, 'test', 'network-recovery-'))
 const encoder = new TextEncoder()
 let failures = 0
 function check(name: string, ok: boolean, details = '') {
@@ -24,12 +25,23 @@ function anthro(text: string, terminal = true, tool?: any): string {
   ]
   return events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
 }
-function openai(text: string, terminal = true): string {
+function openai(text: string, terminal = true, tool?: any): string {
   const id = 'chat_' + randomUUID()
+  if (tool) return `data: ${JSON.stringify({ id, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: tool.id, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.input) } }] }, finish_reason: null }] })}\n\n` + `data: ${JSON.stringify({ id, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 7, completion_tokens: 3 } })}\n\n`
   return `data: ${JSON.stringify({ id, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n` + (terminal ? `data: ${JSON.stringify({ id, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 7, completion_tokens: 3 } })}\n\n` : '')
 }
-function responses(text: string, terminal = true): string {
+function responses(text: string, terminal = true, tool?: any): string {
   const id = 'resp_' + randomUUID()
+  if (tool) {
+    const item = { id: 'fc_resume', type: 'function_call', call_id: tool.id, name: tool.name, arguments: JSON.stringify(tool.input) }
+    return [
+      { type: 'response.created', response: { id } },
+      { type: 'response.output_item.added', output_index: 0, item: { ...item, arguments: '' } },
+      { type: 'response.function_call_arguments.delta', output_index: 0, item_id: item.id, delta: item.arguments },
+      { type: 'response.output_item.done', output_index: 0, item },
+      { type: 'response.completed', response: { id, output: [item], usage: { input_tokens: 7, output_tokens: 3 } } }
+    ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
+  }
   const events = [
     { type: 'response.created', response: { id } },
     { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: text },
@@ -108,7 +120,7 @@ async function run(provider: string, mode: Mode) {
   }
   const program = process.env.DOGE_NETWORK_TEST_EXE ? [process.env.DOGE_NETWORK_TEST_EXE] : [process.execPath, 'run', join(root, 'src/bootstrap-entry.ts')]
   const child = Bun.spawn([...program, '--bare', '--model', 'test', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--dangerously-skip-permissions', ...(mode === 'two-turn' ? ['--input-format', 'stream-json', '-p'] : ['-p', 'Say recovered'])], { cwd: dir, env, stdout: 'pipe', stderr: 'pipe', ...(mode === 'two-turn' ? { stdin: 'pipe' as const } : {}) })
-  const timeout = setTimeout(() => child.kill(), 25_000)
+  const timeout = setTimeout(() => child.kill(), 120_000)
   async function readOutput(): Promise<string> {
     if (mode !== 'two-turn') return new Response(child.stdout).text()
     const send = (value: unknown) => (child.stdin as any).write(JSON.stringify(value) + '\n')
@@ -178,7 +190,146 @@ async function run(provider: string, mode: Mode) {
     check(`${label}/history`, history.includes('recovered') && !history.includes('orphan'), history.slice(-500))
   }
 }
+
+/** Persistent headless input reproduces deferred retries across user turns. */
+async function runErrorResume(provider: string, fault: number | 'disconnect') {
+  const label = `${provider}/resume-${fault}`
+  if (process.env.NETWORK_E2E_FILTER && !label.includes(process.env.NETWORK_E2E_FILTER)) return
+  const dir = join(sandbox, label.replace('/', '-'))
+  await mkdir(dir, { recursive: true })
+  const format = provider === 'openai' ? openai : provider === 'responses' ? responses : anthro
+  let requests = 0
+  let recoveredRequests = 0
+  let toolIssued = false
+  let toolExecuted = false
+  const fixture = join(dir, 'read-fixture.txt')
+  await Bun.write(fixture, 'resume-tool-fixture-content')
+  const replay: any[] = []
+  const started = Date.now()
+  const trace = (detail: string) => { if (process.env.NETWORK_E2E_DEBUG) console.log(`TRACE ${label} +${Date.now() - started}ms ${detail}`) }
+  const reply = (body: any): Response | undefined => {
+    const history = body.messages ?? body.input ?? []
+    const last = JSON.stringify(history.filter((entry: any) => entry.role === 'user').at(-1))
+    const whole = JSON.stringify(history)
+    // Compat adapters merge adjacent user turns after a terminal API error.
+    const marker = [...last.matchAll(/resume-(before|fail|after|check-one|check-two)/g)].at(-1)?.[1]
+    trace(`request ${marker ?? 'tool-result'} fault-count=${requests}`)
+    if (marker === 'before') {
+      recoveredRequests++
+      if (recoveredRequests === 1) return Response.json({ error: { type: 'rate_limit_error', message: 'temporary rate limit' } }, { status: 429, headers: { 'retry-after': '0' } })
+      if (!toolIssued) {
+        toolIssued = true
+        return new Response(format('', true, { type: 'tool_use', id: 'tool_resume_read', name: 'Read', input: { file_path: fixture } }), { headers: { 'content-type': 'text/event-stream' } })
+      }
+      toolExecuted = whole.includes('resume-tool-fixture-content')
+      return new Response(format('accepted-before-error'), { headers: { 'content-type': 'text/event-stream' } })
+    }
+    if (!marker && whole.includes('tool_resume_read')) {
+      toolExecuted = whole.includes('resume-tool-fixture-content')
+      return new Response(format('accepted-before-error'), { headers: { 'content-type': 'text/event-stream' } })
+    }
+    if (marker === 'fail') {
+      requests++
+      if (fault === 'disconnect') return undefined
+      return Response.json({ error: { type: fault === 429 ? 'rate_limit_error' : fault === 400 ? 'invalid_request_error' : 'server_error', message: 'resume fault' } }, { status: fault, headers: { 'retry-after': '0' } })
+    }
+    if (marker?.startsWith('check')) replay.push(history)
+    return new Response(format('accepted-after-error'), { headers: { 'content-type': 'text/event-stream' } })
+  }
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    const result = reply(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    if (!result) {
+      // Actual socket loss, after headers, before any assistant message.
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.flushHeaders()
+      setTimeout(() => request.socket.destroy(), 30)
+      return
+    }
+    response.writeHead(result.status, Object.fromEntries(result.headers.entries()))
+    response.end(Buffer.from(await result.arrayBuffer()))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: join(dir, 'config'), CLAUDE_CODE_TMPDIR: join(dir, 'tmp'),
+    ANTHROPIC_BASE_URL: `http://127.0.0.1:${(server.address() as any).port}`, DOGE_API_KEY: 'local-test', ANTHROPIC_AUTH_TOKEN: '',
+    CLAUDE_CODE_COMPATIBLE_API_PROVIDER: provider, ANTHROPIC_MODEL: 'test', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    API_TIMEOUT_MS: '500', CLAUDE_STREAM_IDLE_TIMEOUT_MS: '200', DOGE_NETWORK_RETRY_BASE_MS: '10',
+    NODE_ENV: 'production', TEST_ENABLE_SESSION_PERSISTENCE: '1', DOGE_PLAYWRIGHT_MCP: '0', DOGE_HEADLESS_BUILTIN_MCP: '0' }
+  delete env.CLAUDE_CODE_MAX_RETRIES
+  const program = process.env.DOGE_NETWORK_TEST_EXE ? [process.env.DOGE_NETWORK_TEST_EXE] : [process.execPath, 'run', join(root, 'src/bootstrap-entry.ts')]
+  const args = ['--bare', '--model', 'test', '--verbose', '--output-format', 'stream-json', '--input-format', 'stream-json', '--dangerously-skip-permissions', '-p']
+  async function conversation(prompts: string[], session?: string) {
+    const child = Bun.spawn([...program, ...args, ...(session ? ['--resume', session] : [])], { cwd: dir, env, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe' })
+    const timer = setTimeout(() => { trace(`watchdog pid=${child.pid}`); child.kill() }, 120_000)
+    const events: any[] = []
+    const stderr = new Response(child.stderr).text()
+    const send = (value: unknown) => child.stdin.write(JSON.stringify(value) + '\n')
+    send({ type: 'control_request', request_id: 'initialize-resume', request: { subtype: 'initialize' } })
+    send({ type: 'user', message: { role: 'user', content: prompts[0] } })
+    let pending = '', turn = 0
+    const decoder = new TextDecoder()
+    try {
+      for await (const bytes of child.stdout) {
+        pending += decoder.decode(bytes, { stream: true })
+        let newline: number
+        while ((newline = pending.indexOf('\n')) >= 0) {
+          const line = pending.slice(0, newline); pending = pending.slice(newline + 1)
+          let event: any
+          try { event = JSON.parse(line) } catch { continue }
+          events.push(event)
+          if (event.type === 'result' || event.subtype === 'api_retry') trace(`event ${event.subtype} attempt=${event.attempt ?? '-'} pid=${child.pid}`)
+          if (event.type === 'result') {
+            turn++
+            if (turn < prompts.length) send({ type: 'user', message: { role: 'user', content: prompts[turn] } })
+            else child.stdin.end()
+          }
+        }
+      }
+      const exit = await child.exited
+      check(`${label}/turn-count`, turn === prompts.length, turn === prompts.length ? '' : JSON.stringify({ turn, prompts, exit, stderr: (await stderr).slice(-600), tail: events.slice(-3) }).slice(-1800))
+      return events
+    } finally { clearTimeout(timer); child.kill() }
+  }
+  try {
+    const events = await conversation(['resume-before', 'resume-fail', 'resume-after'])
+    const results = events.filter(event => event.type === 'result')
+    const session = results[0]?.session_id
+    check(`${label}/terminal`, results[1]?.is_error === true && results[2]?.result === 'accepted-after-error')
+    check(`${label}/tool-executed`, toolExecuted)
+    check(`${label}/budget`, requests === (fault === 400 ? 1 : fault === 429 ? 6 : 11), `${requests} requests`)
+    let records: any[] = []
+    for await (const file of new Bun.Glob('projects/**/*.jsonl').scan({ cwd: env.CLAUDE_CONFIG_DIR, absolute: true })) {
+      records.push(...(await readFile(file, 'utf8')).trim().split('\n').flatMap(line => { try { return [JSON.parse(line)] } catch { return [] } }))
+    }
+    check(`${label}/transient`, !records.some(record => record.type === 'system' && record.subtype === 'api_error'))
+    const chain = new Map(records.filter(record => record.uuid).map(record => [record.uuid, record]))
+    let tail = records.findLast(record => record.type === 'assistant' && JSON.stringify(record.message).includes('accepted-after-error'))
+    const visited = new Set<string>(), restored: any[] = []
+    while (tail && !visited.has(tail.uuid)) { visited.add(tail.uuid); restored.push(tail); tail = chain.get(tail.parentUuid) }
+    check(`${label}/disk-chain`, JSON.stringify(restored).includes('accepted-before-error'))
+    check(`${label}/final-error`, records.some(record => record.isApiErrorMessage === true))
+    if (session) {
+      await conversation(['resume-check-one'], session)
+      await conversation(['resume-check-two'], session)
+    }
+    const replayOk = replay.length === 2 && replay.every(history => JSON.stringify(history).includes('accepted-before-error') && JSON.stringify(history).includes('accepted-after-error') && !JSON.stringify(history).includes('failed-partial'))
+    check(`${label}/repeated-replay`, replayOk, replayOk ? '' : JSON.stringify(replay.map(history => history.filter((entry: any) => /accepted-before|accepted-after|failed-partial/.test(JSON.stringify(entry))))).slice(-2500))
+    const pairedTool = (history: any[]): boolean => {
+      if (!JSON.stringify(history).includes('resume-tool-fixture-content')) return false
+      if (provider === 'openai') return history.some(entry => entry.tool_calls?.some((call: any) => call.id === 'tool_resume_read')) && history.some(entry => entry.role === 'tool' && entry.tool_call_id === 'tool_resume_read')
+      if (provider === 'responses') return history.some(entry => entry.type === 'function_call' && entry.call_id === 'tool_resume_read') && history.some(entry => entry.type === 'function_call_output' && entry.call_id === 'tool_resume_read')
+      return history.some(entry => entry.content?.some((block: any) => block.type === 'tool_use' && block.id === 'tool_resume_read')) && history.some(entry => entry.content?.some((block: any) => block.type === 'tool_result' && block.tool_use_id === 'tool_resume_read'))
+    }
+    check(`${label}/tool-replay`, replay.length === 2 && replay.every(pairedTool))
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
+}
 try {
+  if (process.argv.includes('--resume-only')) {
+    for (const provider of ['anthropic', 'openai', 'responses']) {
+      for (const fault of [400, 429, 503, 'disconnect'] as const) await runErrorResume(provider, fault)
+    }
+  } else {
   for (const provider of ['anthropic', 'openai', 'responses']) {
     for (const mode of ['half', 'silent', 'headers', 'terminal-open', 'auth', 'auth-body', 'sse-auth', 'sse-transient', 'heartbeat'] as Mode[]) await run(provider, mode)
     await run(provider, 'headers-reset')
@@ -191,5 +342,6 @@ try {
   await run('anthropic', 'usage-half')
   await run('anthropic', 'tool-usage')
   await run('anthropic', 'tool-usage-delayed')
-} finally { await rm(sandbox, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+  }
+} finally { await rm(sandbox, { recursive: true, force: true, maxRetries: 30, retryDelay: 500 }) }
 process.exitCode = failures ? 1 : 0

@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-08 API/网络错误后 resume 跳过已接受历史（2.1.299，App 0.2.133）
+
+1. 遇到问题：App Code 双模式 API Error 后恢复只见后段。headless system/api_error 重试进度进 mutableMessages 却未当拍落盘，下一轮批量 recordTranscript 将延迟状态接回旧请求，形成旁路已接受回复的父链；网络/服务端错误共用这条路径。E:/ClaudeCode 真实会话转录 587 条、恢复链仅 513 条，旧内容实际没有删除。
+2. 解决方法：apiRetryTranscript 单点判定瞬态状态，同时从 logging 与 chain participant 排除，终态 assistant 错误如实保留；旧批次在 loadTranscriptFile 解析后、叶计算前只读重接，沿链检查 scope/压缩/循环及真实分叉，纯并行 tool_result siblings 不算分叉；旧状态存在时跳过修复前字节剪枝。真实会话恢复 587/587，原文件不改写。存储回归覆盖小/大文件、延迟批次、终态错误、意图分叉、scope、cycle、compact、并行工具；三协议 --resume-only 黑盒用真实 Read 与终态 400/429/503/断流验证连续两次 resume 的协议成对重放。全量与安装版证据由 App docs/error-resume-validation.md 记录。
+3. 代码位置：src/utils/{apiRetryTranscript.ts,sessionStorage.ts,sessionStorage.errorResume.test.ts}；tools/verify-network-recovery.ts（--resume-only）；src/services/api/{withRetry,openaiCompat,responsesCompat}.test.ts（修正已有测试缺凭据与旧 400 普通 Error 断言）。
+
 ## 2026-10-06 跨 provider 服务端工具块重放消毒（2.1.298，App 0.2.131）
 
 1. 遇到问题：App 用户实测（会话 83734af8）：GUI 对话模式从 GLM 切 Kimi 后每轮 400 `invalid_request_error: an assistant message with 'tool_calls' must be followed by tool messages ... webReader:0`，用户改口"不要联网搜索"无效。取证：GLM 网关（open.bigmodel.cn/api/anthropic）内置联网工具 webReader 在转录里留下 14 组 `server_tool_use` 块且配对 `tool_result` 内嵌在同一条 assistant 消息（GLM 自有形态）；normalizeMessagesForAPI 对配对完整的这类块原样转发（ensureToolResultPairing 只剥无配对孤儿）；Kimi（api.kimi.com/coding/，anthropic 格式）内部转自家 OpenAI 形态时把 server_tool_use 变成 tool_calls（合成 id `webReader:0`＝名字:序号，非落盘 call_xxx）、assistant 内嵌 tool_result 映射不成 role:"tool" 消息＝悬空调用→400，每轮重放同一历史=每轮必炸；openai 分支（deepseek）convertAnthropicRequestToOpenAI 的 assistant 分支只认 text/thinking/tool_use，server_tool_use 与内嵌 tool_result 双双静默丢弃（不炸但丢上下文）。修复前该会话跨 provider 即死，仅 /compact（走 GLM）可解。
