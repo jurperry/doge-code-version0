@@ -51,7 +51,7 @@
 | `DOGE_HEADLESS_BUILTIN_MCP` | headless 模式下启用内置 MCP（含 Playwright） |
 | `DOGE_PLAYWRIGHT_MCP` / `DOGE_PLAYWRIGHT_*` | 内置 Playwright MCP 开关与浏览器配置（`DOGE_PLAYWRIGHT_MCP=0` 关闭） |
 
-- **Auto 自动计划（2.1.280）**：`autoPlan` 只标记模型从 bypassPermissions 进入的 Plan，手动 Plan（含旗标启动会话）保留交互；只读工具和当前计划文件可执行，配置/hook allow 不可越过边界。ExitPlan 自动回 Auto；切到其他模式统一清 prePlanMode/autoPlan。远程接入/新 prompt 保留自动 Plan；`plan_mode` attachment（含 compact）记录来源，历史按 snapshot 渲染。MCP 表单/URL retry 走共享自动应答并过 ElicitationResult hooks 与 SDK schema 校验，不挂询问队列；显式 deny 与 killswitch 保留。测试：tools/auto-plan.test.ts、tools/auto-elicitation.test.ts，App tools/verify-auto-plan.mjs 与 verify-im-remote R18。
+- **Auto 自动计划（2.1.280）**：`autoPlan` 只标记模型从 bypassPermissions 进入的 Plan，手动 Plan（含旗标启动会话）保留交互；只读工具和当前计划文件可执行，配置/hook allow 不可越过边界。ExitPlan 自动回 Auto；切到其他模式统一清 prePlanMode/autoPlan。远程接入/新 prompt 保留自动 Plan；`plan_mode` attachment（含 compact）记录来源，历史按 snapshot 渲染。AskUserQuestion（2.1.300）保留人工询问：CLI单一300000ms期限，未提交按label末尾推荐标记自动选择（无推荐首项、多选全部推荐），结果诚实标自动来源；TUI与mailbox队首展示才起钟，stdio/MCP/无宿主/队友共用一次性决胜，取消/人工答复结束计时与迟到副作用。MCP elicitation 表单/URL retry 仍走原共享自动应答并过 ElicitationResult hooks 与 SDK schema 校验，不挂询问队列；显式 deny 与 killswitch 保留。测试：tools/auto-plan.test.ts、tools/auto-elicitation.test.ts，App tools/verify-auto-plan.mjs 与 verify-im-remote R18。
 
 ## 三、仓库地图（src 之外的关键目录，勿误解/误删）
 

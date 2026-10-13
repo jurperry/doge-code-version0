@@ -109,6 +109,8 @@ export type ToolUseConfirm<Input extends AnyObject = AnyObject> = {
   toolUseID: string;
   permissionResult: PermissionDecision;
   permissionPromptStartTimeMs: number;
+  autoQuestionDeadlineMs?: number;
+  onBecomeActive?(): void;
   /**
    * Called when user interacts with the permission dialog (e.g., arrow keys, tab, typing).
    * This prevents async auto-approval mechanisms (like the bash classifier) from
@@ -144,6 +146,7 @@ function getNotificationMessage(toolUseConfirm: ToolUseConfirm): string {
 
 // TODO: Move this to Tool.renderPermissionRequest
 export function PermissionRequest(t0) {
+  React.useEffect(() => { t0.toolUseConfirm.onBecomeActive?.(); }, [t0.toolUseConfirm.toolUseID]);
   const $ = _c(18);
   const {
     toolUseConfirm,

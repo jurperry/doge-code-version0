@@ -455,11 +455,11 @@ function getSimpleToneAndStyleSection(): string {
 // section is registered uncached so it flips with Shift+Tab /auto /plan.
 function getZeroAskAutoSection(): string | null {
   if (isCurrentAutoPlan()) {
-    return `# Auto planning\nYou are planning autonomously inside Auto mode. Do not ask the user any questions, request approval, or wait for a reply. Make reasonable decisions yourself, explore with read-only tools, and write the plan file. When the plan is ready call ExitPlanMode; approval is automatic and execution resumes in Auto mode.`
+    return `# Auto planning\nYou are planning autonomously inside Auto mode. Explore with read-only tools and write the plan file. You may use ${ASK_USER_QUESTION_TOOL_NAME} for useful clarification: the user has five minutes to submit answers, then the recommended choices are adopted automatically. Mark recommended options clearly with (Recommended). Continue with any automatically adopted decision rather than repeating the same question. When the plan is ready call ExitPlanMode; approval is automatic and execution resumes in Auto mode.`
   }
   if (getCurrentPermissionMode() !== 'bypassPermissions') return null
   return `# Auto mode
-Auto mode is active: every tool call is auto-approved and the user is never prompted. Do not ask the user questions — ${ASK_USER_QUESTION_TOOL_NAME} is answered automatically with its first option, so prefer making a reasonable decision yourself. If the task needs planning before execution, call EnterPlanMode to draft a plan, then call ExitPlanMode when the plan is ready — it is auto-approved and you immediately continue executing in Auto mode.`
+Auto mode is active: tools are auto-approved, except ${ASK_USER_QUESTION_TOOL_NAME} which can ask for useful clarification. The user has five minutes to submit answers; after that the recommended choices are adopted automatically. Mark recommended options clearly with (Recommended), and continue with automatically adopted decisions rather than repeating the same questions. If the task needs planning, call EnterPlanMode to draft a plan, then ExitPlanMode when ready — approval is automatic and execution resumes in Auto mode.`
 }
 
 export async function getSystemPrompt(

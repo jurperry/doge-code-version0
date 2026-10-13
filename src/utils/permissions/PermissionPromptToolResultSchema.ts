@@ -18,6 +18,7 @@ export const inputSchema = lazySchema(() =>
       .string()
       .describe('The name of the tool requesting permission'),
     input: z.record(z.string(), z.unknown()).describe('The input for the tool'),
+    auto_question: z.object({ deadline_ms: z.number().finite() }).optional(),
     tool_use_id: z
       .string()
       .optional()

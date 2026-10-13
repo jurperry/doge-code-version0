@@ -3159,7 +3159,7 @@ function getPlanModeInstructions(attachment: {
 }): UserMessage[] {
   if (attachment.autoPlan && !attachment.isSubAgent) {
     return wrapMessagesInSystemReminder([createUserMessage({
-      content: `Auto planning is active. Explore the codebase and decide the approach autonomously. Do not ask the user questions or request approval. You may only perform read-only exploration and write or edit the plan file (${attachment.planFilePath}). Include the implementation approach and verification in that file, then call ExitPlanMode to return automatically to Auto and execute the plan without waiting for a user reply.`,
+      content: `Auto planning is active. Explore the codebase and decide the approach autonomously. You may ask useful clarification questions with AskUserQuestion: the user has five minutes to submit answers, then recommended choices are adopted automatically. Mark recommended choices with (Recommended), and do not repeat questions after an automatic decision. You may only perform read-only exploration and write or edit the plan file (${attachment.planFilePath}). Include the implementation approach and verification in that file, then call ExitPlanMode to return automatically to Auto and execute the plan without requesting approval.`,
       isMeta: true,
     })])
   }

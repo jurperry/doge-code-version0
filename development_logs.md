@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-13 完全访问人工提问与五分钟推荐答案（2.1.300，App 0.2.138）
+
+1. 遇到问题：旧Auto/自动Plan即时选首项且禁止澄清，不能给用户作答机会。恢复交互后TUI父AbortSignal仅取消计时而权限Promise悬挂，排队提问被首项取消丢弃；in-process/tmux队友另有权限入口，普通headless通道测试不能证明团队路径；倒计时放在旧对话外层被布局裁剪。
+2. 解决方法：Ask是显式deny后唯一新增Auto交互例外，去除模型预填answers；共享推荐策略解析label明确末尾中英文标记（单选首个、多选全部、无推荐首项），共享300000ms等待和首赢清理，自动工具结果诚实标来源。stdio/MCP/无宿主均有界等待；TUI实际展示队首时起钟，父取消结束活跃及排队请求、清relay订阅并拒迟到hook权限副作用。headless队友复用lead的同一stdio/MCP宿主，TUI队友用完整PermissionContext；mailbox由leader显示队首起钟并回传自动来源，worker取消清callback并撤leader卡，队列身份用request_id避免独立模型toolid碰撞。倒计时放进所有提问页共用的导航区域。自动Plan读写边界、手动Plan交互、MCP elicitation及ExitPlan回Auto不变。全量隔离96文件763通过、真实TUI人工与Ctrl+C通过，三格式人工/中断/无宿主及真实source约300018ms超时已有证据；安装版（App 0.2.138 内置本版 CLI，SHA256=8963BE16…9D0）verify-auto-question 25/25（含真实300000ms超时）与 verify-auto-question-tui 2/2 由App交付阶段补齐通过。
+3. 代码位置：src/utils/permissions/{autoQuestion,autoQuestionWait,permissions,autoBypass}.ts，src/tools/AskUserQuestionTool/，src/constants/prompts.ts、src/utils/messages.ts，src/cli/{structuredIO,print}.ts，SDK schema/types，src/hooks/toolPermission/与useInboxPoller/useSwarmPermissionPoller协议，src/utils/swarm/{inProcessRunner,leaderPermissionBridge,workerPermissionEntry,permissionSync}.ts、teammateMailbox.ts，TUI PermissionRequest/QuestionNavigationBar/AutoQuestionCountdown；tools/auto-question{,-lifecycle,-channels,-teams}.test.ts、auto-question-fixture.ts、e2e-auto-question.ts，App tools/verify-auto-question{,-tui}.mjs。
+
 ## 2026-10-08 API/网络错误后 resume 跳过已接受历史（2.1.299，App 0.2.133）
 
 1. 遇到问题：App Code 双模式 API Error 后恢复只见后段。headless system/api_error 重试进度进 mutableMessages 却未当拍落盘，下一轮批量 recordTranscript 将延迟状态接回旧请求，形成旁路已接受回复的父链；网络/服务端错误共用这条路径。E:/ClaudeCode 真实会话转录 587 条、恢复链仅 513 条，旧内容实际没有删除。

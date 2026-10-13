@@ -35,6 +35,7 @@ import {
 import type { PaneBackendType } from '../utils/swarm/backends/types.js'
 import { TEAM_LEAD_NAME } from '../utils/swarm/constants.js'
 import { getLeaderToolUseConfirmQueue } from '../utils/swarm/leaderPermissionBridge.js'
+import { createWorkerPermissionEntry, cancelWorkerPermissionRequest } from '../utils/swarm/workerPermissionEntry.js'
 import { sendPermissionResponseViaMailbox } from '../utils/swarm/permissionSync.js'
 import {
   findRegisteredMember,
@@ -53,6 +54,7 @@ import { isInProcessTeammate } from '../utils/teammateContext.js'
 import {
   isModeSetRequest,
   isPermissionRequest,
+  isPermissionCancellation,
   isPermissionResponse,
   isPlanApprovalRequest,
   isPlanApprovalResponse,
@@ -206,6 +208,7 @@ export function useInboxPoller({
     // Separate permission messages from regular teammate messages
     const permissionRequests: TeammateMessage[] = []
     const permissionResponses: TeammateMessage[] = []
+    const permissionCancellations: TeammateMessage[] = []
     const sandboxPermissionRequests: TeammateMessage[] = []
     const sandboxPermissionResponses: TeammateMessage[] = []
     const shutdownRequests: TeammateMessage[] = []
@@ -218,6 +221,7 @@ export function useInboxPoller({
     for (const m of unread) {
       const permReq = isPermissionRequest(m.text)
       const permResp = isPermissionResponse(m.text)
+      const permCancel = isPermissionCancellation(m.text)
       const sandboxReq = isSandboxPermissionRequest(m.text)
       const sandboxResp = isSandboxPermissionResponse(m.text)
       const shutdownReq = isShutdownRequest(m.text)
@@ -228,6 +232,8 @@ export function useInboxPoller({
 
       if (permReq) {
         permissionRequests.push(m)
+      } else if (permCancel) {
+        permissionCancellations.push(m)
       } else if (permResp) {
         permissionResponses.push(m)
       } else if (sandboxReq) {
@@ -249,6 +255,14 @@ export function useInboxPoller({
       }
     }
 
+    // A cancelled worker must dismiss its queued/active card and clock.
+    if (isTeamLead(currentAppState.teamContext)) {
+      for (const message of permissionCancellations) {
+        const cancel = isPermissionCancellation(message.text)
+        if (cancel) cancelWorkerPermissionRequest(cancel.request_id)
+      }
+    }
+
     // Handle permission requests (leader side) - route to ToolUseConfirmQueue
     if (
       permissionRequests.length > 0 &&
@@ -264,6 +278,7 @@ export function useInboxPoller({
       for (const m of permissionRequests) {
         const parsed = isPermissionRequest(m.text)
         if (!parsed) continue
+        if (permissionCancellations.some(message => isPermissionCancellation(message.text)?.request_id === parsed.request_id)) continue
 
         if (setToolUseConfirmQueue) {
           // Route through the standard ToolUseConfirmQueue so tmux workers
@@ -277,70 +292,12 @@ export function useInboxPoller({
             continue
           }
 
-          const entry: ToolUseConfirm = {
-            assistantMessage: createAssistantMessage({ content: '' }),
-            tool,
-            description: parsed.description,
-            input: parsed.input,
-            toolUseContext: {} as ToolUseConfirm['toolUseContext'],
-            toolUseID: parsed.tool_use_id,
-            permissionResult: {
-              behavior: 'ask',
-              message: parsed.description,
-            },
-            permissionPromptStartTimeMs: Date.now(),
-            workerBadge: {
-              name: parsed.agent_id,
-              color: 'cyan',
-            },
-            onUserInteraction() {
-              // No-op for tmux workers (no classifier auto-approval)
-            },
-            onAbort() {
-              void sendPermissionResponseViaMailbox(
-                parsed.agent_id,
-                { decision: 'rejected', resolvedBy: 'leader' },
-                parsed.request_id,
-                teamName,
-              )
-            },
-            onAllow(
-              updatedInput: Record<string, unknown>,
-              permissionUpdates: PermissionUpdate[],
-            ) {
-              void sendPermissionResponseViaMailbox(
-                parsed.agent_id,
-                {
-                  decision: 'approved',
-                  resolvedBy: 'leader',
-                  updatedInput,
-                  permissionUpdates,
-                },
-                parsed.request_id,
-                teamName,
-              )
-            },
-            onReject(feedback?: string) {
-              void sendPermissionResponseViaMailbox(
-                parsed.agent_id,
-                {
-                  decision: 'rejected',
-                  resolvedBy: 'leader',
-                  feedback,
-                },
-                parsed.request_id,
-                teamName,
-              )
-            },
-            async recheckPermission() {
-              // No-op for tmux workers — permission state is on the worker side
-            },
-          }
+          const entry = createWorkerPermissionEntry({ request: parsed, tool, teamName, setQueue: setToolUseConfirmQueue })
 
           // Deduplicate: if markMessagesAsRead failed on a prior poll,
           // the same message will be re-read — skip if already queued.
           setToolUseConfirmQueue(queue => {
-            if (queue.some(q => q.toolUseID === parsed.tool_use_id)) {
+            if (queue.some(q => q.toolUseID === entry.toolUseID)) {
               return queue
             }
             return [...queue, entry]

@@ -10,8 +10,11 @@ import {
   createPermissionRequest,
   isSwarmWorker,
   sendPermissionRequestViaMailbox,
+  sendPermissionCancellationViaMailbox,
 } from '../../../utils/swarm/permissionSync.js'
-import { registerPermissionCallback } from '../../useSwarmPermissionPoller.js'
+import { registerPermissionCallback, unregisterPermissionCallback } from '../../useSwarmPermissionPoller.js'
+import { ASK_USER_QUESTION_TOOL_NAME } from '../../../tools/AskUserQuestionTool/prompt.js'
+import { getAutoQuestionDeadline } from '../../../utils/permissions/autoQuestion.js'
 import type { PermissionContext } from '../PermissionContext.js'
 import { createResolveOnce } from '../PermissionContext.js'
 
@@ -64,17 +67,33 @@ async function handleSwarmWorkerPermission(
         pendingWorkerRequest: null,
       }))
 
-    const decision = await new Promise<PermissionDecision>(resolve => {
-      const { resolve: resolveOnce, claim } = createResolveOnce(resolve)
+    const decision = await new Promise<PermissionDecision | null>(resolve => {
+      const { resolve: resolveOnce, claim: claimOnce } = createResolveOnce(resolve)
+      const signal = ctx.toolUseContext.abortController.signal
 
       // Create the permission request
       const request = createPermissionRequest({
         toolName: ctx.tool.name,
         toolUseId: ctx.toolUseID,
-        input: ctx.input,
+        input: updatedInput ?? ctx.input,
         description,
         permissionSuggestions: suggestions,
+        autoQuestion: ctx.tool.name === ASK_USER_QUESTION_TOOL_NAME && getAutoQuestionDeadline(ctx.toolUseContext.getAppState().toolPermissionContext) !== undefined,
       })
+      const claim = () => {
+        if (!claimOnce()) return false
+        unregisterPermissionCallback(request.id)
+        signal.removeEventListener('abort', onAbort)
+        clearPendingRequest()
+        return true
+      }
+      let sent: Promise<boolean>
+      const onAbort = () => {
+        if (!claim()) return
+        if (sent) void sent.then(ok => ok ? sendPermissionCancellationViaMailbox(request) : undefined).catch(error => logError(toError(error)))
+        ctx.logCancelled()
+        resolveOnce(ctx.cancelAndAbort(undefined, true))
+      }
 
       // Register callback BEFORE sending the request to avoid race condition
       // where leader responds before callback is registered
@@ -88,13 +107,12 @@ async function handleSwarmWorkerPermission(
           contentBlocks?: ContentBlockParam[],
         ) {
           if (!claim()) return // atomic check-and-mark before await
-          clearPendingRequest()
 
           // Merge the updated input with the original input
           const finalInput =
             allowedInput && Object.keys(allowedInput).length > 0
               ? allowedInput
-              : ctx.input
+              : updatedInput ?? ctx.input
 
           resolveOnce(
             await ctx.handleUserAllow(
@@ -108,7 +126,6 @@ async function handleSwarmWorkerPermission(
         },
         onReject(feedback?: string, contentBlocks?: ContentBlockParam[]) {
           if (!claim()) return
-          clearPendingRequest()
 
           ctx.logDecision({
             decision: 'reject',
@@ -120,7 +137,8 @@ async function handleSwarmWorkerPermission(
       })
 
       // Now that callback is registered, send the request to the leader
-      void sendPermissionRequestViaMailbox(request)
+      sent = sendPermissionRequestViaMailbox(request)
+      void sent.then(ok => { if (!ok && claim()) resolveOnce(null) })
 
       // Show visual indicator that we're waiting for leader approval
       ctx.toolUseContext.setAppState(prev => ({
@@ -134,16 +152,8 @@ async function handleSwarmWorkerPermission(
 
       // If the abort signal fires while waiting for the leader response,
       // resolve the promise with a cancel decision so it does not hang.
-      ctx.toolUseContext.abortController.signal.addEventListener(
-        'abort',
-        () => {
-          if (!claim()) return
-          clearPendingRequest()
-          ctx.logCancelled()
-          resolveOnce(ctx.cancelAndAbort(undefined, true))
-        },
-        { once: true },
-      )
+      signal.addEventListener('abort', onAbort, { once: true })
+      if (signal.aborted) onAbort()
     })
 
     return decision

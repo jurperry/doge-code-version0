@@ -117,6 +117,7 @@ export const SDKControlPermissionRequestSchema = lazySchema(() =>
       tool_use_id: z.string(),
       agent_id: z.string().optional(),
       description: z.string().optional(),
+      auto_question: z.object({ deadline_ms: z.number().finite() }).optional(),
     })
     .describe('Requests permission to use a tool with the given input.'),
 )

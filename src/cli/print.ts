@@ -155,6 +155,10 @@ import {
 } from 'src/bridge/inboundAttachments.js'
 import type { CanUseToolFn } from 'src/hooks/useCanUseTool.js'
 import { hasPermissionsToUseTool } from 'src/utils/permissions/permissions.js'
+import { getAutoQuestionDeadline } from 'src/utils/permissions/autoQuestion.js'
+import { serializeQuestionPermissions, waitForAutoQuestion } from 'src/utils/permissions/autoQuestionWait.js'
+import { registerLeaderQuestionHost } from 'src/utils/swarm/leaderPermissionBridge.js'
+import { ASK_USER_QUESTION_TOOL_NAME } from 'src/tools/AskUserQuestionTool/prompt.js'
 import { safeParseJSON } from 'src/utils/json.js'
 import {
   outputSchema as permissionToolOutputSchema,
@@ -162,7 +166,6 @@ import {
 } from 'src/utils/permissions/PermissionPromptToolResultSchema.js'
 import { createAbortController } from 'src/utils/abortController.js'
 import { stopRunningWorkflows } from '../tasks/LocalWorkflowTask/LocalWorkflowTask.js'
-import { createCombinedAbortSignal } from 'src/utils/combinedAbortSignal.js'
 import { generateSessionTitle } from 'src/utils/sessionTitle.js'
 import { buildSideQuestionFallbackParams } from 'src/utils/queryContext.js'
 import { runSideQuestion } from 'src/utils/sideQuestion.js'
@@ -851,6 +854,7 @@ export async function runHeadless(
     () => getAppState().mcp.tools,
     onPermissionPrompt,
   )
+  registerLeaderQuestionHost(canUseTool)
   if (options.permissionPromptToolName) {
     // Remove the permission prompt tool from the list of available tools.
     filteredTools = filteredTools.filter(
@@ -4473,91 +4477,42 @@ export function createCanUseToolWithPermissionPrompt(
       return mainPermissionResult
     }
 
-    // Race the permission prompt tool against the abort signal.
-    //
-    // Why we need this: The permission prompt tool may block indefinitely waiting
-    // for user input (e.g., via stdin or a UI dialog). If the user triggers an
-    // interrupt (Ctrl+C), we need to detect it even while the tool is blocked.
-    // Without this race, the abort check would only run AFTER the tool completes,
-    // which may never happen if the tool is waiting for input that will never come.
-    //
-    // The second check (combinedSignal.aborted) handles a race condition where
-    // abort fires after Promise.race resolves but before we reach this check.
-    const { signal: combinedSignal, cleanup: cleanupAbortListener } =
-      createCombinedAbortSignal(toolUseContext.abortController.signal)
-
-    // Check if already aborted before starting the race
-    if (combinedSignal.aborted) {
-      cleanupAbortListener()
-      return {
-        behavior: 'deny',
-        message: 'Permission prompt was aborted.',
-        decisionReason: {
-          type: 'permissionPromptTool' as const,
-          permissionPromptToolName: tool.name,
-          toolResult: undefined,
-        },
-      }
-    }
-
-    const abortPromise = new Promise<'aborted'>(resolve => {
-      combinedSignal.addEventListener('abort', () => resolve('aborted'), {
-        once: true,
-      })
-    })
-
-    const toolCallPromise = permissionPromptTool.call(
-      {
+    const displayInput = mainPermissionResult.updatedInput ?? input
+    const deadlineMs = tool.name === ASK_USER_QUESTION_TOOL_NAME
+      ? getAutoQuestionDeadline(toolUseContext.getAppState().toolPermissionContext) : undefined
+    // The prompt tool has its own cancellation controller: timeout dismisses
+    // only this MCP request, while the parent model turn keeps running.
+    const requestController = new AbortController()
+    const parentSignal = toolUseContext.abortController.signal
+    const onAbort = () => requestController.abort()
+    if (parentSignal.aborted) requestController.abort()
+    else parentSignal.addEventListener('abort', onAbort, { once: true })
+    try {
+      if (parentSignal.aborted) return { behavior: 'deny', message: 'Permission prompt was aborted.' }
+      const decisionPromise = permissionPromptTool.call({
         tool_name: tool.name,
-        input,
+        input: displayInput,
         tool_use_id: toolUseId,
-      },
-      toolUseContext,
-      canUseTool,
-      assistantMessage,
-    )
-
-    const raceResult = await Promise.race([toolCallPromise, abortPromise])
-    cleanupAbortListener()
-
-    if (raceResult === 'aborted' || combinedSignal.aborted) {
-      return {
-        behavior: 'deny',
-        message: 'Permission prompt was aborted.',
-        decisionReason: {
-          type: 'permissionPromptTool' as const,
-          permissionPromptToolName: tool.name,
-          toolResult: undefined,
-        },
-      }
+        ...(deadlineMs !== undefined ? { auto_question: { deadline_ms: deadlineMs } } : {}),
+      }, { ...toolUseContext, abortController: requestController }, canUseTool, assistantMessage).then(result => {
+        const block = permissionPromptTool.mapToolResultToToolResultBlockParam(result.data, '1')
+        if (!Array.isArray(block.content) || block.content[0]?.type !== 'text') {
+          throw new Error('Permission prompt tool returned an invalid result. Expected a text block.')
+        }
+        const response = permissionToolOutputSchema().parse(safeParseJSON(block.content[0].text))
+        return { ...response, decisionReason: { type: 'permissionPromptTool' as const, permissionPromptToolName: tool.name, toolResult: response } }
+      })
+      const winner = await waitForAutoQuestion({ input: displayInput, deadlineMs, signal: parentSignal,
+        decision: decisionPromise, onTimeout: () => requestController.abort() })
+      return winner.decisionReason?.type === 'permissionPromptTool'
+        ? permissionPromptToolResultToPermissionDecision(winner.decisionReason.toolResult as any, permissionPromptTool, displayInput, toolUseContext)
+        : winner
+    } finally {
+      requestController.abort()
+      parentSignal.removeEventListener('abort', onAbort)
     }
-
-    // TypeScript narrowing: after the abort check, raceResult must be ToolResult
-    const result = raceResult as Awaited<typeof toolCallPromise>
-
-    const permissionToolResultBlockParam =
-      permissionPromptTool.mapToolResultToToolResultBlockParam(result.data, '1')
-    if (
-      !permissionToolResultBlockParam.content ||
-      !Array.isArray(permissionToolResultBlockParam.content) ||
-      !permissionToolResultBlockParam.content[0] ||
-      permissionToolResultBlockParam.content[0].type !== 'text' ||
-      typeof permissionToolResultBlockParam.content[0].text !== 'string'
-    ) {
-      throw new Error(
-        'Permission prompt tool returned an invalid result. Expected a single text block param with type="text" and a string text value.',
-      )
-    }
-    return permissionPromptToolResultToPermissionDecision(
-      permissionToolOutputSchema().parse(
-        safeParseJSON(permissionToolResultBlockParam.content[0].text),
-      ),
-      permissionPromptTool,
-      input,
-      toolUseContext,
-    )
   }
-  return canUseTool
+  return serializeQuestionPermissions(canUseTool)
 }
 
 // Exported for testing — regression: this used to crash at construction when
@@ -4572,22 +4527,27 @@ export function getCanUseToolFn(
     return structuredIO.createCanUseTool(onPermissionPrompt)
   }
   if (!permissionPromptToolName) {
-    return async (
+    return serializeQuestionPermissions(async (
       tool,
       input,
       toolUseContext,
       assistantMessage,
       toolUseId,
       forceDecision,
-    ) =>
-      forceDecision ??
-      (await hasPermissionsToUseTool(
+    ) => {
+      const result = forceDecision ?? (await hasPermissionsToUseTool(
         tool,
         input,
         toolUseContext,
         assistantMessage,
         toolUseId,
       ))
+      const deadlineMs = tool.name === ASK_USER_QUESTION_TOOL_NAME && result.behavior === 'ask'
+        ? getAutoQuestionDeadline(toolUseContext.getAppState().toolPermissionContext) : undefined
+      if (deadlineMs === undefined) return result
+      process.stderr.write('等待用户回答：五分钟未提交将采用推荐方案。\n')
+      return waitForAutoQuestion({ input: result.updatedInput ?? input, deadlineMs, signal: toolUseContext.abortController.signal })
+    })
   }
   // Lazy lookup: MCP connects are per-server incremental in print mode, so
   // the tool may not be in appState yet at init time. Resolve on first call

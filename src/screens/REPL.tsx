@@ -2229,7 +2229,7 @@ export function REPL({
     }
     if (focusedInputDialog === 'tool-permission') {
       // Tool use confirm handles the abort signal itself
-      toolUseConfirmQueue[0]?.onAbort();
+      for (const item of toolUseConfirmQueue) item.onAbort();
       setToolUseConfirmQueue([]);
     } else if (focusedInputDialog === 'prompt') {
       // Reject all pending prompts and clear the queue

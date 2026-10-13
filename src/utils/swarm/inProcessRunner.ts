@@ -88,6 +88,11 @@ import {
 } from '../permissions/PermissionUpdate.js'
 import type { PermissionUpdate } from '../permissions/PermissionUpdateSchema.js'
 import { hasPermissionsToUseTool } from '../permissions/permissions.js'
+import { ASK_USER_QUESTION_TOOL_NAME } from '../../tools/AskUserQuestionTool/prompt.js'
+import { getAutoQuestionDeadline } from '../permissions/autoQuestion.js'
+import { waitForAutoQuestion } from '../permissions/autoQuestionWait.js'
+import { createPermissionContext, createPermissionQueueOps } from '../../hooks/toolPermission/PermissionContext.js'
+import { handleInteractivePermission } from '../../hooks/toolPermission/handlers/interactiveHandler.js'
 import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
 import { sleep } from '../sleep.js'
 import { jsonStringify } from '../slowOperations.js'
@@ -110,6 +115,7 @@ import { TEAM_LEAD_NAME } from './constants.js'
 import {
   getLeaderSetToolPermissionContext,
   getLeaderToolUseConfirmQueue,
+  getLeaderQuestionHost,
 } from './leaderPermissionBridge.js'
 import {
   createPermissionRequest,
@@ -134,7 +140,7 @@ const PERMISSION_POLL_INTERVAL_MS = 500
  * sends a permission request to the leader's inbox, waits for the response
  * in the teammate's own mailbox.
  */
-function createInProcessCanUseTool(
+export function createInProcessCanUseTool(
   identity: TeammateIdentity,
   abortController: AbortController,
   onPermissionWaitMs?: (waitMs: number) => void,
@@ -160,6 +166,31 @@ function createInProcessCanUseTool(
     // Pass through allow/deny decisions directly
     if (result.behavior !== 'ask') {
       return result
+    }
+
+    if (tool.name === ASK_USER_QUESTION_TOOL_NAME) {
+      const host = getLeaderQuestionHost()
+      if (host) return host(tool, input, toolUseContext, assistantMessage, toolUseID, result)
+      const deadlineMs = getAutoQuestionDeadline(toolUseContext.getAppState().toolPermissionContext)
+      if (deadlineMs !== undefined) {
+        const queue = getLeaderToolUseConfirmQueue()
+        if (queue) {
+          const started = Date.now()
+          const permissionContext = createPermissionContext(
+            tool, input, { ...toolUseContext, abortController }, assistantMessage, toolUseID,
+            context => getLeaderSetToolPermissionContext()?.(context, { preserveMode: true }),
+            createPermissionQueueOps(queue),
+          )
+          return new Promise(resolve => handleInteractivePermission({
+            ctx: permissionContext, description: 'Teammate needs your answer', result,
+            awaitAutomatedChecksBeforeDialog: true,
+            workerBadge: identity.color ? { name: identity.agentName, color: identity.color } : undefined,
+          }, decision => { onPermissionWaitMs?.(Date.now() - started); resolve(decision) }))
+        }
+        // A headless runner without a permission host cannot expose a mailbox
+        // dialog. It still owns the normal five-minute fallback and cancellation.
+        return waitForAutoQuestion({ input: result.updatedInput ?? input, deadlineMs, signal: abortController.signal })
+      }
     }
 
     // For bash commands, try classifier auto-approval before showing leader dialog.

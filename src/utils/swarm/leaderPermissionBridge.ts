@@ -12,6 +12,7 @@
 
 import type { ToolUseConfirm } from '../../components/permissions/PermissionRequest.js'
 import type { ToolPermissionContext } from '../../Tool.js'
+import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 
 export type SetToolUseConfirmQueueFn = (
   updater: (prev: ToolUseConfirm[]) => ToolUseConfirm[],
@@ -24,6 +25,12 @@ export type SetToolPermissionContextFn = (
 
 let registeredSetter: SetToolUseConfirmQueueFn | null = null
 let registeredPermissionContextSetter: SetToolPermissionContextFn | null = null
+let questionHost: CanUseToolFn | null = null
+
+/** Headless teammates share the leader's single stdio/MCP Ask channel. */
+export function registerLeaderQuestionHost(host: CanUseToolFn): void { questionHost = host }
+export function getLeaderQuestionHost(): CanUseToolFn | null { return questionHost }
+export function unregisterLeaderQuestionHost(): void { questionHost = null }
 
 export function registerLeaderToolUseConfirmQueue(
   setter: SetToolUseConfirmQueueFn,

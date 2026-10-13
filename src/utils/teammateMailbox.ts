@@ -433,6 +433,7 @@ export type PermissionRequestMessage = {
   description: string
   input: Record<string, unknown>
   permission_suggestions: unknown[]
+  auto_question?: boolean
 }
 
 /**
@@ -467,6 +468,7 @@ export function createPermissionRequestMessage(params: {
   description: string
   input: Record<string, unknown>
   permission_suggestions?: unknown[]
+  auto_question?: boolean
 }): PermissionRequestMessage {
   return {
     type: 'permission_request',
@@ -477,6 +479,7 @@ export function createPermissionRequestMessage(params: {
     description: params.description,
     input: params.input,
     permission_suggestions: params.permission_suggestions || [],
+    ...(params.auto_question ? { auto_question: true } : {}),
   }
 }
 
@@ -523,6 +526,14 @@ export function isPermissionRequest(
   } catch {
     // Not JSON or not a valid permission request
   }
+  return null
+}
+
+export function isPermissionCancellation(messageText: string): { type: 'permission_cancel_request'; request_id: string; tool_use_id: string } | null {
+  try {
+    const value = jsonParse(messageText)
+    if (value?.type === 'permission_cancel_request' && typeof value.request_id === 'string' && typeof value.tool_use_id === 'string') return value
+  } catch {}
   return null
 }
 
@@ -1053,6 +1064,7 @@ export function isStructuredProtocolMessage(messageText: string): boolean {
     const type = (parsed as { type: unknown }).type
     return (
       type === 'permission_request' ||
+      type === 'permission_cancel_request' ||
       type === 'permission_response' ||
       type === 'sandbox_permission_request' ||
       type === 'sandbox_permission_response' ||

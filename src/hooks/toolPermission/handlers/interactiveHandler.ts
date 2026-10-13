@@ -30,6 +30,10 @@ import type { PermissionUpdate } from '../../../utils/permissions/PermissionUpda
 import { hasPermissionsToUseTool } from '../../../utils/permissions/permissions.js'
 import type { PermissionContext } from '../PermissionContext.js'
 import { createResolveOnce } from '../PermissionContext.js'
+import { AUTO_QUESTION_TIMEOUT_MS, buildAutoQuestionDecision, getAutoQuestionDeadline } from '../../../utils/permissions/autoQuestion.js'
+import { createAutoQuestionWait } from '../../../utils/permissions/autoQuestionWait.js'
+import { ASK_USER_QUESTION_TOOL_NAME } from '../../../tools/AskUserQuestionTool/prompt.js'
+import type { ToolUseConfirm } from '../../../components/permissions/PermissionRequest.js'
 
 type InteractivePermissionParams = {
   ctx: PermissionContext
@@ -40,6 +44,7 @@ type InteractivePermissionParams = {
   channelCallbacks?: ChannelPermissionCallbacks
   /** IM remote-control relay (`doge im`); same racer contract as the bridge. */
   imRemoteCallbacks?: BridgePermissionCallbacks
+  workerBadge?: ToolUseConfirm['workerBadge']
 }
 
 /**
@@ -70,7 +75,19 @@ function handleInteractivePermission(
     imRemoteCallbacks,
   } = params
 
-  const { resolve: resolveOnce, isResolved, claim } = createResolveOnce(resolve)
+  const { resolve: resolveOnce, isResolved, claim: claimOnce } = createResolveOnce(resolve)
+  let questionWait: { dispose(): void } | undefined
+  const signal = ctx.toolUseContext.abortController.signal
+  let bridgeUnsubscribe: (() => void) | undefined
+  let imUnsubscribe: (() => void) | undefined
+  const claim = () => {
+    if (!claimOnce()) return false
+    questionWait?.dispose()
+    signal.removeEventListener('abort', abortPermission)
+    bridgeUnsubscribe?.()
+    imUnsubscribe?.()
+    return true
+  }
   let userInteracted = false
   let checkmarkTransitionTimer: ReturnType<typeof setTimeout> | undefined
   // Hoisted so onDismissCheckmark (Esc during checkmark window) can also
@@ -86,11 +103,30 @@ function handleInteractivePermission(
 
   const permissionPromptStartTimeMs = Date.now()
   const displayInput = result.updatedInput ?? ctx.input
+  const deadlineMs = ctx.tool.name === ASK_USER_QUESTION_TOOL_NAME
+    ? getAutoQuestionDeadline(ctx.toolUseContext.getAppState().toolPermissionContext, permissionPromptStartTimeMs) : undefined
 
   function clearClassifierIndicator(): void {
     if (feature('BASH_CLASSIFIER')) {
       ctx.updateQueueItem({ classifierCheckInProgress: false })
     }
+  }
+
+  function abortPermission(): void {
+    if (!claim()) return
+    if (bridgeCallbacks && bridgeRequestId) {
+      bridgeCallbacks.sendResponse(bridgeRequestId, { behavior: 'deny', message: 'User aborted' })
+      bridgeCallbacks.cancelRequest(bridgeRequestId)
+    }
+    if (imRemoteCallbacks && imRemoteRequestId) imRemoteCallbacks.cancelRequest(imRemoteRequestId)
+    channelUnsubscribe?.()
+    ctx.removeFromQueue()
+    ctx.logCancelled()
+    ctx.logDecision(
+      { decision: 'reject', source: { type: 'user_abort' } },
+      { permissionPromptStartTimeMs },
+    )
+    resolveOnce(ctx.cancelAndAbort(undefined, true))
   }
 
   ctx.pushToQueue({
@@ -101,7 +137,11 @@ function handleInteractivePermission(
     toolUseContext: ctx.toolUseContext,
     toolUseID: ctx.toolUseID,
     permissionResult: result,
+    workerBadge: params.workerBadge,
     permissionPromptStartTimeMs,
+    // Only the displayed queue head owns a five-minute answering window.
+    // This also covers independent agent executors sharing the same TUI queue.
+    onBecomeActive: deadlineMs === undefined ? undefined : startQuestionWait,
     ...(feature('BASH_CLASSIFIER')
       ? {
           classifierCheckInProgress:
@@ -138,26 +178,7 @@ function handleInteractivePermission(
         ctx.removeFromQueue()
       }
     },
-    onAbort() {
-      if (!claim()) return
-      if (bridgeCallbacks && bridgeRequestId) {
-        bridgeCallbacks.sendResponse(bridgeRequestId, {
-          behavior: 'deny',
-          message: 'User aborted',
-        })
-        bridgeCallbacks.cancelRequest(bridgeRequestId)
-      }
-      if (imRemoteCallbacks && imRemoteRequestId) {
-        imRemoteCallbacks.cancelRequest(imRemoteRequestId)
-      }
-      channelUnsubscribe?.()
-      ctx.logCancelled()
-      ctx.logDecision(
-        { decision: 'reject', source: { type: 'user_abort' } },
-        { permissionPromptStartTimeMs },
-      )
-      resolveOnce(ctx.cancelAndAbort(undefined, true))
-    },
+    onAbort: abortPermission,
     async onAllow(
       updatedInput,
       permissionUpdates: PermissionUpdate[],
@@ -247,6 +268,29 @@ function handleInteractivePermission(
     },
   })
 
+  // Own cancellation independently of the visible queue head. Agent/parent
+  // aborts must settle queued calls as well as dispose their display timer.
+  signal.addEventListener('abort', abortPermission, { once: true })
+  if (signal.aborted) { abortPermission(); return }
+
+  function startQuestionWait(): void {
+    if (questionWait || isResolved()) return
+    const activeDeadline = Date.now() + AUTO_QUESTION_TIMEOUT_MS
+    ctx.updateQueueItem({ autoQuestionDeadlineMs: activeDeadline })
+    questionWait = createAutoQuestionWait({
+      deadlineMs: activeDeadline,
+      signal: ctx.toolUseContext.abortController.signal,
+      onTimeout: () => {
+        if (!claim()) return
+        if (bridgeCallbacks && bridgeRequestId) bridgeCallbacks.cancelRequest(bridgeRequestId)
+        if (imRemoteCallbacks && imRemoteRequestId) imRemoteCallbacks.cancelRequest(imRemoteRequestId)
+        channelUnsubscribe?.()
+        ctx.removeFromQueue()
+        resolveOnce(buildAutoQuestionDecision(displayInput))
+      },
+    })
+  }
+
   // Race 4: Bridge permission response from CCR (claude.ai)
   // When the bridge is connected, send the permission request to CCR and
   // subscribe for a response. Whichever side (CLI or CCR) responds first
@@ -268,12 +312,10 @@ function handleInteractivePermission(
       result.blockedPath,
     )
 
-    const signal = ctx.toolUseContext.abortController.signal
-    const unsubscribe = bridgeCallbacks.onResponse(
+    bridgeUnsubscribe = bridgeCallbacks.onResponse(
       bridgeRequestId,
       response => {
         if (!claim()) return // Local user/hook/classifier already responded
-        signal.removeEventListener('abort', unsubscribe)
         clearClassifierChecking(ctx.toolUseID)
         clearClassifierIndicator()
         ctx.removeFromQueue()
@@ -314,7 +356,6 @@ function handleInteractivePermission(
       },
     )
 
-    signal.addEventListener('abort', unsubscribe, { once: true })
   }
 
   // Race 5: IM remote-control relay (`doge im` daemon). The paired IM user
@@ -332,12 +373,10 @@ function handleInteractivePermission(
       result.blockedPath,
     )
 
-    const imSignal = ctx.toolUseContext.abortController.signal
-    const imUnsubscribe = imRemoteCallbacks.onResponse(
+    imUnsubscribe = imRemoteCallbacks.onResponse(
       imRemoteRequestId,
       response => {
         if (!claim()) return // Another racer already won
-        imSignal.removeEventListener('abort', imUnsubscribe)
         clearClassifierChecking(ctx.toolUseID)
         clearClassifierIndicator()
         ctx.removeFromQueue()
@@ -374,7 +413,6 @@ function handleInteractivePermission(
       },
     )
 
-    imSignal.addEventListener('abort', imUnsubscribe, { once: true })
   }
 
   // Channel permission relay — races alongside the bridge block above. Send a
@@ -503,8 +541,9 @@ function handleInteractivePermission(
         result.suggestions,
         result.updatedInput,
         permissionPromptStartTimeMs,
+        claim,
       )
-      if (!hookDecision || !claim()) return
+      if (!hookDecision) return
       if (bridgeCallbacks && bridgeRequestId) {
         bridgeCallbacks.cancelRequest(bridgeRequestId)
       }

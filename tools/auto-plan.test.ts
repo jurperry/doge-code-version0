@@ -51,6 +51,8 @@ test('automatic plan reminders retain their origin after returning to Auto', () 
   const automatic = JSON.stringify(normalizeAttachmentForAPI({ ...attachment, autoPlan: true } as any))
   expect(automatic).toContain('Auto planning is active')
   expect(automatic).not.toContain('feel free to ask the user questions')
+  expect(automatic).toContain('five minutes')
+  expect(automatic).not.toContain('Do not ask the user questions')
   setCurrentPermissionMode('plan', true)
   expect(JSON.stringify(normalizeAttachmentForAPI(attachment))).toContain('feel free to ask the user questions')
   setCurrentPermissionMode('default')
@@ -75,10 +77,10 @@ test('leaving automatic planning clears its marker on every permission update', 
     expect((applyPermissionUpdate(automaticPlan as any, { type: 'setMode', mode, destination: 'session' } as any) as any).autoPlan).toBeUndefined()
   }
 })
-test('automatic planning answers questions without an interactive request', async () => {
+test('automatic planning keeps questions interactive with a CLI-owned deadline', async () => {
   const result = await AskUserQuestionTool.checkPermissions(questions, ctx(automaticPlan))
-  expect(result.behavior).toBe('allow')
-  expect((result as any).updatedInput.answers).toEqual({ 'Choose an approach?': 'Recommended' })
+  expect(result.behavior).toBe('ask')
+  expect((result as any).updatedInput.answers).toBeUndefined()
 })
 test('remote prompts preserve an automatic plan but can switch manual Plan to Auto', () => {
   expect(remoteAutoTargetMode(true, 'plan', false, true)).toBeNull()

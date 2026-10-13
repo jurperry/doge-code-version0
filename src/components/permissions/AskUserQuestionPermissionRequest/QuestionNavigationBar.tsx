@@ -6,6 +6,7 @@ import { stringWidth } from '../../../ink/stringWidth.js';
 import { Box, Text } from '../../../ink.js';
 import type { Question } from '../../../tools/AskUserQuestionTool/AskUserQuestionTool.js';
 import { truncateToWidth } from '../../../utils/format.js';
+import { AutoQuestionCountdown } from './AutoQuestionCountdown.js';
 type Props = {
   questions: Question[];
   currentQuestionIndex: number;
@@ -164,7 +165,7 @@ export function QuestionNavigationBar(t0) {
   } else {
     t7 = $[38];
   }
-  return t7;
+  return <Box flexDirection="column"><AutoQuestionCountdown />{t7}</Box>;
 }
 function _temp3(sum, w) {
   return sum + w;

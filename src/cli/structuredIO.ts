@@ -35,6 +35,9 @@ import type {
   PermissionDecisionReason,
 } from 'src/utils/permissions/PermissionResult.js'
 import { hasPermissionsToUseTool } from 'src/utils/permissions/permissions.js'
+import { getAutoQuestionDeadline } from 'src/utils/permissions/autoQuestion.js'
+import { serializeQuestionPermissions, waitForAutoQuestion } from 'src/utils/permissions/autoQuestionWait.js'
+import { ASK_USER_QUESTION_TOOL_NAME } from 'src/tools/AskUserQuestionTool/prompt.js'
 import { writeToStdout } from 'src/utils/process.js'
 import { jsonStringify } from 'src/utils/slowOperations.js'
 import { z } from 'zod/v4'
@@ -549,7 +552,7 @@ export class StructuredIO {
   createCanUseTool(
     onPermissionPrompt?: (details: RequiresActionDetails) => void,
   ): CanUseToolFn {
-    return async (
+    return serializeQuestionPermissions(async (
       tool: Tool,
       input: { [key: string]: unknown },
       toolUseContext: ToolUseContext,
@@ -574,6 +577,10 @@ export class StructuredIO {
         return mainPermissionResult
       }
 
+      const displayInput = mainPermissionResult.updatedInput ?? input
+      const deadlineMs = tool.name === ASK_USER_QUESTION_TOOL_NAME
+        ? getAutoQuestionDeadline(toolUseContext.getAppState().toolPermissionContext) : undefined
+
       // Run PermissionRequest hooks in parallel with the SDK permission
       // prompt.  In the terminal CLI, hooks race against the interactive
       // prompt so that e.g. a hook with --delay 20 doesn't block the UI.
@@ -593,21 +600,22 @@ export class StructuredIO {
         const hookPromise = executePermissionRequestHooksForSDK(
           tool.name,
           toolUseID,
-          input,
+          displayInput,
           toolUseContext,
           mainPermissionResult.suggestions,
-        ).then(decision => ({ source: 'hook' as const, decision }))
+        ).then(decision => decision ?? new Promise<PermissionDecision>(() => {}))
 
         // Start the SDK permission prompt immediately (don't wait for hooks)
         const requestId = randomUUID()
         onPermissionPrompt?.(
-          buildRequiresActionDetails(tool, input, toolUseID, requestId),
+          buildRequiresActionDetails(tool, displayInput, toolUseID, requestId),
         )
         const sdkPromise = this.sendRequest<PermissionToolOutput>(
           {
             subtype: 'can_use_tool',
             tool_name: tool.name,
-            input,
+            input: displayInput,
+            ...(deadlineMs !== undefined ? { auto_question: { deadline_ms: deadlineMs } } : {}),
             permission_suggestions: mainPermissionResult.suggestions,
             blocked_path: mainPermissionResult.blockedPath,
             decision_reason: serializeDecisionReason(
@@ -619,39 +627,33 @@ export class StructuredIO {
           permissionToolOutputSchema(),
           hookAbortController.signal,
           requestId,
-        ).then(result => ({ source: 'sdk' as const, result }))
+        ).then(result => ({ ...result, decisionReason: {
+          type: 'permissionPromptTool' as const,
+          permissionPromptToolName: tool.name,
+          toolResult: result,
+        } }))
 
         // Race: hook completion vs SDK prompt response.
         // The hook promise always resolves (never rejects), returning
         // undefined if no hook made a decision.
-        const winner = await Promise.race([hookPromise, sdkPromise])
-
-        if (winner.source === 'hook') {
-          if (winner.decision) {
-            // Hook decided — abort the pending SDK request.
-            // Suppress the expected AbortError rejection from sdkPromise.
-            sdkPromise.catch(() => {})
-            hookAbortController.abort()
-            return winner.decision
-          }
-          // Hook passed through (no decision) — wait for the SDK prompt
-          const sdkResult = await sdkPromise
-          return permissionPromptToolResultToPermissionDecision(
-            sdkResult.result,
-            tool,
-            input,
-            toolUseContext,
-          )
+        const winner = await waitForAutoQuestion({
+          input: displayInput,
+          deadlineMs,
+          signal: parentSignal,
+          decision: Promise.race([hookPromise, sdkPromise]),
+          onTimeout: () => hookAbortController.abort(),
+        })
+        if (winner.decisionReason?.type === 'permissionPromptTool') {
+          return permissionPromptToolResultToPermissionDecision(winner.decisionReason.toolResult as PermissionToolOutput, tool, displayInput, toolUseContext)
         }
-
-        // SDK prompt responded first — use its result (hook still running
-        // in background but its result will be ignored)
-        return permissionPromptToolResultToPermissionDecision(
-          winner.result,
-          tool,
-          input,
-          toolUseContext,
-        )
+        if (winner.decisionReason?.type === 'hook') {
+          const updates = (winner as PermissionDecision & { updatedPermissions?: PermissionUpdate[] }).updatedPermissions
+          if (updates?.length) {
+            persistPermissionUpdates(updates)
+            toolUseContext.setAppState(prev => ({ ...prev, toolPermissionContext: applyPermissionUpdates(prev.toolPermissionContext, updates) }))
+          }
+        }
+        return winner
       } catch (error) {
         return permissionPromptToolResultToPermissionDecision(
           {
@@ -664,6 +666,9 @@ export class StructuredIO {
           toolUseContext,
         )
       } finally {
+        // Cancels only this interaction, never the model turn. Late host
+        // responses are already tracked/ignored by sendRequest's abort path.
+        hookAbortController.abort()
         // Only transition back to 'running' if no other permission prompts
         // are pending (concurrent tool execution can have multiple in-flight).
         if (this.getPendingPermissionRequests().length === 0) {
@@ -671,7 +676,7 @@ export class StructuredIO {
         }
         parentSignal.removeEventListener('abort', onParentAbort)
       }
-    }
+    })
   }
 
   createHookCallback(callbackId: string, timeout?: number): HookCallback {
@@ -831,23 +836,8 @@ async function executePermissionRequestHooksForSDK(
       if (decision.behavior === 'allow') {
         const finalInput = decision.updatedInput || input
 
-        // Apply permission updates if provided by hook ("always allow")
-        const permissionUpdates = decision.updatedPermissions ?? []
-        if (permissionUpdates.length > 0) {
-          persistPermissionUpdates(permissionUpdates)
-          const currentAppState = toolUseContext.getAppState()
-          const updatedContext = applyPermissionUpdates(
-            currentAppState.toolPermissionContext,
-            permissionUpdates,
-          )
-          // Update permission context via setAppState
-          toolUseContext.setAppState(prev => {
-            if (prev.toolPermissionContext === updatedContext) return prev
-            return { ...prev, toolPermissionContext: updatedContext }
-          })
-        }
-
         return {
+          ...decision,
           behavior: 'allow',
           updatedInput: finalInput,
           userModified: false,

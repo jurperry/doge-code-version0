@@ -25,6 +25,8 @@ import {
 import { plural } from '../stringUtils.js'
 import { isAutoBypassActive, isZeroAskAutoActive, isZeroAskPlanInterlude } from './autoBypass.js'
 import { isAutoPlanOperationAllowed } from './autoPlan.js'
+import { isAutoQuestionContext } from './autoQuestion.js'
+import { ASK_USER_QUESTION_TOOL_NAME } from '../../tools/AskUserQuestionTool/prompt.js'
 import { permissionModeTitle } from './PermissionMode.js'
 import type {
   PermissionAskDecision,
@@ -932,7 +934,8 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
     // When permission prompts should be avoided (e.g., background/headless agents),
     // run PermissionRequest hooks first to give them a chance to allow/deny.
     // Only auto-deny if no hook provides a decision.
-    if (appState.toolPermissionContext.shouldAvoidPermissionPrompts) {
+    if (appState.toolPermissionContext.shouldAvoidPermissionPrompts &&
+        !(tool.name === ASK_USER_QUESTION_TOOL_NAME && isAutoQuestionContext(appState.toolPermissionContext))) {
       const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
         tool,
         input,
@@ -1248,6 +1251,13 @@ async function hasPermissionsToUseToolInner(
   zeroAskAuto = isZeroAskAutoActive(appState.toolPermissionContext)
   zeroAskPlanInterlude = isZeroAskPlanInterlude(appState.toolPermissionContext)
   if (toolPermissionResult?.behavior === 'deny') {
+    return toolPermissionResult
+  }
+
+  // Ask is the sole Auto interaction exception, after deny and before the
+  // automatic Plan read-only fast path. Other tools keep their existing rules.
+  if (tool.name === ASK_USER_QUESTION_TOOL_NAME &&
+      (zeroAskAuto || zeroAskPlanInterlude) && toolPermissionResult.behavior === 'ask') {
     return toolPermissionResult
   }
 

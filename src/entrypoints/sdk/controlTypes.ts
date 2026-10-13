@@ -9,7 +9,11 @@ export type SDKControlCancelRequest = {
 }
 
 export type SDKControlPermissionRequest = {
-  subtype: 'permission'
+  subtype: 'can_use_tool'
+  tool_name: string
+  input: Record<string, unknown>
+  tool_use_id: string
+  auto_question?: { deadline_ms: number }
   [key: string]: unknown
 }
 

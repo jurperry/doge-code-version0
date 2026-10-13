@@ -1,10 +1,10 @@
 import { c as _c } from "react/compiler-runtime";
 import type { Base64ImageSource, ImageBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs';
-import React, { Suspense, use, useCallback, useMemo, useRef, useState } from 'react';
+import React, { Suspense, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSettings } from '../../../hooks/useSettings.js';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { stringWidth } from '../../../ink/stringWidth.js';
-import { useTheme } from '../../../ink.js';
+import { Box, Text, useTheme } from '../../../ink.js';
 import { useKeybindings } from '../../../keybindings/useKeybinding.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../../services/analytics/index.js';
 import { useAppState } from '../../../state/AppState.js';
@@ -23,11 +23,17 @@ import type { PermissionRequestProps } from '../PermissionRequest.js';
 import { QuestionView } from './QuestionView.js';
 import { SubmitQuestionsView } from './SubmitQuestionsView.js';
 import { useMultipleChoiceState } from './use-multiple-choice-state.js';
+import { QuestionDeadlineContext } from './AutoQuestionCountdown.js';
 const MIN_CONTENT_HEIGHT = 12;
 const MIN_CONTENT_WIDTH = 40;
 // Lines used by chrome around the content area (nav bar, title, footer, help text, etc.)
 const CONTENT_CHROME_OVERHEAD = 15;
 export function AskUserQuestionPermissionRequest(props) {
+  return <QuestionDeadlineContext.Provider value={props.toolUseConfirm.autoQuestionDeadlineMs}>
+    <AskUserQuestionDialog {...props} />
+  </QuestionDeadlineContext.Provider>;
+}
+function AskUserQuestionDialog(props) {
   const $ = _c(4);
   const settings = useSettings();
   if (settings.syntaxHighlightingDisabled) {

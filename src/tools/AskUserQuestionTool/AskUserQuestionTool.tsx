@@ -5,7 +5,7 @@ import { getAllowedChannels, getQuestionPreviewFormat } from 'src/bootstrap/stat
 import { MessageResponse } from 'src/components/MessageResponse.js';
 import { BLACK_CIRCLE } from 'src/constants/figures.js';
 import { getModeColor } from 'src/utils/permissions/PermissionMode.js';
-import { isZeroAskAutoActive, isZeroAskPlanInterlude } from 'src/utils/permissions/autoBypass.js';
+import { buildRecommendedAnswers } from 'src/utils/permissions/autoQuestion.js';
 import { z } from 'zod/v4';
 import { Box, Text } from '../../ink.js';
 import type { Tool } from '../../Tool.js';
@@ -70,7 +70,8 @@ type InputSchema = ReturnType<typeof inputSchema>;
 const outputSchema = lazySchema(() => z.object({
   questions: z.array(questionSchema()).describe('The questions that were asked'),
   answers: z.record(z.string(), z.string()).describe('The answers provided by the user (question text -> answer string; multi-select answers are comma-separated)'),
-  annotations: annotationsSchema()
+  annotations: annotationsSchema(),
+  answerSource: z.enum(['user', 'auto_recommended']).optional()
 }));
 type OutputSchema = ReturnType<typeof outputSchema>;
 
@@ -82,53 +83,16 @@ export type Question = z.infer<ReturnType<typeof questionSchema>>;
 export type QuestionOption = z.infer<ReturnType<typeof questionOptionSchema>>;
 export type Output = z.infer<OutputSchema>;
 
-/**
- * doge fork: Auto zero-ask — build the answers an AskUserQuestion call gets
- * when no user is consulted. Every question takes its first option label
- * (multi-select takes the first item); a question with no usable options
- * gets a fixed delegation answer. Answers the model pre-filled in the input
- * (the schema allows it) win over the defaults.
- *
- * @internal Exported for testing.
- */
-export function buildAutoAnswers(input: {
-  questions?: {
-    question?: string
-    options?: { label?: string }[]
-    multiSelect?: boolean
-  }[]
-  answers?: Record<string, string>
-}): Record<string, string> {
-  const answers: Record<string, string> = {}
-  for (const question of input.questions ?? []) {
-    if (typeof question?.question !== 'string') continue
-    answers[question.question] =
-      question.options?.[0]?.label ?? '由 AI 全权决定'
-  }
-  return { ...answers, ...input.answers }
-}
+/** @internal Backward-compatible export of the shared recommendation policy. */
+export const buildAutoAnswers = buildRecommendedAnswers;
 
-function AskUserQuestionResultMessage(t0) {
-  const $ = _c(3);
-  const {
-    answers
-  } = t0;
-  let t1;
-  if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
-    t1 = <Box flexDirection="row"><Text color={getModeColor("default")}>{BLACK_CIRCLE} </Text><Text>User answered Claude's questions:</Text></Box>;
-    $[0] = t1;
-  } else {
-    t1 = $[0];
-  }
-  let t2;
-  if ($[1] !== answers) {
-    t2 = <Box flexDirection="column" marginTop={1}>{t1}<MessageResponse><Box flexDirection="column">{Object.entries(answers).map(_temp)}</Box></MessageResponse></Box>;
-    $[1] = answers;
-    $[2] = t2;
-  } else {
-    t2 = $[2];
-  }
-  return t2;
+function AskUserQuestionResultMessage({ answers, answerSource }) {
+  return <Box flexDirection="column" marginTop={1}>
+    <Box flexDirection="row"><Text color={getModeColor('default')}>{BLACK_CIRCLE} </Text>
+      <Text>{answerSource === 'auto_recommended' ? '等待五分钟未获提交，自动采用推荐方案：' : "User answered Claude's questions:"}</Text>
+    </Box>
+    <MessageResponse><Box flexDirection="column">{Object.entries(answers).map(_temp)}</Box></MessageResponse>
+  </Box>;
 }
 function _temp(t0) {
   const [questionText, answer] = t0;
@@ -172,7 +136,7 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
     return true;
   },
   isConcurrencySafe() {
-    return true;
+    return false;
   },
   isReadOnly() {
     return true;
@@ -207,25 +171,13 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
       result: true
     };
   },
-  async checkPermissions(input, context) {
-    // doge fork: Auto zero-ask — never show the question card. The allow
-    // decision carries auto-filled answers through updatedInput into call()
-    // (hasPermissionsToUseToolInner 2a → permissionDecision.updatedInput →
-    // tool input), so the tool completes without any user interaction.
-    const permissionContext = context.getAppState().toolPermissionContext;
-    if (isZeroAskAutoActive(permissionContext) || isZeroAskPlanInterlude(permissionContext)) {
-      return {
-        behavior: 'allow' as const,
-        updatedInput: {
-          ...input,
-          answers: buildAutoAnswers(input),
-        }
-      };
-    }
+  async checkPermissions(input) {
+    // Model-provided answers are drafts, never evidence of a human response.
+    const { answers: _answers, ...questionInput } = input;
     return {
       behavior: 'ask' as const,
       message: 'Answer questions?',
-      updatedInput: input
+      updatedInput: questionInput
     };
   },
   renderToolUseMessage() {
@@ -235,9 +187,10 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
     return null;
   },
   renderToolResultMessage({
-    answers
+    answers,
+    answerSource
   }, _toolUseID) {
-    return <AskUserQuestionResultMessage answers={answers} />;
+    return <AskUserQuestionResultMessage answers={answers} answerSource={answerSource} />;
   },
   renderToolUseRejectedMessage() {
     return <Box flexDirection="row" marginTop={1}>
@@ -248,15 +201,14 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
   renderToolUseErrorMessage() {
     return null;
   },
-  async call({
-    questions,
-    answers = {},
-    annotations
-  }, _context) {
+  async call(input, _context) {
+    const { questions, answers = {}, annotations } = input;
+    const answerSource = (input as typeof input & { _autoQuestionAnswerSource?: string })._autoQuestionAnswerSource === 'auto_recommended' ? 'auto_recommended' : 'user';
     return {
       data: {
         questions,
         answers,
+        answerSource,
         ...(annotations && {
           annotations
         })
@@ -265,7 +217,8 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
   },
   mapToolResultToToolResultBlockParam({
     answers,
-    annotations
+    annotations,
+    answerSource
   }, toolUseID) {
     const answersText = Object.entries(answers).map(([questionText, answer]) => {
       const annotation = annotations?.[questionText];
@@ -280,7 +233,9 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
     }).join(', ');
     return {
       type: 'tool_result',
-      content: `User has answered your questions: ${answersText}. You can now continue with the user's answers in mind.`,
+      content: answerSource === 'auto_recommended'
+        ? `No submitted answer was received within five minutes. Automatically adopted the recommended choices: ${answersText}. Continue with these decisions; do not repeat the same questions.`
+        : `User has answered your questions: ${answersText}. You can now continue with the user's answers in mind.`,
       tool_use_id: toolUseID
     };
   }

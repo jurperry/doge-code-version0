@@ -82,6 +82,7 @@ export const SwarmPermissionRequestSchema = lazySchema(() =>
     permissionUpdates: z.array(z.unknown()).optional(),
     /** Timestamp when request was created */
     createdAt: z.number(),
+    autoQuestion: z.boolean().optional(),
   }),
 )
 
@@ -174,6 +175,7 @@ export function createPermissionRequest(params: {
   workerId?: string
   workerName?: string
   workerColor?: string
+  autoQuestion?: boolean
 }): SwarmPermissionRequest {
   const teamName = params.teamName || getTeamName()
   const workerId = params.workerId || getAgentId()
@@ -203,6 +205,7 @@ export function createPermissionRequest(params: {
     permissionSuggestions: params.permissionSuggestions || [],
     status: 'pending',
     createdAt: Date.now(),
+    ...(params.autoQuestion ? { autoQuestion: true } : {}),
   }
 }
 
@@ -673,6 +676,16 @@ export async function getLeaderName(teamName?: string): Promise<string | null> {
  * @param request - The permission request to send
  * @returns true if the message was sent successfully
  */
+export async function sendPermissionCancellationViaMailbox(request: SwarmPermissionRequest): Promise<void> {
+  const leader = await getLeaderName(request.teamName)
+  if (!leader) return
+  await writeToMailbox(leader, {
+    from: request.workerName,
+    text: jsonStringify({ type: 'permission_cancel_request', request_id: request.id, tool_use_id: request.toolUseId }),
+    timestamp: new Date().toISOString(), color: request.workerColor,
+  }, request.teamName)
+}
+
 export async function sendPermissionRequestViaMailbox(
   request: SwarmPermissionRequest,
 ): Promise<boolean> {
@@ -694,6 +707,7 @@ export async function sendPermissionRequestViaMailbox(
       description: request.description,
       input: request.input,
       permission_suggestions: request.permissionSuggestions,
+      auto_question: request.autoQuestion,
     })
 
     // Send to leader's mailbox (routes to in-process or file-based based on recipient)

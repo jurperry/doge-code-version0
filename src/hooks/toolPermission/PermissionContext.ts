@@ -218,6 +218,7 @@ function createPermissionContext(
       suggestions: PermissionUpdate[] | undefined,
       updatedInput?: Record<string, unknown>,
       permissionPromptStartTimeMs?: number,
+      claim?: () => boolean,
     ): Promise<PermissionDecision | null> {
       for await (const hookResult of executePermissionRequestHooks(
         tool.name,
@@ -230,6 +231,8 @@ function createPermissionContext(
       )) {
         if (hookResult.permissionRequestResult) {
           const decision = hookResult.permissionRequestResult
+          // Claim before permission persistence or interrupt side effects.
+          if (claim && !claim()) return null
           if (decision.behavior === 'allow') {
             const finalInput = decision.updatedInput ?? updatedInput ?? input
             return await this.handleHookAllow(

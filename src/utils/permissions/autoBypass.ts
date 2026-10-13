@@ -17,10 +17,10 @@ export function isAutoBypassActive(
 }
 
 /**
- * doge fork: "Auto zero-ask" — a bypassPermissions session never asks the
- * user anything. While active, hasPermissionsToUseToolInner releases every
+ * doge fork: Auto releases ordinary tool prompts. AskUserQuestion has its
+ * own interactive five-minute answering window. While active, the pipeline releases other
  * prompt-shaped decision (tool ask rules 1b, requiresUserInteraction tools
- * 1e, content ask rules 1f, safety checks 1g) to the 2a bypass allow;
+ * 1e except AskUserQuestion, content ask rules 1f, safety checks 1g) to the 2a bypass allow;
  * explicit deny rules (1a/1d) still win. The killswitch
  * (settings/GrowthBook) turns the whole behavior off.
  */
