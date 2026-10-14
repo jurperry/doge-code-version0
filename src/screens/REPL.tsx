@@ -168,6 +168,7 @@ import { resolveAgentTools } from '../tools/AgentTool/agentToolUtils.js';
 import { resumeAgentBackground } from '../tools/AgentTool/resumeAgent.js';
 import { useMainLoopModel } from '../hooks/useMainLoopModel.js';
 import { useAppState, useSetAppState, useAppStateStore } from '../state/AppState.js';
+import { stopRunningWorkflows } from '../tasks/LocalWorkflowTask/LocalWorkflowTask.js';
 import type { AppState } from '../state/AppStateStore.js';
 import type { ContentBlockParam, ImageBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs';
 import type { ProcessUserInputContext } from '../utils/processUserInput/processUserInput.js';
@@ -948,6 +949,7 @@ export function REPL({
       },
       onInterrupt: () => {
         abortControllerRef.current?.abort();
+        void stopRunningWorkflows(store.getState().tasks, setAppState);
       },
     });
     void imRemote.attach('tui', lastPathSegment(process.cwd())).then(ok => {

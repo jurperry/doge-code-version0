@@ -29,7 +29,12 @@
  */
 
 import { createChildAbortController } from '../../utils/abortController.js'
-import { retryErrorClass } from '../../services/api/withRetry.js'
+import { dirname, basename, join } from 'node:path'
+import { getTranscriptPath } from '../../utils/sessionStorage.js'
+import { WorkflowCheckpointStore, type WorkflowCheckpoint } from './checkpoint.js'
+import { withScopedEffort } from '../../utils/effortContext.js'
+import { StepActivity } from './stepActivity.js'
+import { retryErrorClass, retryErrorKind } from '../../services/api/withRetry.js'
 import { mcpProgressSummary } from '../AgentTool/mcpProgress.js'
 import { createTaskStateBase, generateTaskId } from '../../Task.js'
 import {
@@ -82,6 +87,25 @@ import {
 } from './spec.js'
 
 type SetAppState = LocalJSXCommandContext['setAppState']
+const workflowRuns = new Map<string, Promise<void>>()
+function checkpointStore(): WorkflowCheckpointStore {
+  const transcript = getTranscriptPath()
+  return new WorkflowCheckpointStore(join(dirname(transcript), basename(transcript, '.jsonl'), 'workflows'))
+}
+
+/** Common TUI/headless/remote input route calls this only for explicit user continue. */
+export async function resumeWorkflowTask(context: LocalJSXCommandContext): Promise<string | undefined> {
+  const store = checkpointStore()
+  let checkpoint = store.latest()
+  if (!checkpoint) return undefined
+  if (context.getAppState().tasks[checkpoint.taskId]?.status === 'running') return undefined
+  await workflowRuns.get(checkpoint.taskId)
+  checkpoint = store.latest()
+  if (!checkpoint || context.abortController.signal.aborted) return undefined
+  startWorkflowTask({ spec: checkpoint.spec, argsString: checkpoint.argsString, argValues: checkpoint.argValues, context, resume: checkpoint })
+  store.remove(checkpoint.taskId)
+  return `▶ 工作流 "${checkpoint.spec.name}" 已继续，从步骤 ${checkpoint.spec.steps[checkpoint.nextStep]!.title} 恢复；已完成步骤的结果已保留。`
+}
 
 export interface WorkflowRunHandle {
   taskId: string
@@ -107,8 +131,9 @@ export function startWorkflowTask(opts: {
   argsString: string
   argValues: Record<string, string>
   context: LocalJSXCommandContext
+  resume?: WorkflowCheckpoint
 }): WorkflowRunHandle {
-  const { spec, argsString, argValues, context } = opts
+  const { spec, argsString, argValues, context, resume } = opts
   const taskId = generateTaskId('local_workflow')
   const abortController = createChildAbortController(context.abortController)
   const description = `工作流 ${spec.name}`
@@ -120,7 +145,7 @@ export function startWorkflowTask(opts: {
     workflowName: spec.name,
     args: argsString,
     abortController,
-    steps: spec.steps.map(s => ({ stepId: s.id, title: s.title, status: 'pending' })),
+    steps: spec.steps.map((s, i) => i < (resume?.nextStep ?? 0) ? { ...resume!.stepsRun[i]! } : { stepId: s.id, title: s.title, status: 'pending' }),
   }
   const unregisterCleanup = registerCleanup(async () => {
     abortController.abort()
@@ -129,13 +154,15 @@ export function startWorkflowTask(opts: {
 
   registerTask(taskState, context.setAppState as SetAppState)
 
-  void runWorkflowSteps({
+  const execution = runWorkflowSteps({
     spec,
     taskId,
     description,
     argValues,
     context,
     abortController,
+    argsString,
+    resume,
   }).catch(err => {
     logForDebugging(
       `[workflow ${spec.name}] engine crashed: ${errorMessage(err)}`,
@@ -151,6 +178,8 @@ export function startWorkflowTask(opts: {
       `引擎异常：${errorMessage(err)}`,
     )
   })
+  workflowRuns.set(taskId, execution)
+  void execution.finally(() => workflowRuns.delete(taskId))
 
   return { taskId }
 }
@@ -162,23 +191,32 @@ async function runWorkflowSteps(opts: {
   argValues: Record<string, string>
   context: LocalJSXCommandContext
   abortController: AbortController
+  argsString: string
+  resume?: WorkflowCheckpoint
 }): Promise<void> {
-  const { spec, taskId, description, argValues, context, abortController } = opts
+  const { spec, taskId, description, argValues, context, abortController, argsString, resume } = opts
+  const store = checkpointStore()
   const setAppState = context.setAppState as SetAppState
-  const stepsRun: WorkflowStepRun[] = spec.steps.map(s => ({
+  const stepsRun: WorkflowStepRun[] = spec.steps.map((s, i) => i < (resume?.nextStep ?? 0) ? { ...resume!.stepsRun[i]! } : ({
     stepId: s.id,
     title: s.title,
     status: 'pending',
   }))
-  const interp: InterpolationContext = { args: argValues, steps: {} }
+  const interp: InterpolationContext = { args: argValues, steps: { ...resume?.outputs } }
+  const save = (nextStep: number, state: WorkflowCheckpoint['state']) => {
+    if (nextStep >= spec.steps.length) return
+    store.save({ taskId, spec, argsString, argValues, nextStep, state, outputs: interp.steps, stepsRun, savedAt: Date.now() })
+  }
 
   let workflowStatus: 'completed' | 'failed' | 'killed' = 'completed'
   let failReason: string | undefined
 
-  for (let i = 0; i < spec.steps.length; i++) {
+  for (let i = resume?.nextStep ?? 0; i < spec.steps.length; i++) {
+    save(i, 'running')
     if (abortController.signal.aborted) {
       for (const s of stepsRun.slice(i)) s.status = 'skipped'
       workflowStatus = 'killed'
+      save(i, 'stopped')
       break
     }
     const step = spec.steps[i]!
@@ -200,15 +238,28 @@ async function runWorkflowSteps(opts: {
 
     run.durationMs = Date.now() - (run.startedAt ?? Date.now())
     if (abortController.signal.aborted || outcome.status === 'stopped') {
-      outcome.status = 'stopped'
+      // A completed step may be flushing its transcript when Stop arrives.
+      // Keep its committed output; cancellation only prevents the next step.
+      if (outcome.status !== 'completed') outcome.status = 'stopped'
       workflowStatus = 'killed'
       for (const pending of stepsRun.slice(i + 1)) pending.status = 'skipped'
     }
     run.status = outcome.status
     run.summary = outcome.error ?? firstLine(outcome.output)
-    interp.steps[step.id] = { status: outcome.status, output: outcome.output }
+    if (outcome.status === 'completed' || (outcome.status === 'failed' && step.continueOnError)) {
+      interp.steps[step.id] = { status: outcome.status, output: outcome.output }
+    }
+    save(outcome.status === 'stopped' || (outcome.status === 'failed' && !step.continueOnError) ? i : i + 1,
+      workflowStatus === 'killed' ? 'stopped' : outcome.status === 'failed' ? 'failed' : 'running')
     updateStepState(setAppState, taskId, stepsRun)
     await feedbackStep(context, spec.name, taskId, step, outcome)
+    // Feedback persistence yields too. Stop during that await must not turn
+    // a killed umbrella back into a completed/failed model notification.
+    if (abortController.signal.aborted) {
+      workflowStatus = 'killed'
+      for (const pending of stepsRun.slice(i + 1)) pending.status = 'skipped'
+      save(outcome.status === 'completed' ? i + 1 : i, 'stopped')
+    }
     if (workflowStatus === 'killed') break
 
     if (outcome.status === 'failed') {
@@ -220,6 +271,8 @@ async function runWorkflowSteps(opts: {
       }
     }
   }
+
+  if (stepsRun.every((run, i) => run.status === 'completed' || (run.status === 'failed' && spec.steps[i]!.continueOnError))) store.remove(taskId)
 
   settleWorkflow(
     setAppState,
@@ -291,6 +344,15 @@ async function runInProcessStep(opts: {
   // their stepProgressSummary relays). Tick a waiting line until the first
   // message arrives, then the normal per-message progress takes over.
   let firstMessageAt: number | undefined
+  const activity = new StepActivity(stepStart)
+  const streamUsage = new AgentUsageTracker()
+  const partialUsage = (now = Date.now()) => {
+    const current = context.getAppState().tasks[agentTaskId]
+    return { total_tokens: streamUsage.totalTokens(),
+      tool_uses: isLocalAgentTask(current) ? current.progress?.toolUseCount ?? 0 : 0,
+      duration_ms: now - stepStart }
+  }
+  let lastStreamProgressAt = 0
   // withRetry 重试轮次（system/api_error 透传后可读）：ticker 据此显示
   //「网络波动，自动重试第 N 轮」——SSE 停滞被 gap 回收后每轮 90-180s 的
   // 等待不再呈现为纯空转（0.2.126，用户实测「等待模型响应 150s」复发反馈）
@@ -299,13 +361,12 @@ async function runInProcessStep(opts: {
   let lastRetryText = ''
   const liveness = setInterval(() => {
     if (firstMessageAt !== undefined || abortController.signal.aborted) return
-    const waited = Math.round((Date.now() - stepStart) / 1000)
     // 前缀「等待模型响应」是 verify-workflow-cli 的活性契约，重试信息以
     // 后缀追加（勿整句替换）
     const suffix = lastRetryAttempt > 0 ? ` · ${lastRetryText || `网络重试第 ${lastRetryAttempt} 轮`}` : ''
     enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentTaskId, description,
-      summary: `等待模型响应 ${waited}s${suffix}`,
-      usage: { total_tokens: 0, tool_uses: 0, duration_ms: Date.now() - stepStart } })
+      summary: `${activity.summary()}${suffix}`,
+      usage: partialUsage() })
   }, 10_000)
   let timedOut = false
   const timeout = step.timeoutSec ? setTimeout(() => {
@@ -335,11 +396,23 @@ async function runInProcessStep(opts: {
           availableTools: context.options.tools,
           description,
           override: { agentId: agentTaskId, abortController: registration.abortController!, resolvedModel },
+          onStreamEvent: message => {
+            if (registration.abortController!.signal.aborted) return
+            if (message.event.type === 'message_start') firstMessageAt = undefined
+            streamUsage.observe(message)
+            if (!activity.observe(message)) return
+            const now = Date.now()
+            if (now - lastStreamProgressAt < 1000) return
+            lastStreamProgressAt = now
+            enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentTaskId, description,
+              summary: activity.summary(now), usage: partialUsage(now) })
+          },
           transcriptSubdir: `workflows/${spec.name}`,
         })
         return (async function* () {
-          for await (const message of iterator) {
+          for await (const message of withScopedEffort(iterator, agentDef.effort)) {
             agentMessages.push(message)
+            streamUsage.observe(message)
             // system 帧不算首条模型消息（api_error=重试信号、compact_boundary
             // =步骤内压缩标记）：ticker 继续走并按 retryAttempt 换文案
             if (message.type === 'system') {
@@ -350,7 +423,7 @@ async function runInProcessStep(opts: {
                 // 分类单点：retryErrorClass（网络类=断连/超时，其余=API Error）
                 const network = retryErrorClass((message as { error?: unknown }).error) === 'network'
                 lastRetryText = network
-                  ? `网络重试第 ${attemptNo} 轮`
+                  ? `${retryErrorKind((message as { error?: unknown }).error) === 'timeout' ? '请求超时' : '连接失败'} · 网络重试第 ${attemptNo} 轮`
                   : `API Error, 第 ${attemptNo}/${typeof maxNo === 'number' ? maxNo : attemptNo} 次重试…`
               }
             } else if (firstMessageAt === undefined) {
@@ -432,6 +505,8 @@ export async function runSubprocessStep(opts: {
   const relay = new StepTranscriptRelay(agentId, spec.name)
   const ids = new Set<string>()
   const usage = new AgentUsageTracker()
+  const activity = new StepActivity(startedAt)
+  let lastStreamProgressAt = 0
   let outcome: StepOutcome
   try {
     await recordSidechainTranscript([initial], agentId)
@@ -440,6 +515,20 @@ export async function runSubprocessStep(opts: {
       cwd: process.cwd(), signal: registration.abortController!.signal, timeoutSec: step.timeoutSec,
       onMessage: async wire => {
         usage.observe(wire as Parameters<AgentUsageTracker['observe']>[0])
+        if (wire.type === 'system' && wire.subtype === 'api_retry' && !wire.parent_tool_use_id) {
+          const reason = wire.error_kind === 'timeout' ? '请求超时' : wire.error_status == null ? '连接失败' : 'API Error'
+          enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentId, description,
+            summary: `${reason}，自动重试第 ${wire.attempt}/${wire.max_retries} 轮…`,
+            usage: { total_tokens: usage.totalTokens(), tool_uses: toolUses, duration_ms: Date.now() - startedAt } })
+        }
+        if (!wire.parent_tool_use_id && !registration.abortController!.signal.aborted && activity.observe(wire)) {
+          const now = Date.now()
+          if (now - lastStreamProgressAt >= 1000) {
+            lastStreamProgressAt = now
+            enqueueSdkEvent({ type: 'system', subtype: 'task_progress', task_id: agentId, description,
+              summary: activity.summary(now), usage: { total_tokens: usage.totalTokens(), tool_uses: toolUses, duration_ms: now - startedAt } })
+          }
+        }
         if (wire.type === 'system' && wire.subtype === 'network_retry_usage') {
           await recordNetworkRetryUsage(wire.model, wire.usage, wire.source)
         }
@@ -591,7 +680,10 @@ function settleWorkflow(
     }
   })
 
-  enqueueTaskNotification({
+  if (status === 'killed') {
+    // A user stop must never wake the main model to summarize its own stop.
+    emitTaskTerminatedSdk(taskId, 'stopped', { summary: description })
+  } else enqueueTaskNotification({
     type: 'task_status',
     taskId,
     taskType: 'local_workflow',

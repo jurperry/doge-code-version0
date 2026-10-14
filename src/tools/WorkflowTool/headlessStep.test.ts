@@ -14,6 +14,7 @@ beforeAll(async () => {
     import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
     if (process.argv.includes('--grandchild')) { setInterval(()=>{},1000); }
     else { const prompt = await Bun.stdin.text();
+      if (prompt === 'remote-env') { console.log(JSON.stringify({type:'result',subtype:'success',result:process.env.DOGE_IM_REMOTE_DISABLE})); process.exit(0); }
       if (prompt === 'no-result') process.exit(0);
       if (prompt === 'nonzero') { console.log(JSON.stringify({type:'result',subtype:'success',result:'looks successful'})); console.error('noise'); console.error('actual failure'); process.exit(7); }
       if (prompt === 'wait') { const child=spawn(process.execPath,['--grandchild'],{stdio:'ignore',detached:process.platform !== 'win32',windowsHide:true}); writeFileSync('child.pid',String(child.pid)); setInterval(()=>{},1000); }
@@ -24,10 +25,15 @@ beforeAll(async () => {
   await Bun.build({ entrypoints: [source], compile: { outfile: exe }, target: 'bun' })
   process.env.DOGE_WORKFLOW_EXECUTABLE = exe
 })
-afterAll(() => {
+afterAll(async () => {
   if (previousExecutable === undefined) delete process.env.DOGE_WORKFLOW_EXECUTABLE
   else process.env.DOGE_WORKFLOW_EXECUTABLE = previousExecutable
-  rmSync(sandbox, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  // Windows can retain a compiled executable's handle briefly after taskkill
+  // reports completion. Let the OS release it before deleting the fixture.
+  for (let attempt = 0; ; attempt++) {
+    try { rmSync(sandbox, { recursive: true, force: true }); break }
+    catch (error) { if (attempt >= 30) throw error; await Bun.sleep(100) }
+  }
 })
 const run = (prompt: string, controller = new AbortController(), timeoutSec?: number) => spawnHeadlessStep({ prompt, model: 'p-small', profile,
   cwd: sandbox, signal: controller.signal, permissionMode: 'default', timeoutSec, onMessage: async () => {} })
@@ -50,6 +56,17 @@ test('an already cancelled step never spawns a process', async () => {
 test('stdin accepts large Unicode input and consumes a final record without a newline', async () => {
   const prompt = '中文字\n"quotes" =literal'.repeat(2000)
   expect(await run(prompt)).toMatchObject({ status: 'completed', output: prompt })
+})
+test('step child disables remote attachment without changing the parent environment', async () => {
+  const previous = process.env.DOGE_IM_REMOTE_DISABLE
+  process.env.DOGE_IM_REMOTE_DISABLE = 'parent-value'
+  try {
+    expect(await run('remote-env')).toMatchObject({ status: 'completed', output: '1' })
+    expect(process.env.DOGE_IM_REMOTE_DISABLE).toBe('parent-value')
+  } finally {
+    if (previous === undefined) delete process.env.DOGE_IM_REMOTE_DISABLE
+    else process.env.DOGE_IM_REMOTE_DISABLE = previous
+  }
 })
 test('missing results and nonzero exits cannot be mistaken for success', async () => {
   expect((await run('no-result')).status).toBe('failed')

@@ -34,6 +34,7 @@ import { loadMemoryPrompt } from './memdir/memdir.js'
 import { hasAutoMemPathOverride } from './memdir/paths.js'
 import { query } from './query.js'
 import { categorizeRetryableAPIError } from './services/api/errors.js'
+import { retryErrorKind } from './services/api/withRetry.js'
 import type { MCPServerConnection } from './services/mcp/types.js'
 import type { AppState } from './state/AppState.js'
 import { type Tools, type ToolUseContext, toolMatchesName } from './Tool.js'
@@ -437,6 +438,7 @@ export class QueryEngine {
       uuid: options?.uuid,
       isMeta: options?.isMeta,
       querySource: 'sdk',
+      canUseTool: wrappedCanUseTool,
     })
 
     // Push new messages, including user input and any attachments
@@ -985,6 +987,7 @@ export class QueryEngine {
               max_retries: message.maxRetries,
               retry_delay_ms: message.retryInMs,
               error_status: message.error.status ?? null,
+              error_kind: retryErrorKind(message.error),
               error: categorizeRetryableAPIError(message.error),
               discard_partial: message.discardPartial ?? false,
               discard_message_ids: message.discardMessageIds ?? [],

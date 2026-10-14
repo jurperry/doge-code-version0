@@ -1,6 +1,13 @@
 import { test, expect, beforeEach, afterEach } from 'bun:test'
-import { getDefaultMaxRetries, getRetryDelay, withRetry, RetryBudget, CannotRetryError, retryBudgetClass, retryErrorClass } from './withRetry.js'
-import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { getDefaultMaxRetries, getRetryDelay, withRetry, RetryBudget, CannotRetryError, retryBudgetClass, retryErrorClass, retryErrorKind } from './withRetry.js'
+import { APIConnectionError, APIConnectionTimeoutError, APIError } from '@anthropic-ai/sdk'
+
+test('request timeout is distinct from a connection failure', () => {
+  expect(retryErrorKind(new APIConnectionTimeoutError())).toBe('timeout')
+  expect(retryErrorKind(new APIConnectionError({ message: 'reset' }))).toBe('connection')
+  expect(retryErrorKind(new APIError(408, undefined, 'timeout', new Headers()))).toBe('timeout')
+  expect(retryErrorKind(new APIError(503, undefined, 'unavailable', new Headers()))).toBe('server')
+})
 
 const KEY = 'CLAUDE_CODE_MAX_RETRIES'
 const saved = process.env[KEY]

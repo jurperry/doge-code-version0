@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { getScopedEffort, withScopedEffort } from '../../utils/effortContext.js'
 import type { UUID } from 'crypto'
 import { randomUUID } from 'crypto'
 import uniqBy from 'lodash-es/uniqBy.js'
@@ -259,6 +260,7 @@ export async function* runAgent({
   forkContextMessages,
   querySource,
   override,
+  onStreamEvent,
   model,
   maxTurns,
   preserveToolUseResults,
@@ -295,6 +297,8 @@ export async function* runAgent({
     /** A workflow already resolved the model against its selected provider. */
     resolvedModel?: string
   }
+  /** Workflow hosts display partial activity without persisting delta text. */
+  onStreamEvent?: (message: StreamEvent) => void
   model?: ModelAlias
   maxTurns?: number
   /** Preserve toolUseResult on messages for subagents with viewable transcripts */
@@ -795,7 +799,7 @@ export async function* runAgent({
   let lastRecordedUuid: UUID | null = initialMessages.at(-1)?.uuid ?? null
 
   try {
-    for await (const message of query({
+    const queryStream = query({
       messages: initialMessages,
       systemPrompt: agentSystemPrompt,
       userContext: resolvedUserContext,
@@ -804,7 +808,12 @@ export async function* runAgent({
       toolUseContext: agentToolUseContext,
       querySource,
       maxTurns: maxTurns ?? agentDefinition.maxTurns,
-    })) {
+    })
+    // Nested agents in a workflow inherit isolation, but keep their own
+    // explicit effort rather than the enclosing step agent's effort.
+    const scopedQuery = getScopedEffort() ? withScopedEffort(queryStream, agentDefinition.effort) : queryStream
+    for await (const message of scopedQuery) {
+      if (message.type === 'stream_event') onStreamEvent?.(message)
       relayTranscript(message)
       onQueryProgress?.()
       // Forward subagent API request starts to parent's metrics display

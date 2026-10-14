@@ -7,6 +7,7 @@ import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './model/providers.
 import { get3PModelCapabilityOverride, matchesTierModel } from './model/modelSupportOverrides.js'
 import { isEnvTruthy } from './envUtils.js'
 import type { EffortLevel } from 'src/entrypoints/sdk/runtimeTypes.js'
+import { getScopedEffort } from './effortContext.js'
 
 export type { EffortLevel }
 
@@ -167,12 +168,14 @@ export function resolveAppliedEffort(
   model: string,
   appStateEffortValue: EffortValue | undefined,
 ): EffortValue | undefined {
-  const envOverride = getEffortEnvOverride()
+  const scoped = getScopedEffort()
+  const envOverride = scoped ? undefined : getEffortEnvOverride()
   if (envOverride === null) {
     return undefined
   }
   const resolved =
-    envOverride ?? appStateEffortValue ?? getDefaultEffortForModel(model)
+    scoped ? (scoped.value ?? getDefaultEffortForModel(model))
+      : (envOverride ?? appStateEffortValue ?? getDefaultEffortForModel(model))
   // API rejects 'max' on non-Opus-4.6 models — downgrade to 'high'.
   if (
     (resolved === 'max' || resolved === 'xhigh') &&

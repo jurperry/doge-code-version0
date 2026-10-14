@@ -64,6 +64,8 @@ import {
   replaceUltraplanKeyword,
 } from '../ultraplan/keyword.js'
 import { processTextPrompt } from './processTextPrompt.js'
+import { isWorkflowContinue } from '../../tools/WorkflowTool/checkpoint.js'
+import { hasPermissionsToUseTool } from '../permissions/permissions.js'
 export type ProcessUserInputContext = ToolUseContext & LocalJSXCommandContext
 
 export type ProcessUserInputBaseResult = {
@@ -351,6 +353,16 @@ async function processUserInputBase(
 
   if (inputString === null && mode !== 'prompt') {
     throw new Error(`Mode: ${mode} requires a string input.`)
+  }
+
+  if (mode === 'prompt' && !isMeta && inputString !== null && precedingInputBlocks.length === 0 &&
+      !Object.values(pastedContents ?? {}).some(isValidImagePaste) && isWorkflowContinue(inputString)) {
+    const { resumeWorkflowTask } = await import('../../tools/WorkflowTool/engine.js')
+    const value = await resumeWorkflowTask({ ...context, canUseTool: canUseTool ?? context.canUseTool ?? hasPermissionsToUseTool })
+    if (value) return {
+      messages: [createUserMessage({ content: inputString, uuid }), createCommandInputMessage(`<local-command-stdout>${value}</local-command-stdout>`)],
+      shouldQuery: false, resultText: value,
+    }
   }
 
   // Extract and convert image content to content blocks early

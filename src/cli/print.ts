@@ -1053,6 +1053,7 @@ function runHeadlessStreaming(
   let shutdownPromptInjected = false
   let heldBackResult: StdoutMessage | null = null
   let abortController: AbortController | undefined
+  let userInterrupted = false
   // Same queue sendRequest() enqueues to — one FIFO for everything.
   const output = structuredIO.outbound
 
@@ -1997,6 +1998,7 @@ function runHeadlessStreaming(
       // into a single follow-up turn instead of N separate turns.
       const drainCommandQueue = async () => {
         while ((command = dequeue(isMainThread))) {
+          if (command.mode === 'prompt' && !command.isMeta) userInterrupted = false
           if (
             command.mode !== 'prompt' &&
             command.mode !== 'orphaned-permission' &&
@@ -2157,6 +2159,9 @@ function runHeadlessStreaming(
                 uuid: randomUUID(),
               })
             }
+            // Terminal events still reach the UI, but stop means no autonomous
+            // query, including notifications queued by tasks finishing late.
+            if (userInterrupted) continue
             // No continue -- fall through to ask() so the model processes the result
           }
 
@@ -2347,6 +2352,7 @@ function runHeadlessStreaming(
           // Generate and emit prompt suggestion for SDK consumers
           if (
             options.promptSuggestions &&
+            !userInterrupted && !abortController?.signal.aborted &&
             !isEnvDefinedFalsy(process.env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION)
           ) {
             // TS narrows suggestionState to never in the while loop body;
@@ -2961,6 +2967,18 @@ function runHeadlessStreaming(
         }
       : prev
   }
+  const interruptSession = async () => {
+    userInterrupted = true
+    abortController?.abort()
+    suggestionState.abortController?.abort()
+    suggestionState.abortController = null
+    suggestionState.lastEmitted = null
+    suggestionState.pendingSuggestion = null
+    suggestionState.pendingLastEmittedEntry = null
+    // The lead may have accepted an intervening prompt while the workflow
+    // retains its original controller. Always stop the workflow owner too.
+    await stopRunningWorkflows(getAppState().tasks, setAppState)
+  }
   imRemote.setHandlers({
     onPrompt: text => {
       // Re-assert Auto on every remote prompt — attach() may land after this
@@ -2995,7 +3013,7 @@ function runHeadlessStreaming(
       void run()
     },
     onInterrupt: () => {
-      abortController?.abort()
+      void interruptSession()
     },
     onPermissionResponse: (id, res) => {
       structuredIO.injectControlResponse({
@@ -3068,7 +3086,9 @@ function runHeadlessStreaming(
 
       if (message.type === 'control_request') {
         if (message.request.subtype === 'interrupt') {
-          await stopRunningWorkflows(getAppState().tasks, setAppState)
+          // Abort before awaiting task teardown: no new model request may race
+          // the stop through a workflow's completion notification.
+          await interruptSession()
           // Track escapes for attribution (ant-only feature)
           if (feature('COMMIT_ATTRIBUTION')) {
             setAppState(prev => ({
@@ -3079,27 +3099,13 @@ function runHeadlessStreaming(
               },
             }))
           }
-          if (abortController) {
-            abortController.abort()
-          }
-          suggestionState.abortController?.abort()
-          suggestionState.abortController = null
-          suggestionState.lastEmitted = null
-          suggestionState.pendingSuggestion = null
           sendControlResponseSuccess(message)
         } else if (message.request.subtype === 'end_session') {
-          await stopRunningWorkflows(getAppState().tasks, setAppState)
+          await interruptSession()
           preserveWorktreeOnShutdown = message.request.reason === 'app_replace'
           logForDebugging(
             `[print.ts] end_session received, reason=${message.request.reason ?? 'unspecified'}`,
           )
-          if (abortController) {
-            abortController.abort()
-          }
-          suggestionState.abortController?.abort()
-          suggestionState.abortController = null
-          suggestionState.lastEmitted = null
-          suggestionState.pendingSuggestion = null
           sendControlResponseSuccess(message)
           break // exits for-await → falls through to inputClosed=true drain below
         } else if (message.request.subtype === 'initialize') {

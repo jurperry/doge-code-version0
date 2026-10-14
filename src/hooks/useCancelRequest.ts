@@ -193,7 +193,11 @@ export function CancelRequestHandler(props: CancelRequestHandlerProps): null {
       descriptions.length === 1
         ? `Background agent "${descriptions[0]}" was stopped by the user.`
         : `${descriptions.length} background agents were stopped by the user: ${descriptions.map(d => `"${d}"`).join(', ')}.`
-    enqueuePendingNotification({ value: summary, mode: 'task-notification' })
+    // Workflow stops already report SDK/step feedback. Do not wake a new
+    // main-model query to report that the user just stopped the workflow.
+    const workflowStop = Object.values(tasks).some(t => isLocalWorkflowTask(t) && t.status === 'running') ||
+      running.some(([, task]) => 'workflowName' in task && !!task.workflowName)
+    if (!workflowStop) enqueuePendingNotification({ value: summary, mode: 'task-notification' })
     onAgentsKilled()
     return true
   }, [store, setAppState, onAgentsKilled])

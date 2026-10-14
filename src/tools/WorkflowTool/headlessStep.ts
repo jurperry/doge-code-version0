@@ -56,6 +56,9 @@ export function spawnHeadlessStep(opts: {
     // 步骤子进程身份标记：print.ts 据此在模型答完后跳过「等后台任务清零」
     // 并清理遗留后台命令（语义契约见 stepChildEnv.ts）
     env[WORKFLOW_STEP_CHILD_ENV] = '1'
+    // The parent owns the remote session and already relays step progress.
+    // Attaching a transient child would let it steal remote prompt routing.
+    env.DOGE_IM_REMOTE_DISABLE = '1'
     for (const [name, value] of Object.entries(modelProfileEnvPatch(profile))) {
       if (value) env[name] = value
       else delete env[name]

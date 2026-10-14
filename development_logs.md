@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-14 工作流完整停止、断点继续、流式活性与远程归属（2.1.304）
+
+1. 遇到问题：APP 工作流跨 provider 分析成功后实现步骤像卡死，停止后主模型再次思考，普通“继续”没有执行器断点。根因：停止通知入队 ask 新建控制器；代理丢 stream_event，服务端長 thinking 不可见；进程内继承主会话 effort；无断点。审查/红测还揭示完成输出与反馈写盘时 Stop 竞态、续跑权限回调遗漏、嵌套 effort 覆盖、工具次数回落、TUI IM/Ctrl+C 停止汇报、headless IM 在插入新主轮后指错 controller、短命子进程独立 IM 接入，以及可选建议请求遗漏取消。
+2. 解决方法：共享 interruptSession 先封自动调用并取消主请求/建议，再停止工作流；停止伞任务只发 SDK 终态/反馈，TUI IM 与 Ctrl+C 同步回收。会话目录原子 checkpoint 复用完整已完成输出，显式继续在公共输入入口恢复，重开可续，正常完成清除；停止步骤重跑且保留已完成步骤。输出/反馈异步边界再查 abort。StepActivity 统一两路径 partial 思考/回复/工具活动，字符数不冒充 token；请求局部 AsyncLocalStorage effort，嵌套明确 effort 保留；error_kind 区分超时/连接/服务；child env 禁止独立 IM attach。三格式、混合 API、live/reopened、插入主轮后的实际 WS Stop/继续，以及挂起建议请求均有真实编译 CLI 红绿黑盒。最终隔离单测100文件779通过；一次99/100的失败是 Windows exe handle 延迟导致 afterAll rm EACCES，改异步有界重试后全绿。独立 review 最终无剩余重要问题，bun version/编译/APP安装版证据见邻仓 `docs/workflow-lifecycle-validation-2026-10-14.md`。2.1.302/303 为审查中构建阶段；本轮最终2.1.304。
+3. 代码位置：`src/tools/WorkflowTool/{engine,checkpoint,stepActivity,headlessStep}.ts`、`src/utils/{effort,effortContext}.ts`、`processUserInput/processUserInput.ts`、`task/sdkProgress.ts`；`AgentTool/runAgent.ts`、`QueryEngine.ts`、`cli/print.ts`、`entrypoints/sdk/coreSchemas.ts`、`services/api/withRetry{,.test}.ts`、`screens/REPL.tsx`、`hooks/useCancelRequest.ts`；`tools/workflow-{activity,checkpoint,effort}.test.ts`、`headlessStep.test.ts`。分支 feature/workflow-lifecycle-recovery，用户已授权提交；合并main与删除分支待逐项确认。
+
 ## 2026-10-14 粘贴超尺寸图片不再卡死「Pasting text…」（2.1.301）
 
 1. 遇到问题：VSCode 资源管理器点选图片后 Ctrl+V 把绝对路径粘进 TUI，图片宽高超 2000px 时输入区永远停在「Pasting text…」，粘贴内容丢失且回车被吞。根因：usePasteHandler 里 `Promise.all(tryReadImageFromPath).then` 无 `.catch`——本仓库与发布 exe 均不随包分发 sharp/image-processor-napi（build-cli EXTERNALS），getImageProcessor 恒抛，maybeResizeAndDownsampleImageBuffer 对超尺寸 PNG（IHDR 宽高 >2000）抛 ImageResizeError，Promise 拒绝后 `setIsPasting(false)` 永不执行（BMP 转换段同理在 try 外）。

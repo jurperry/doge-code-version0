@@ -2,6 +2,7 @@ import { feature } from 'bun:bundle'
 import type Anthropic from '@anthropic-ai/sdk'
 import {
   APIConnectionError,
+  APIConnectionTimeoutError,
   APIError,
   APIUserAbortError,
 } from '@anthropic-ai/sdk'
@@ -132,6 +133,12 @@ export function retryErrorClass(error: unknown): RetryErrorClass {
   if (error instanceof APIConnectionError) return 'network'
   if (error instanceof APIError && error.status === 408) return 'network'
   return 'api'
+}
+
+/** Transport timeouts do not prove that the user's network disconnected. */
+export function retryErrorKind(error: unknown): 'timeout' | 'connection' | 'server' {
+  if (error instanceof APIConnectionTimeoutError || (error instanceof APIError && error.status === 408)) return 'timeout'
+  return error instanceof APIConnectionError ? 'connection' : 'server'
 }
 
 /** 预算类：infra=网络与服务类（断连/超时/5xx/529，10 轮），

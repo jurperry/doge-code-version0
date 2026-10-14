@@ -1,6 +1,6 @@
 import type { SdkWorkflowProgress } from '../../types/tools.js'
 import type { SystemAPIErrorMessage } from '../../types/message.js'
-import { retryErrorClass } from '../../services/api/withRetry.js'
+import { retryErrorClass, retryErrorKind } from '../../services/api/withRetry.js'
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 
 /**
@@ -73,7 +73,7 @@ export function emitTaskApiRetryProgress(params: {
   const attempt = message.retryAttempt
   const max = message.maxRetries
   const summary = network
-    ? `🛜 断线重连中，第 ${attempt}/${max} 轮次…`
+    ? `${retryErrorKind(message.error) === 'timeout' ? '请求超时' : '连接失败'}，自动重试第 ${attempt}/${max} 轮…`
     : `API Error, 第 ${attempt}/${max} 次重试…`
   emitTaskProgress({
     taskId: params.taskId,
