@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-14 粘贴超尺寸图片不再卡死「Pasting text…」（2.1.301）
+
+1. 遇到问题：VSCode 资源管理器点选图片后 Ctrl+V 把绝对路径粘进 TUI，图片宽高超 2000px 时输入区永远停在「Pasting text…」，粘贴内容丢失且回车被吞。根因：usePasteHandler 里 `Promise.all(tryReadImageFromPath).then` 无 `.catch`——本仓库与发布 exe 均不随包分发 sharp/image-processor-napi（build-cli EXTERNALS），getImageProcessor 恒抛，maybeResizeAndDownsampleImageBuffer 对超尺寸 PNG（IHDR 宽高 >2000）抛 ImageResizeError，Promise 拒绝后 `setIsPasting(false)` 永不执行（BMP 转换段同理在 try 外）。
+2. 解决方法：tryReadImageFromPath 的 BMP 转换与 resize 段包 try/catch，处理失败 logError 并返回 null（契约改为永不 reject，调用方回退为文本粘贴）；新增 resolvePastedImageLines 聚合——成功的图正常附加，失败的图路径与非图行按原序并入 textLines（部分失败时路径不再被静默丢弃）；usePasteHandler 改用该聚合并补 `.catch` 安全网（logError + setIsPasting(false) + 原文文本兜底），UI 任何情况下都不会卡在 Pasting。验证：新增 imagePaste.test.ts 9 例（修复前 ImageResizeError 拒绝／修复后 resolve null 的 stash 咬合实证、小图透传、BMP、混合行序保持、全失败降级、空输入）；回归 bun test src/utils（440）＋src/hooks+src/bridge（17）＋src/components（26）全绿；两改动文件 import 冒烟通过；bun run version 冒烟 2.1.301。App 侧（doge-code-app 内置 doge.exe 同源代码，同受其害）随下次 build-cli 重编内置 CLI 自动获得修复。
+3. 代码位置：src/utils/imagePaste.ts（tryReadImageFromPath 捕获段 + resolvePastedImageLines）、src/hooks/usePasteHandler.ts（聚合调用 + .catch 兜底）、src/utils/imagePaste.test.ts（新）。
+
 ## 2026-10-13 完全访问人工提问与五分钟推荐答案（2.1.300，App 0.2.138）
 
 1. 遇到问题：旧Auto/自动Plan即时选首项且禁止澄清，不能给用户作答机会。恢复交互后TUI父AbortSignal仅取消计时而权限Promise悬挂，排队提问被首项取消丢弃；in-process/tmux队友另有权限入口，普通headless通道测试不能证明团队路径；倒计时放在旧对话外层被布局裁剪。

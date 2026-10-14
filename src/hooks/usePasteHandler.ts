@@ -7,7 +7,7 @@ import {
   getImageFromClipboard,
   isImageFilePath,
   PASTE_THRESHOLD,
-  tryReadImageFromPath,
+  resolvePastedImageLines,
 } from '../utils/imagePaste.js'
 import type { ImageDimensions } from '../utils/imageResizer.js'
 import { getPlatform } from '../utils/platform.js'
@@ -127,52 +127,59 @@ export function usePasteHandler({
               .split(/ (?=\/|[A-Za-z]:\\)/)
               .flatMap(part => part.split('\n'))
               .filter(line => line.trim())
-            const imagePaths = lines.filter(line => isImageFilePath(line))
+            const hasImagePaths = lines.some(line => isImageFilePath(line))
 
-            if (onImagePaste && imagePaths.length > 0) {
+            if (onImagePaste && hasImagePaths) {
               const isTempScreenshot =
                 /\/TemporaryItems\/.*screencaptureui.*\/Screenshot/i.test(
                   pastedText,
                 )
 
-              // Process all image paths
-              void Promise.all(
-                imagePaths.map(imagePath => tryReadImageFromPath(imagePath)),
-              ).then(results => {
-                const validImages = results.filter(
-                  (r): r is NonNullable<typeof r> => r !== null,
-                )
-
-                if (validImages.length > 0) {
-                  // Successfully read at least one image
-                  for (const imageData of validImages) {
-                    const filename = basename(imageData.path)
-                    onImagePaste(
-                      imageData.base64,
-                      imageData.mediaType,
-                      filename,
-                      imageData.dimensions,
-                      imageData.path,
-                    )
+              // Process all image paths. Failures degrade to plain text and
+              // must never reject — an unhandled rejection here would leave
+              // isPasting stuck on "Pasting text…" forever.
+              void resolvePastedImageLines(lines)
+                .then(({ images, textLines }) => {
+                  if (images.length > 0) {
+                    // Successfully read at least one image
+                    for (const imageData of images) {
+                      const filename = basename(imageData.path)
+                      onImagePaste(
+                        imageData.base64,
+                        imageData.mediaType,
+                        filename,
+                        imageData.dimensions,
+                        imageData.path,
+                      )
+                    }
+                    // Non-image lines and images that failed to load go in as text
+                    if (textLines.length > 0 && onPaste) {
+                      onPaste(textLines.join('\n'))
+                    }
+                    setIsPasting(false)
+                  } else if (isTempScreenshot && isMacOS) {
+                    // For temporary screenshot files that no longer exist, try clipboard
+                    checkClipboardForImage()
+                  } else {
+                    if (onPaste) {
+                      onPaste(pastedText)
+                    }
+                    setIsPasting(false)
                   }
-                  // If some paths weren't images, paste them as text
-                  const nonImageLines = lines.filter(
-                    line => !isImageFilePath(line),
-                  )
-                  if (nonImageLines.length > 0 && onPaste) {
-                    onPaste(nonImageLines.join('\n'))
-                  }
+                })
+                .catch(error => {
+                  // Safety net: degrade to plain text so the UI can never
+                  // get stuck in the "Pasting text…" state.
+                  logError(error as Error)
                   setIsPasting(false)
-                } else if (isTempScreenshot && isMacOS) {
-                  // For temporary screenshot files that no longer exist, try clipboard
-                  checkClipboardForImage()
-                } else {
                   if (onPaste) {
-                    onPaste(pastedText)
+                    try {
+                      onPaste(pastedText)
+                    } catch (e) {
+                      logError(e as Error)
+                    }
                   }
-                  setIsPasting(false)
-                }
-              })
+                })
               return { chunks: [], timeoutId: null }
             }
 

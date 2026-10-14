@@ -15,6 +15,7 @@ import { getFsImplementation } from './fsOperations.js'
 import {
   detectImageFormatFromBase64,
   type ImageDimensions,
+  ImageResizeError,
   maybeResizeAndDownsampleImageBuffer,
 } from './imageResizer.js'
 import { logError } from './log.js'
@@ -366,7 +367,9 @@ export function asImageFilePath(text: string): string | null {
 /**
  * Try to find and read an image file, falling back to clipboard search
  * @param text Pasted text that might be an image filename or path
- * @returns Object containing the image path and base64 data, or null if not found
+ * @returns Object containing the image path and base64 data, or null if the
+ * file is missing or cannot be processed. Never rejects: callers treat null
+ * as "fall back to pasting the path as text".
  */
 export async function tryReadImageFromPath(
   text: string,
@@ -405,32 +408,70 @@ export async function tryReadImageFromPath(
     return null
   }
 
-  // BMP is not supported by the API — convert to PNG via Sharp.
-  if (
-    imageBuffer.length >= 2 &&
-    imageBuffer[0] === 0x42 &&
-    imageBuffer[1] === 0x4d
-  ) {
-    const sharp = await getImageProcessor()
-    imageBuffer = await sharp(imageBuffer).png().toBuffer()
+  try {
+    // BMP is not supported by the API — convert to PNG via Sharp.
+    if (
+      imageBuffer.length >= 2 &&
+      imageBuffer[0] === 0x42 &&
+      imageBuffer[1] === 0x4d
+    ) {
+      const sharp = await getImageProcessor()
+      imageBuffer = await sharp(imageBuffer).png().toBuffer()
+    }
+
+    // Resize if needed to stay under 5MB API limit
+    // Extract extension from path for format hint
+    const ext = extname(imagePath).slice(1).toLowerCase() || 'png'
+    const resized = await maybeResizeAndDownsampleImageBuffer(
+      imageBuffer,
+      imageBuffer.length,
+      ext,
+    )
+    const base64Image = resized.buffer.toString('base64')
+
+    // Detect format from the actual file contents using magic bytes
+    const mediaType = detectImageFormatFromBase64(base64Image)
+    return {
+      path: imagePath,
+      base64: base64Image,
+      mediaType,
+      dimensions: resized.dimensions,
+    }
+  } catch (e) {
+    // Processing failures (no image processor available, oversized or
+    // corrupt image) degrade to null so the paste falls back to plain text.
+    // ImageResizeError was already logged by the resizer — don't double-log.
+    if (!(e instanceof ImageResizeError)) {
+      logError(e as Error)
+    }
+    return null
   }
+}
 
-  // Resize if needed to stay under 5MB API limit
-  // Extract extension from path for format hint
-  const ext = extname(imagePath).slice(1).toLowerCase() || 'png'
-  const resized = await maybeResizeAndDownsampleImageBuffer(
-    imageBuffer,
-    imageBuffer.length,
-    ext,
+export type ResolvedPastedImages = {
+  images: (ImageWithDimensions & { path: string })[]
+  // Lines to insert as plain text: non-image lines plus image paths that
+  // failed to load, kept in their original order.
+  textLines: string[]
+}
+
+/**
+ * Resolve pasted lines into attachable images plus leftover text lines.
+ * Never rejects: unreadable or unprocessable images degrade to text lines.
+ */
+export async function resolvePastedImageLines(
+  lines: string[],
+): Promise<ResolvedPastedImages> {
+  const imageFlags = lines.map(line => isImageFilePath(line))
+  const imageIndexes = lines.flatMap((_, i) => (imageFlags[i] ? [i] : []))
+  const results = await Promise.all(
+    imageIndexes.map(i => tryReadImageFromPath(lines[i])),
   )
-  const base64Image = resized.buffer.toString('base64')
-
-  // Detect format from the actual file contents using magic bytes
-  const mediaType = detectImageFormatFromBase64(base64Image)
+  const failedIndexes = new Set(
+    imageIndexes.filter((_, j) => results[j] === null),
+  )
   return {
-    path: imagePath,
-    base64: base64Image,
-    mediaType,
-    dimensions: resized.dimensions,
+    images: results.filter((r): r is NonNullable<typeof r> => r !== null),
+    textLines: lines.filter((_, i) => !imageFlags[i] || failedIndexes.has(i)),
   }
 }
