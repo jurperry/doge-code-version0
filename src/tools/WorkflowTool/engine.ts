@@ -78,6 +78,8 @@ import {
   type AgentDefinition,
 } from '../AgentTool/loadAgentsDir.js'
 import { runAgent } from '../AgentTool/runAgent.js'
+import { asAgentId } from '../../types/ids.js'
+import { handoffShellTasksForAgent, killShellTasksForAgent } from '../../tasks/LocalShellTask/killShellTasks.js'
 import { findWorkflowProfile } from './profiles.js'
 import {
   interpolate,
@@ -88,6 +90,10 @@ import {
 
 type SetAppState = LocalJSXCommandContext['setAppState']
 const workflowRuns = new Map<string, Promise<void>>()
+/** Control callers await real child/resource teardown, beyond the abort ACK. */
+export async function waitForWorkflowRun(taskId: string): Promise<void> {
+  await workflowRuns.get(taskId)
+}
 function checkpointStore(): WorkflowCheckpointStore {
   const transcript = getTranscriptPath()
   return new WorkflowCheckpointStore(join(dirname(transcript), basename(transcript, '.jsonl'), 'workflows'))
@@ -163,17 +169,17 @@ export function startWorkflowTask(opts: {
     abortController,
     argsString,
     resume,
-  }).catch(err => {
+  }).catch(async err => {
     logForDebugging(
       `[workflow ${spec.name}] engine crashed: ${errorMessage(err)}`,
       { level: 'error' },
     )
-    settleWorkflow(
-      context.setAppState as SetAppState,
+    await settleWorkflow(
+      context,
       taskId,
       description,
       spec,
-      'failed',
+      abortController.signal.aborted ? 'killed' : 'failed',
       spec.steps.map(s => ({ stepId: s.id, title: s.title, status: 'skipped' })),
       `引擎异常：${errorMessage(err)}`,
     )
@@ -230,7 +236,7 @@ async function runWorkflowSteps(opts: {
       outcome =
         step.profile !== undefined
           ? await runSubprocessStep({ step, spec, interp, context, abortController })
-          : await runInProcessStep({ step, spec, interp, context, abortController })
+          : await runInProcessStep({ step, spec, interp, context, abortController, workflowTaskId: taskId })
     } catch (err) {
       const msg = errorMessage(err)
       outcome = { status: 'failed', output: '', error: msg }
@@ -274,8 +280,8 @@ async function runWorkflowSteps(opts: {
 
   if (stepsRun.every((run, i) => run.status === 'completed' || (run.status === 'failed' && spec.steps[i]!.continueOnError))) store.remove(taskId)
 
-  settleWorkflow(
-    setAppState,
+  await settleWorkflow(
+    context,
     taskId,
     description,
     spec,
@@ -304,6 +310,7 @@ async function runInProcessStep(opts: {
   interp: InterpolationContext
   context: LocalJSXCommandContext
   abortController: AbortController
+  workflowTaskId: string
 }): Promise<StepOutcome> {
   const { step, spec, interp, context, abortController } = opts
   const agentDef = resolveStepAgent(context, step.agent)
@@ -392,6 +399,7 @@ async function runInProcessStep(opts: {
           isAsync: true,
           canShowPermissionPrompts: true,
           allowNestedAgents: true,
+          handoffBackgroundTasksTo: asAgentId(opts.workflowTaskId),
           querySource: 'agent:custom',
           availableTools: context.options.tools,
           description,
@@ -622,8 +630,8 @@ export function stepProgressSummary(assistantLine: string): string {
   return ''
 }
 
-function settleWorkflow(
-  setAppState: SetAppState,
+async function settleWorkflow(
+  context: LocalJSXCommandContext,
   taskId: string,
   description: string,
   spec: WorkflowSpec,
@@ -631,7 +639,24 @@ function settleWorkflow(
   steps: WorkflowStepRun[],
   failReason?: string,
   outputs?: string,
-): void {
+): Promise<void> {
+  const setAppState = (context.setAppStateForTasks ?? context.setAppState) as SetAppState
+  // Until the whole run finishes, intermediate-step resources belong to the
+  // umbrella. Stop/failure must reclaim them even in CLI/remote-only sessions.
+  if (status === 'completed') {
+    handoffShellTasksForAgent(asAgentId(taskId), setAppState)
+  } else {
+    try {
+      await killShellTasksForAgent(asAgentId(taskId), context.getAppState, setAppState)
+    } catch (error) {
+      // A failed OS stop remains a live, retryable main-session task. Never
+      // turn that failure into a stopped bookend or an unhandled engine loop.
+      failReason = [failReason, `后台命令清理失败：${errorMessage(error)}`].filter(Boolean).join('\n')
+      handoffShellTasksForAgent(asAgentId(taskId), setAppState)
+    }
+  }
+  const current = context.getAppState().tasks[taskId] as LocalWorkflowTaskState | undefined
+  if (current?.status === 'killed' || current?.abortController?.signal.aborted) status = 'killed'
   const totalMs = steps.reduce((acc, s) => acc + (s.durationMs ?? 0), 0)
   const statusText =
     status === 'completed' ? '完成' : status === 'failed' ? '失败' : '已停止'

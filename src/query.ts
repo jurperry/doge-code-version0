@@ -116,6 +116,8 @@ import {
 } from './bootstrap/state.js'
 import { createBudgetTracker, checkTokenBudget } from './query/tokenBudget.js'
 import { count } from './utils/array.js'
+import { BackgroundTaskCloseout } from './utils/task/backgroundTaskCloseout.js'
+import { TASK_STOP_TOOL_NAME } from './tools/TaskStopTool/prompt.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const snipModule = feature('HISTORY_SNIP')
@@ -268,6 +270,7 @@ async function* queryLoop(
   } = params
   const deps = params.deps ?? productionDeps()
   const retryBudget = new RetryBudget()
+  const backgroundCloseout = new BackgroundTaskCloseout()
 
   // IM remote-control: count every tool call so the bridge daemon can emit
   // progress summaries (every N calls) to the paired IM user. Wrapping at
@@ -1288,6 +1291,34 @@ async function* queryLoop(
       if (lastMessage?.isApiErrorMessage) {
         void executeStopFailureHooks(lastMessage, toolUseContext)
         return { reason: 'completed' }
+      }
+
+      // Do this in the shared query loop, rather than the headless polling
+      // loop: TUI, desktop, SDK and remote sessions share the same decision.
+      // A workflow-step subprocess has a scoped lifetime and cleans its own
+      // resources on exit; only the actual parent session owns closeout.
+      if (!process.env.DOGE_WORKFLOW_STEP_CHILD && (!maxTurns || turnCount < maxTurns)) {
+        const closeout = backgroundCloseout.review({
+          tasks: toolUseContext.getAppState().tasks,
+          querySource,
+          agentId: toolUseContext.agentId,
+          aborted: toolUseContext.abortController.signal.aborted,
+          canStopTasks: toolUseContext.options.tools.some(tool => tool.name === TASK_STOP_TOOL_NAME),
+        })
+        if (closeout) {
+          const message = createUserMessage({ content: closeout, isMeta: true })
+          yield message
+          state = {
+            ...state,
+            messages: [...messagesForQuery, ...assistantMessages, message],
+            toolUseContext,
+            autoCompactTracking: tracking,
+            pendingToolUseSummary: undefined,
+            turnCount: turnCount + 1,
+            transition: { reason: 'background_task_closeout' },
+          }
+          continue
+        }
       }
 
       const stopHookResult = yield* handleStopHooks(

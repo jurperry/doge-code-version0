@@ -2977,7 +2977,15 @@ function runHeadlessStreaming(
     suggestionState.pendingLastEmittedEntry = null
     // The lead may have accepted an intervening prompt while the workflow
     // retains its original controller. Always stop the workflow owner too.
+    const workflows = Object.values(getAppState().tasks).filter(task => task.type === 'local_workflow' && task.status === 'running')
     await stopRunningWorkflows(getAppState().tasks, setAppState)
+    if (workflows.length) {
+      const { waitForWorkflowRun } = await import('../tools/WorkflowTool/engine.js')
+      await Promise.all(workflows.map(task => waitForWorkflowRun(task.id)))
+    }
+    // The main run can already be idle while asynchronous OS teardown finishes.
+    // Deliver those bookends now without waiting for another user prompt.
+    for (const event of drainSdkEvents()) output.enqueue(event)
   }
   imRemote.setHandlers({
     onPrompt: text => {
@@ -4067,10 +4075,15 @@ function runHeadlessStreaming(
         } else if (message.request.subtype === 'stop_task') {
           const { task_id: taskId } = message.request
           try {
-            await stopTask(taskId, {
+            const stopped = await stopTask(taskId, {
               getAppState,
               setAppState,
             })
+            if (stopped.taskType === 'local_workflow') {
+              const { waitForWorkflowRun } = await import('../tools/WorkflowTool/engine.js')
+              await waitForWorkflowRun(taskId)
+            }
+            for (const event of drainSdkEvents()) output.enqueue(event)
             sendControlResponseSuccess(message, {})
           } catch (error) {
             sendControlResponseError(message, errorMessage(error))

@@ -148,6 +148,7 @@ export function evictTerminalTask(
   setAppState(prev => {
     const task = prev.tasks?.[taskId]
     if (!task) return prev
+    if (task.terminationPending) return prev
     if (!isTerminalTaskStatus(task.status)) return prev
     if (!task.notified) return prev
     // Panel grace period — blocks eviction until deadline passes.
@@ -185,6 +186,7 @@ export async function generateTaskAttachments(state: AppState): Promise<{
   const tasks = state.tasks ?? {}
 
   for (const taskState of Object.values(tasks)) {
+    if (taskState.terminationPending) continue
     if (taskState.notified) {
       switch (taskState.status) {
         case 'completed':
@@ -251,7 +253,7 @@ export function applyTaskOffsetsAndEvictions(
       const fresh = newTasks[id]
       // Re-check terminal+notified on fresh state (TOCTOU: resume may have
       // replaced the task during the generateTaskAttachments await)
-      if (!fresh || !isTerminalTaskStatus(fresh.status) || !fresh.notified) {
+      if (!fresh || fresh.terminationPending || !isTerminalTaskStatus(fresh.status) || !fresh.notified) {
         continue
       }
       if (panelGraceBlocksEviction(fresh)) {

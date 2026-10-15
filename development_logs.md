@@ -2,6 +2,18 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-15 并发停止等待与 GC 保留（2.1.306，APP 0.2.149）
+
+1. 遇到问题：TaskStop 在途时已标 killed/notified，SDK Stop 会提前拒绝，任务 GC 还可能删除可重试句柄，OS 失败后丢失实际运行资源。
+2. 解决方法：重叠停止共用 pending Promise，失败传播到所有调用方；terminationPending 在 OS 确认前保护三条 GC 路径，成功解除保留，失败恢复原快照。新增3例并发 Stop 测试含 GC→失败→重试→最终回收；第三例修复前红测，修复后全绿，独立子代理最终复核通过。最终隔离全量104文件805测试通过；bun version、重编CLI、APP0.2.149安装版54套回归和三格式本地/远程60场景276项均通过。证据见邻仓 docs/autonomous-task-closeout-validation-2026-10-15.md。
+3. 代码位置：src/Task.ts、tasks/{stopTask,LocalShellTask/killShellTasks}.ts、utils/task/framework.ts、tasks/stopTask.test.ts。
+
+## 2026-10-15 主会话自主收尾与后台进程真实终态（2.1.305，APP 0.2.148）
+
+1. 遇到问题：主 query 自然结束后后台任务只有 headless 等待，无模型决策；步骤退出低层 kill 不发 SDK 终态。工作流步骤资源直接交主会话会在后续停止时遗留，延迟自然完成通知被弃队/GC 会漏 bookend；清理异步落地可能晚于 print idle。
+2. 解决方法：共享 query 主会话专用 closeout 提醒提供真实 task_id/命令/output，模型用 TaskOutput/TaskStop 等待、保留或关闭；每轮新任务至多提示一次，abort/APIerror/maxTurns 不额外请求，活跃 worker/队友保护。正常步骤将 shell 暂交 workflow 伞，整个 run 成功再交主会话，失败/Stop 等待本 run 清理；动态 owner 路由、弃队前恢复 SDK 自然终态（不依赖任务尚未 GC）。shell kill 单一出口等待 OS ACK，失败恢复可重试；ShellCommand 保留 requested kill code 防 exit/ACK 竞态，失败可自然结束或重试，并发 kill 单飞。stdio/IM interrupt 和 SDK stop_task 显式等执行器退出并排水 SDK。跨 API 步骤仍回收短命子进程临时资源。验证详见邻仓 docs/autonomous-task-closeout-validation-2026-10-15.md，最终通过后按 AGENTS 等待提交/合并/删分支确认。
+3. 代码位置：src/utils/task/backgroundTaskCloseout{,.test}.ts、query.ts、tasks/LocalShellTask/{LocalShellTask.tsx,killShellTasks{,.test}.ts}、tasks/stopTask.ts、tools/AgentTool/runAgent.ts、tools/WorkflowTool/engine.ts、utils/ShellCommand{,.test}.ts、cli/print.ts；APP tools/{verify-autonomous-closeout,lifecycle-api-fixture,verify-task-lifecycle}.mjs。
+
 ## 2026-10-14 工作流完整停止、断点继续、流式活性与远程归属（2.1.304）
 
 1. 遇到问题：APP 工作流跨 provider 分析成功后实现步骤像卡死，停止后主模型再次思考，普通“继续”没有执行器断点。根因：停止通知入队 ask 新建控制器；代理丢 stream_event，服务端長 thinking 不可见；进程内继承主会话 effort；无断点。审查/红测还揭示完成输出与反馈写盘时 Stop 竞态、续跑权限回调遗漏、嵌套 effort 覆盖、工具次数回落、TUI IM/Ctrl+C 停止汇报、headless IM 在插入新主轮后指错 controller、短命子进程独立 IM 接入，以及可选建议请求遗漏取消。

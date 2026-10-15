@@ -34,6 +34,7 @@ export type ShellCommand = {
   background: (backgroundTaskId: string) => boolean
   result: Promise<ExecResult>
   kill: () => void
+  readonly killSettled?: Promise<void> | null
   status: 'running' | 'backgrounded' | 'completed' | 'killed'
   /**
    * Cleans up stream resources (event listeners).
@@ -124,6 +125,7 @@ class ShellCommandImpl implements ShellCommand {
   // treeKill 完成承诺（kill() 后非空）：供将退出的进程（工作流步骤子进程
   // 清扫）等待 OS 级树杀真正落地——不等的话 taskkill 会随父进程退出而死。
   #killSettled: Promise<void> | null = null
+  #requestedKillCode: number | undefined
   #maxOutputBytes: number
   #abortSignal: AbortSignal
   #onTimeoutCallback:
@@ -197,6 +199,9 @@ class ShellCommandImpl implements ShellCommand {
   }
 
   #exitHandler(code: number | null, signal: NodeJS.Signals | null): void {
+    // OS exit can precede the tree-kill callback (especially on Windows).
+    // The requested kill code and resource teardown own settlement in this case.
+    if (this.#requestedKillCode !== undefined) return
     const exitCode =
       code !== null && code !== undefined
         ? code
@@ -207,6 +212,7 @@ class ShellCommandImpl implements ShellCommand {
   }
 
   #errorHandler(): void {
+    if (this.#requestedKillCode !== undefined) return
     this.#resolveExitCode(1)
   }
 
@@ -339,24 +345,44 @@ class ShellCommandImpl implements ShellCommand {
   }
 
   #doKill(code?: number): void {
+    // Abort, timeout and output-size watchdog can race. One OS operation owns
+    // the result until it settles; completed commands need no further kill.
+    if (this.#requestedKillCode !== undefined || !this.#exitCodeResolver) return
+    const previousStatus = this.#status
     this.#status = 'killed'
+    this.#requestedKillCode = code ?? SIGKILL
     if (this.#childProcess.pid) {
       // 完成承诺：调用方若即将退出进程（工作流步骤子进程清扫），必须等
       // taskkill 真正落地——不等的话它会随父进程退出而死，命令变孤儿。
-      this.#killSettled = new Promise(resolve => {
-        treeKill(this.#childProcess.pid, 'SIGKILL', err => {
+      const pid = this.#childProcess.pid
+      this.#killSettled = new Promise<void>((resolve, reject) => {
+        treeKill(pid, 'SIGKILL', err => {
           if (err) {
+            // An already-exited command is a successful stop. An OS failure
+            // with a live process must reach TaskStop rather than claim success.
+            let exists = true
+            try { process.kill(pid, 0) } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ESRCH') exists = false
+            }
             logError(
               new Error(
-                `treeKill pid=${this.#childProcess.pid} failed: ${String(err)}`,
+                `treeKill pid=${pid} failed: ${String(err)}`,
               ),
             )
+            if (exists) { reject(err); return }
           }
           resolve()
         })
       })
+      // Foreground abort callers do not await this optional task-stop handle.
+      // Keep it handled there; explicit task owners still receive rejection.
+      void this.#killSettled.then(() => this.#resolveExitCode(code ?? SIGKILL), () => {
+        this.#requestedKillCode = undefined
+        this.#status = previousStatus
+      })
+    } else {
+      this.#resolveExitCode(code ?? SIGKILL)
     }
-    this.#resolveExitCode(code ?? SIGKILL)
   }
 
   kill(): void {

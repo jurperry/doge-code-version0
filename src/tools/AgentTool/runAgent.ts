@@ -27,7 +27,7 @@ import type {
   ScopedMcpServerConfig,
 } from '../../services/mcp/types.js'
 import type { Tool, Tools, ToolUseContext } from '../../Tool.js'
-import { killShellTasksForAgent } from '../../tasks/LocalShellTask/killShellTasks.js'
+import { handoffShellTasksForAgent, killShellTasksForAgent } from '../../tasks/LocalShellTask/killShellTasks.js'
 import type { Command } from '../../types/command.js'
 import type { AgentId } from '../../types/ids.js'
 import type {
@@ -273,6 +273,7 @@ export async function* runAgent({
   description,
   transcriptSubdir,
   onQueryProgress,
+  handoffBackgroundTasksTo,
 }: {
   agentDefinition: AgentDefinition
   promptMessages: Message[]
@@ -286,6 +287,8 @@ export async function* runAgent({
   canShowPermissionPrompts?: boolean
   /** Workflow executors retain the normal tool pool while running detached. */
   allowNestedAgents?: boolean
+  /** Successful workflow steps leave live commands with the workflow owner. */
+  handoffBackgroundTasksTo?: AgentId
   forkContextMessages?: Message[]
   querySource: QuerySource
   override?: {
@@ -797,6 +800,8 @@ export async function* runAgent({
 
   // Track the last recorded message UUID for parent chain continuity
   let lastRecordedUuid: UUID | null = initialMessages.at(-1)?.uuid ?? null
+  let completedSuccessfully = false
+  let failedOrLimited = false
 
   try {
     const queryStream = query({
@@ -813,6 +818,7 @@ export async function* runAgent({
     // explicit effort rather than the enclosing step agent's effort.
     const scopedQuery = getScopedEffort() ? withScopedEffort(queryStream, agentDefinition.effort) : queryStream
     for await (const message of scopedQuery) {
+      if (message.type === 'assistant') failedOrLimited = !!message.isApiErrorMessage
       if (message.type === 'stream_event') onStreamEvent?.(message)
       relayTranscript(message)
       onQueryProgress?.()
@@ -831,6 +837,7 @@ export async function* runAgent({
       if (message.type === 'attachment') {
         // Handle max turns reached signal from query.ts
         if (message.attachment.type === 'max_turns_reached') {
+          failedOrLimited = true
           logForDebugging(
             `[Agent
 : $
@@ -884,6 +891,7 @@ export async function* runAgent({
     if (isBuiltInAgent(agentDefinition) && agentDefinition.callback) {
       agentDefinition.callback()
     }
+    completedSuccessfully = !failedOrLimited
   } finally {
     // Clean up agent-specific MCP servers (runs on normal completion, abort, or error)
     await mcpCleanup()
@@ -912,10 +920,12 @@ export async function* runAgent({
       const { [agentId]: _removed, ...todos } = prev.todos
       return { ...prev, todos }
     })
-    // Kill any background bash tasks this agent spawned. Without this, a
-    // `run_in_background` shell loop (e.g. test fixture fake-logs.sh) outlives
-    // the agent as a PPID=1 zombie once the main session eventually exits.
-    killShellTasksForAgent(agentId, toolUseContext.getAppState, rootSetAppState)
+    if (handoffBackgroundTasksTo && completedSuccessfully && !agentAbortController.signal.aborted) {
+      handoffShellTasksForAgent(agentId, rootSetAppState, handoffBackgroundTasksTo)
+    }
+    // Errors, aborts and ordinary agents retain scoped cleanup. Transferred
+    // commands have a main-session owner and are no longer swept here.
+    await killShellTasksForAgent(agentId, toolUseContext.getAppState, rootSetAppState)
     /* eslint-disable @typescript-eslint/no-require-imports */
     if (feature('MONITOR_TOOL')) {
       const mcpMod =

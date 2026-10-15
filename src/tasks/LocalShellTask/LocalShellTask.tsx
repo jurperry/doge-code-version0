@@ -43,7 +43,7 @@ export function looksLikePrompt(tail: string): boolean {
 
 // Output-side analog of peekForStdinData (utils/process.ts): fire a one-shot
 // notification if output stops growing and the tail looks like a prompt.
-function startStallWatchdog(taskId: string, description: string, kind: BashTaskKind | undefined, toolUseId?: string, agentId?: AgentId): () => void {
+function startStallWatchdog(taskId: string, description: string, kind: BashTaskKind | undefined, setAppState: SetAppState, toolUseId?: string): () => void {
   if (kind === 'monitor') return () => {};
   const outputPath = getTaskOutputPath(taskId);
   let lastSize = 0;
@@ -86,7 +86,16 @@ Last output:
 ${content.trimEnd()}
 
 The command is likely blocked on an interactive prompt. Kill this task and re-run with piped input (e.g., \`echo y | command\`) or a non-interactive flag if one exists.`;
-        enqueuePendingNotification({
+        let agentId: AgentId | undefined;
+        let running = false;
+        updateTaskState(taskId, setAppState, task => {
+          if (isLocalShellTask(task) && task.status === 'running') {
+            agentId = task.agentId;
+            running = true;
+          }
+          return task;
+        });
+        if (running) enqueuePendingNotification({
           value: message,
           mode: 'task-notification',
           priority: 'next',
@@ -112,6 +121,7 @@ function enqueueShellNotification(taskId: string, description: string, status: '
       return task;
     }
     shouldEnqueue = true;
+    if (isLocalShellTask(task)) agentId = task.agentId;
     return {
       ...task,
       notified: true
@@ -159,6 +169,7 @@ function enqueueShellNotification(taskId: string, description: string, status: '
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
   const message = `<${TASK_NOTIFICATION_TAG}>
 <${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>${toolUseIdLine}
+<task-type>local_bash</task-type>
 <${OUTPUT_FILE_TAG}>${outputPath}</${OUTPUT_FILE_TAG}>
 <${STATUS_TAG}>${status}</${STATUS_TAG}>
 <${SUMMARY_TAG}>${escapeXml(summary)}</${SUMMARY_TAG}>
@@ -174,7 +185,7 @@ export const LocalShellTask: Task = {
   name: 'LocalShellTask',
   type: 'local_bash',
   async kill(taskId, setAppState) {
-    killTask(taskId, setAppState);
+    await killTask(taskId, setAppState);
   }
 };
 export async function spawnShellTask(input: LocalShellSpawnInput & {
@@ -198,7 +209,7 @@ export async function spawnShellTask(input: LocalShellSpawnInput & {
   } = shellCommand;
   const taskId = taskOutput.taskId;
   const unregisterCleanup = registerCleanup(async () => {
-    killTask(taskId, setAppState);
+    await killTask(taskId, setAppState);
   });
   const taskState: LocalShellTaskState = {
     ...createTaskStateBase(taskId, 'local_bash', description, toolUseId),
@@ -218,7 +229,7 @@ export async function spawnShellTask(input: LocalShellSpawnInput & {
   // Data flows through TaskOutput automatically — no stream listeners needed.
   // Just transition to backgrounded state so the process keeps running.
   shellCommand.background(taskId);
-  const cancelStallWatchdog = startStallWatchdog(taskId, description, kind, toolUseId, agentId);
+  const cancelStallWatchdog = startStallWatchdog(taskId, description, kind, setAppState, toolUseId);
   void shellCommand.result.then(async result => {
     cancelStallWatchdog();
     await flushAndCleanup(shellCommand);
@@ -267,7 +278,7 @@ export function registerForeground(input: LocalShellSpawnInput & {
   } = input;
   const taskId = shellCommand.taskOutput.taskId;
   const unregisterCleanup = registerCleanup(async () => {
-    killTask(taskId, setAppState);
+    await killTask(taskId, setAppState);
   });
   const taskState: LocalShellTaskState = {
     ...createTaskStateBase(taskId, 'local_bash', description, toolUseId),
@@ -325,7 +336,7 @@ function backgroundTask(taskId: string, getAppState: () => AppState, setAppState
       }
     };
   });
-  const cancelStallWatchdog = startStallWatchdog(taskId, description, kind, toolUseId, agentId);
+  const cancelStallWatchdog = startStallWatchdog(taskId, description, kind, setAppState, toolUseId);
 
   // Set up result handler
   void shellCommand.result.then(async result => {
@@ -439,7 +450,7 @@ export function backgroundExistingForegroundTask(taskId: string, shellCommand: S
       }
     };
   });
-  const cancelStallWatchdog = startStallWatchdog(taskId, description, undefined, toolUseId, agentId);
+  const cancelStallWatchdog = startStallWatchdog(taskId, description, undefined, setAppState, toolUseId);
 
   // Set up result handler (mirrors backgroundTask's handler)
   void shellCommand.result.then(async result => {

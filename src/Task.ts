@@ -54,6 +54,8 @@ export type TaskStateBase = {
   outputFile: string
   outputOffset: number
   notified: boolean
+  /** Retain the task until asynchronous resource teardown is confirmed. */
+  terminationPending?: boolean
 }
 
 export type LocalShellSpawnInput = {
