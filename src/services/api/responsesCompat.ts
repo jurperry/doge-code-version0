@@ -255,6 +255,29 @@ export function convertAnthropicRequestToResponses(input: {
   // Strip [1m]/[2m] suffixes — same normalization as Anthropic native path (model.ts)
   const targetModel = rawModel.replace(/\[(1|2)m\]/gi, '')
   const convertedInput: ResponsesInputItem[] = []
+  // Images returned by a tool call cannot ride inside a function_call_output
+  // item, so they are emitted as a follow-up user message item after the tool
+  // run. Strict gateways require an assistant message with N function calls to
+  // be followed by N contiguous function_call_output items, so both rules are
+  // satisfied by queueing the follow-up content parts here and flushing them
+  // only right before the next non-tool output.
+  // Contract (not an implementation coincidence): all images of one tool run
+  // are merged into a single user message item — a single image-bearing tool
+  // keeps its historical single item, N such tools yield one item with N
+  // labelled image groups. This also covers histories whose tool_results are
+  // spread over several consecutive user messages.
+  const pendingImageParts: Array<
+    { type: 'input_text'; text: string } | ResponsesInputImage
+  > = []
+  const flushPendingImageParts = (): void => {
+    if (pendingImageParts.length === 0) return
+    convertedInput.push({
+      type: 'message',
+      role: 'user',
+      content: [...pendingImageParts],
+    })
+    pendingImageParts.length = 0
+  }
 
   for (const message of input.messages) {
     if (message.role === 'user') {
@@ -266,9 +289,10 @@ export function convertAnthropicRequestToResponses(input: {
           typeof result.tool_use_id === 'string' ? result.tool_use_id : undefined
         const { text, imageURLs } = splitToolResultContent(result.content)
         const hasImages = imageURLs.length > 0
-        // function_call_output takes a plain string; images are emitted as a
-        // follow-up user message right below. JSON.stringify would send raw
-        // base64 as text, which the model cannot interpret as an image.
+        // function_call_output takes a plain string; images are queued as a
+        // follow-up user message emitted after the whole tool run below.
+        // JSON.stringify would send raw base64 as text, which the model cannot
+        // interpret as an image.
         const output = text
           ? text
           : hasImages
@@ -280,20 +304,16 @@ export function convertAnthropicRequestToResponses(input: {
           output,
         })
         if (hasImages) {
-          convertedInput.push({
-            type: 'message',
-            role: 'user',
-            content: [
-              {
-                type: 'input_text',
-                text: `[Images returned by tool call ${toolUseId ?? ''}]`,
-              },
-              ...imageURLs.map(url => ({
-                type: 'input_image' as const,
-                image_url: url,
-              })),
-            ],
-          })
+          pendingImageParts.push(
+            {
+              type: 'input_text',
+              text: `[Images returned by tool call ${toolUseId ?? ''}]`,
+            },
+            ...imageURLs.map(url => ({
+              type: 'input_image' as const,
+              image_url: url,
+            })),
+          )
         }
       }
 
@@ -304,6 +324,9 @@ export function convertAnthropicRequestToResponses(input: {
       const text = contentToText(
         nonToolBlocks as unknown as BetaMessageParam['content'],
       )
+      // Anything besides tool_result blocks ends the tool run, so the queued
+      // tool images must be flushed before that content is emitted.
+      if (imageURLs.length > 0 || text) flushPendingImageParts()
       if (imageURLs.length > 0) {
         convertedInput.push({
           type: 'message',
@@ -327,6 +350,9 @@ export function convertAnthropicRequestToResponses(input: {
     }
 
     if (message.role === 'assistant') {
+      // A new assistant turn ends the current tool run: flush queued tool
+      // images before the assistant output items.
+      flushPendingImageParts()
       const blocks = Array.isArray(message.content)
         ? (message.content as unknown as Array<Record<string, unknown>>)
         : []
@@ -356,6 +382,9 @@ export function convertAnthropicRequestToResponses(input: {
       }
     }
   }
+
+  // A request may end on a tool run; its images still need to be sent.
+  flushPendingImageParts()
 
   let maxOutputTokens = input.max_tokens
   if (

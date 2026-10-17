@@ -452,3 +452,404 @@ test('plain text request shape is unchanged (string content, no follow-up messag
     request.messages.filter(m => Array.isArray(m.content)),
   ).toHaveLength(0)
 })
+
+// --- Tool-result image follow-up ordering (strict tool_calls pairing) ---
+
+// DeepSeek rejects a request when the tool messages answering an assistant
+// message's tool_calls are not contiguous. Every image follow-up must therefore
+// be emitted only after the whole tool run.
+function expectContiguousToolMessages(
+  messages: ReadonlyArray<{
+    role?: string
+    tool_call_id?: string
+    tool_calls?: Array<{ id: string }>
+  }>,
+): void {
+  for (let i = 0; i < messages.length; i++) {
+    const toolCalls = messages[i].tool_calls
+    if (messages[i].role !== 'assistant' || !toolCalls?.length) continue
+    const contiguousToolIds: string[] = []
+    for (
+      let j = i + 1;
+      j < messages.length && messages[j].role === 'tool';
+      j++
+    ) {
+      contiguousToolIds.push(messages[j].tool_call_id ?? '')
+    }
+    expect(contiguousToolIds).toEqual(toolCalls.map(call => call.id))
+  }
+}
+
+const readToolUse = (id: string) => ({
+  type: 'tool_use',
+  id,
+  name: 'Read',
+  input: {},
+})
+
+const pngToolResult = (id: string) => ({
+  type: 'tool_result',
+  tool_use_id: id,
+  content: [
+    {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: IMAGE_B64 },
+    },
+  ],
+})
+
+const textToolResult = (id: string, text: string) => ({
+  type: 'tool_result',
+  tool_use_id: id,
+  content: [{ type: 'text', text }],
+})
+
+test('single tool_call with image result → tool message then image user message (pairing invariant held)', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      { role: 'assistant', content: [readToolUse('toolu_a')] },
+      { role: 'user', content: [pngToolResult('toolu_a')] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.messages.map(m => m.role)).toEqual(['assistant', 'tool', 'user'])
+  expect(request.messages[1].tool_call_id).toBe('toolu_a')
+  expect(request.messages[1].content).toBe('(tool returned image content)')
+  const imageContent = request.messages[2].content as Array<Record<string, unknown>>
+  expect(imageContent[0]).toEqual({
+    type: 'text',
+    text: '[Images returned by tool call toolu_a]',
+  })
+  expect(imageContent[1]).toEqual({
+    type: 'image_url',
+    image_url: { url: `data:image/png;base64,${IMAGE_B64}` },
+  })
+  expectContiguousToolMessages(request.messages)
+})
+
+test('parallel tool_calls where only the first result has an image → both tool messages stay contiguous (regression: 914e9923 400)', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_img'), readToolUse('toolu_txt')],
+      },
+      {
+        role: 'user',
+        content: [
+          pngToolResult('toolu_img'),
+          textToolResult('toolu_txt', 'plain output'),
+        ],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.messages.map(m => m.role)).toEqual([
+    'assistant',
+    'tool',
+    'tool',
+    'user',
+    'assistant',
+  ])
+  expect(
+    request.messages.filter(m => m.role === 'tool').map(m => m.tool_call_id),
+  ).toEqual(['toolu_img', 'toolu_txt'])
+  expect(request.messages[3].tool_call_id).toBeUndefined()
+  expect(Array.isArray(request.messages[3].content)).toBe(true)
+  expectContiguousToolMessages(request.messages)
+})
+
+test('parallel tool_calls both returning images → one user message carries both images after the tool run', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_a'), readToolUse('toolu_b')],
+      },
+      {
+        role: 'user',
+        content: [pngToolResult('toolu_a'), pngToolResult('toolu_b')],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.messages.map(m => m.role)).toEqual([
+    'assistant',
+    'tool',
+    'tool',
+    'user',
+    'assistant',
+  ])
+  // Design contract (not an implementation coincidence): all images of one tool
+  // run merge into a single user message, so N image-bearing tools still yield
+  // exactly one follow-up message.
+  const imageMessages = request.messages.filter(
+    m => m.role === 'user' && Array.isArray(m.content),
+  )
+  expect(imageMessages).toHaveLength(1)
+  const parts = imageMessages[0].content as Array<Record<string, unknown>>
+  expect(parts.filter(part => part.type === 'image_url')).toHaveLength(2)
+  expect(parts.filter(part => part.type === 'text')).toHaveLength(2)
+  expectContiguousToolMessages(request.messages)
+})
+
+test('mixed text + image tool results stay ordered before a following user message', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_shot'), readToolUse('toolu_txt')],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_shot',
+            content: [
+              { type: 'text', text: 'screenshot taken' },
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/png',
+                  data: IMAGE_B64,
+                },
+              },
+            ],
+          },
+          textToolResult('toolu_txt', 'plain output'),
+        ],
+      },
+      { role: 'user', content: 'continue' },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.messages.map(m => m.role)).toEqual([
+    'assistant',
+    'tool',
+    'tool',
+    'user',
+    'user',
+  ])
+  expect(request.messages[1].content).toBe('screenshot taken')
+  expect(request.messages[4].content).toBe('continue')
+  const imageContent = request.messages[3].content as Array<Record<string, unknown>>
+  expect(imageContent.some(part => part.type === 'image_url')).toBe(true)
+  expectContiguousToolMessages(request.messages)
+})
+
+test('tool_results split over consecutive user messages stay contiguous and flush images once', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_a'), readToolUse('toolu_b')],
+      },
+      { role: 'user', content: [pngToolResult('toolu_a')] },
+      { role: 'user', content: [pngToolResult('toolu_b')] },
+      { role: 'user', content: 'continue' },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.messages.map(m => m.role)).toEqual([
+    'assistant',
+    'tool',
+    'tool',
+    'user',
+    'user',
+  ])
+  expect(
+    request.messages.filter(m => m.role === 'tool').map(m => m.tool_call_id),
+  ).toEqual(['toolu_a', 'toolu_b'])
+  // Same merge contract across consecutive user messages: the two runs'
+  // tool_results belong to one tool round, so their images share one message.
+  const imageMessages = request.messages.filter(
+    m => m.role === 'user' && Array.isArray(m.content),
+  )
+  expect(imageMessages).toHaveLength(1)
+  expect(
+    (imageMessages[0].content as Array<Record<string, unknown>>).filter(
+      part => part.type === 'image_url',
+    ),
+  ).toHaveLength(2)
+  expect(request.messages[4].content).toBe('continue')
+  expectContiguousToolMessages(request.messages)
+})
+
+test('plain text tool results keep the pre-fix shape (no follow-up user messages)', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_a'), readToolUse('toolu_b')],
+      },
+      {
+        role: 'user',
+        content: [
+          textToolResult('toolu_a', 'first'),
+          textToolResult('toolu_b', 'second'),
+        ],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.messages.map(m => m.role)).toEqual([
+    'assistant',
+    'tool',
+    'tool',
+    'assistant',
+  ])
+  expect(
+    request.messages.filter(m => m.role === 'tool').map(m => m.content),
+  ).toEqual(['first', 'second'])
+  expect(request.messages.filter(m => Array.isArray(m.content))).toHaveLength(0)
+  expectContiguousToolMessages(request.messages)
+})
+
+// --- Tool run boundaries (pending image queue must not leak across runs) ---
+
+test('two independent image tool rounds stay isolated (one merged image message per run)', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_r1a'), readToolUse('toolu_r1b')],
+      },
+      {
+        role: 'user',
+        content: [pngToolResult('toolu_r1a'), pngToolResult('toolu_r1b')],
+      },
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_r2a'), readToolUse('toolu_r2b')],
+      },
+      {
+        role: 'user',
+        content: [pngToolResult('toolu_r2a'), pngToolResult('toolu_r2b')],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.messages.map(m => m.role)).toEqual([
+    'assistant',
+    'tool',
+    'tool',
+    'user',
+    'assistant',
+    'tool',
+    'tool',
+    'user',
+    'assistant',
+  ])
+  const imageContents = request.messages
+    .filter(m => m.role === 'user' && Array.isArray(m.content))
+    .map(m => m.content as Array<Record<string, unknown>>)
+  expect(imageContents).toHaveLength(2)
+  const labelsOf = (parts: Array<Record<string, unknown>>) =>
+    parts.filter(part => part.type === 'text').map(part => part.text)
+  expect(labelsOf(imageContents[0])).toEqual([
+    '[Images returned by tool call toolu_r1a]',
+    '[Images returned by tool call toolu_r1b]',
+  ])
+  expect(labelsOf(imageContents[1])).toEqual([
+    '[Images returned by tool call toolu_r2a]',
+    '[Images returned by tool call toolu_r2b]',
+  ])
+  // 第二轮图片不得混进第一轮消息（pending 队列必须在 assistant 边界清空）。
+  expect(JSON.stringify(imageContents[0])).not.toContain('toolu_r2')
+  expect(JSON.stringify(imageContents[1])).not.toContain('toolu_r1')
+  expectContiguousToolMessages(request.messages)
+})
+
+test('user message with tool_result image + text + direct image keeps both images', () => {
+  const directImage = {
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: IMAGE_B64 },
+  }
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      { role: 'assistant', content: [readToolUse('toolu_mix')] },
+      {
+        role: 'user',
+        content: [
+          pngToolResult('toolu_mix'),
+          { type: 'text', text: 'and this one too' },
+          directImage,
+        ],
+      },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.messages.map(m => m.role)).toEqual([
+    'assistant',
+    'tool',
+    'user',
+    'user',
+  ])
+  // 工具图片先 flush，随后才是同一 user 消息的文本 + 直接图片内容。
+  const toolImageContent = request.messages[2].content as Array<Record<string, unknown>>
+  expect(toolImageContent[0]).toEqual({
+    type: 'text',
+    text: '[Images returned by tool call toolu_mix]',
+  })
+  expect(toolImageContent.some(part => part.type === 'image_url')).toBe(true)
+  expect(request.messages[3].content).toEqual([
+    { type: 'text', text: 'and this one too' },
+    {
+      type: 'image_url',
+      image_url: { url: `data:image/png;base64,${IMAGE_B64}` },
+    },
+  ])
+  const totalImages = request.messages.reduce(
+    (count, message) =>
+      count +
+      (Array.isArray(message.content)
+        ? (message.content as Array<Record<string, unknown>>).filter(
+            part => part.type === 'image_url',
+          ).length
+        : 0),
+    0,
+  )
+  expect(totalImages).toBe(2)
+  expectContiguousToolMessages(request.messages)
+})
+
+test('request ending with a multi-image tool round flushes one merged user image message', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_a'), readToolUse('toolu_b')],
+      },
+      {
+        role: 'user',
+        content: [pngToolResult('toolu_a'), pngToolResult('toolu_b')],
+      },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.messages.map(m => m.role)).toEqual([
+    'assistant',
+    'tool',
+    'tool',
+    'user',
+  ])
+  const lastContent = request.messages[3].content as Array<Record<string, unknown>>
+  expect(lastContent.filter(part => part.type === 'image_url')).toHaveLength(2)
+  expect(lastContent.filter(part => part.type === 'text')).toHaveLength(2)
+  expectContiguousToolMessages(request.messages)
+})

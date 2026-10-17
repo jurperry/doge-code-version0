@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-17 OpenAI/Responses 兼容层工具结果图片穿插导致 tool_calls 配对 400（2.1.307，APP 0.2.157）
+
+1. 遇到问题：deepseek-flash 真实会话（914e9923）在多工具并行调用后持续 400 `An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message)`。根因：convertAnthropicRequestToOpenAI 把 user 消息里的 tool_result 逐个转为 role:'tool'，若某个结果含图片则在该 tool 消息后立即插一条 role:'user' 图片 follow-up——同一 assistant 的 N 个 tool_calls 后面只跟到 1 条连续 tool 消息；responsesCompat 同型（function_call_output 被 message/user 图片项隔开）。该 400 属 client error，claude.ts 在 messagesContainImage 时剥图重试一次，每次消耗 other 类重试预算（DEFAULT_OTHER_ERROR_MAX_RETRIES=5）；图片留在历史里则每个后续请求先 400 再重试，预算耗尽后 400 上抛成用户可见 API Error。
+2. 解决方法：两个转换函数改为 pending 队列——同一 user 消息先连续输出全部 tool 消息（tool / function_call_output），图片内容部件入队，遇到非 tool 输出（assistant 或用户文本/图片内容）前 flush 成一条 role:'user' 消息（多个工具结果的多张图合并在同一 content parts 数组是设计契约、非实现偶然；单工具输出不变），末尾统一 flush；保证「assistant 带 N 个 tool_calls → 紧随 N 条连续 tool 消息覆盖全部 id」，并兼容多个连续 user 消息各带 tool_result 的历史形态；纯文本/无图输出与修复前逐字节一致。DeepSeek 规范图片只允许出现在 user 消息，故保持「tool 消息纯文本 + follow-up user 图片」，不把图片塞进 role:'tool'；responsesCompat 也未采用 function_call_output.output 原生 content parts（最小风险，跨网关兼容）。两测试文件各补 9 例（单工具+图片、双工具仅首个含图失败形态、双图合并单条 user、图片+文本+后续 user、tool_result 分散多条 user、纯文本回归，以及双轮图片隔离、同一 user 同时含 tool_result 图片+文本+直接图片、请求以多图工具轮结尾三个边界），均断言顺序不变量；真实会话 914e9923 前 74 行经 normalizeMessagesForAPI→ensureToolResultPairing→convert，OpenAI 与 Responses 两路 pairing violations 均 1→0；另补 CLI 级 e2e tools/e2e-openai-tool-image-pairing.ts（严格 mock 同时校验「tool_calls 后 tool 消息连续且齐全」与「图片仅在 user 消息」，并正向断言各请求 user 图片数序列 [0,2,4,6,8,10,12]、最终请求图片 label 与 tool_call_id 一一对应、每轮图片合并为一条 user 消息，防集成层静默丢图；修复前旧 exe 复现 6 次 400 + 12 请求后 is_error，修复后 7 请求单回合成功）。同类入口排查：simpleStreamJsonWithTools.ts 的 OpenAI 工具循环逐条连续 push role:'tool' 且 executeTool 只返回字符串、无图片 follow-up，不涉此 bug，未改；全仓 splitToolResultContent/imageBlockToImageURL 仅这两个转换点使用。
+3. 代码位置：src/services/api/openaiCompat.ts（convertAnthropicRequestToOpenAI 的 pendingImageParts/flushPendingImageParts）、src/services/api/responsesCompat.ts（convertAnthropicRequestToResponses 的 pendingImageParts/flushPendingImageParts）、src/services/api/{openaiCompat,responsesCompat}.test.ts；tools/e2e-openai-tool-image-pairing.ts（新）。
+
 ## 2026-10-15 并发停止等待与 GC 保留（2.1.306，APP 0.2.149）
 
 1. 遇到问题：TaskStop 在途时已标 killed/notified，SDK Stop 会提前拒绝，任务 GC 还可能删除可重试句柄，OS 失败后丢失实际运行资源。

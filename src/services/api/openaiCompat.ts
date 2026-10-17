@@ -231,6 +231,23 @@ export function convertAnthropicRequestToOpenAI(input: {
   // Strip [1m]/[2m] suffixes — same normalization as Anthropic native path (model.ts)
   const targetModel = rawModel.replace(/\[(1|2)m\]/gi, '')
   const messages: OpenAIChatMessage[] = []
+  // Images returned by a tool call cannot ride inside a role:'tool' message,
+  // so they are emitted as a follow-up user message after the tool run. Strict
+  // gateways (DeepSeek) require an assistant message with N tool_calls to be
+  // followed by N contiguous tool messages, so both rules are satisfied by
+  // queueing the follow-up content parts here and flushing them only right
+  // before the next non-tool output.
+  // Contract (not an implementation coincidence): all images of one tool run
+  // are merged into a single user message — a single image-bearing tool keeps
+  // its historical single message, N such tools yield one message with N
+  // labelled image groups. This also covers histories whose tool_results are
+  // spread over several consecutive user messages.
+  const pendingImageParts: OpenAIContentPart[] = []
+  const flushPendingImageParts = (): void => {
+    if (pendingImageParts.length === 0) return
+    messages.push({ role: 'user', content: [...pendingImageParts] })
+    pendingImageParts.length = 0
+  }
 
   if (input.system) {
     const systemText = Array.isArray(input.system)
@@ -249,9 +266,10 @@ export function convertAnthropicRequestToOpenAI(input: {
           typeof result.tool_use_id === 'string' ? result.tool_use_id : undefined
         const { text, imageURLs } = splitToolResultContent(result.content)
         const hasImages = imageURLs.length > 0
-        // Chat Completions tool messages are text-only. Images are emitted as
-        // a follow-up user message right below; JSON.stringify would send raw
-        // base64 as text, which the model cannot interpret as an image.
+        // Chat Completions tool messages are text-only. Images are queued as a
+        // follow-up user message emitted after the whole tool run below;
+        // JSON.stringify would send raw base64 as text, which the model cannot
+        // interpret as an image.
         const toolContent = text
           ? text
           : hasImages
@@ -263,19 +281,16 @@ export function convertAnthropicRequestToOpenAI(input: {
           content: toolContent,
         })
         if (hasImages) {
-          messages.push({
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: `[Images returned by tool call ${toolUseId ?? ''}]`,
-              },
-              ...imageURLs.map(url => ({
-                type: 'image_url' as const,
-                image_url: { url },
-              })),
-            ],
-          })
+          pendingImageParts.push(
+            {
+              type: 'text',
+              text: `[Images returned by tool call ${toolUseId ?? ''}]`,
+            },
+            ...imageURLs.map(url => ({
+              type: 'image_url' as const,
+              image_url: { url },
+            })),
+          )
         }
       }
 
@@ -286,6 +301,9 @@ export function convertAnthropicRequestToOpenAI(input: {
       const text = contentToText(
         nonToolBlocks as unknown as BetaMessageParam['content'],
       )
+      // Anything besides tool_result blocks ends the tool run, so the queued
+      // tool images must be flushed before that content is emitted.
+      if (imageURLs.length > 0 || text) flushPendingImageParts()
       if (imageURLs.length > 0) {
         // Multimodal user content: text + image_url parts. Text-only requests
         // keep the plain string content for maximal gateway compatibility.
@@ -306,6 +324,9 @@ export function convertAnthropicRequestToOpenAI(input: {
     }
 
     if (message.role === 'assistant') {
+      // A new assistant turn ends the current tool run: flush queued tool
+      // images before the assistant message itself.
+      flushPendingImageParts()
       const blocks = Array.isArray(message.content)
         ? (message.content as unknown as AnyBlock[])
         : []
@@ -342,6 +363,9 @@ export function convertAnthropicRequestToOpenAI(input: {
       })
     }
   }
+
+  // A request may end on a tool run; its images still need to be sent.
+  flushPendingImageParts()
 
   // Handle model-specific max_tokens limits
   let maxTokens = input.max_tokens

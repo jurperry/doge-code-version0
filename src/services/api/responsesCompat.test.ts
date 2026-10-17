@@ -552,3 +552,434 @@ test('plain text request shape is unchanged (string tool output, single input_te
     { type: 'input_text', text: 'plain question' },
   ])
 })
+
+// --- Tool-result image follow-up ordering (strict function_call pairing) ---
+
+// Strict gateways require a run of function_call items to be answered by an
+// equal, contiguous run of function_call_output items. Image follow-up message
+// items must therefore come only after the whole tool run.
+function expectContiguousFunctionCallOutputs(
+  items: ReadonlyArray<{ type?: string; call_id?: string }>,
+): void {
+  let i = 0
+  while (i < items.length) {
+    if (items[i].type !== 'function_call') {
+      i++
+      continue
+    }
+    const callIds: string[] = []
+    while (i < items.length && items[i].type === 'function_call') {
+      callIds.push(items[i].call_id ?? '')
+      i++
+    }
+    const outputIds: string[] = []
+    while (i < items.length && items[i].type === 'function_call_output') {
+      outputIds.push(items[i].call_id ?? '')
+      i++
+    }
+    expect(outputIds).toEqual(callIds)
+  }
+}
+
+const readToolUse = (id: string) => ({
+  type: 'tool_use',
+  id,
+  name: 'Read',
+  input: {},
+})
+
+const pngToolResult = (id: string) => ({
+  type: 'tool_result',
+  tool_use_id: id,
+  content: [
+    {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: IMAGE_B64 },
+    },
+  ],
+})
+
+const textToolResult = (id: string, text: string) => ({
+  type: 'tool_result',
+  tool_use_id: id,
+  content: [{ type: 'text', text }],
+})
+
+const userImageItems = (items: Array<{ type?: string; role?: string; content?: unknown }>) =>
+  items.filter(
+    item =>
+      item.type === 'message' &&
+      item.role === 'user' &&
+      Array.isArray(item.content) &&
+      (item.content as Array<{ type?: string }>).some(part => part.type === 'input_image'),
+  )
+
+test('single function call with image output → function_call_output then image user item (pairing invariant held)', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      { role: 'assistant', content: [readToolUse('toolu_a')] },
+      { role: 'user', content: [pngToolResult('toolu_a')] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.input.map(item => item.type)).toEqual([
+    'function_call',
+    'function_call_output',
+    'message',
+  ])
+  const imageItems = userImageItems(request.input)
+  expect(imageItems).toHaveLength(1)
+  expect(
+    (imageItems[0] as { content: Array<Record<string, unknown>> }).content,
+  ).toEqual([
+    { type: 'input_text', text: '[Images returned by tool call toolu_a]' },
+    { type: 'input_image', image_url: `data:image/png;base64,${IMAGE_B64}` },
+  ])
+  expectContiguousFunctionCallOutputs(request.input)
+})
+
+test('parallel function calls where only the first output has an image → outputs stay contiguous (regression: 914e9923 400)', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_img'), readToolUse('toolu_txt')],
+      },
+      {
+        role: 'user',
+        content: [
+          pngToolResult('toolu_img'),
+          textToolResult('toolu_txt', 'plain output'),
+        ],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.input.map(item => item.type)).toEqual([
+    'function_call',
+    'function_call',
+    'function_call_output',
+    'function_call_output',
+    'message',
+    'message',
+  ])
+  expect(
+    request.input
+      .filter(item => item.type === 'function_call_output')
+      .map(item => (item as { call_id: string }).call_id),
+  ).toEqual(['toolu_img', 'toolu_txt'])
+  expect(userImageItems(request.input)).toHaveLength(1)
+  expectContiguousFunctionCallOutputs(request.input)
+})
+
+test('parallel function calls both returning images → one user message carries both images after the tool run', () => {
+  // Design contract (not an implementation coincidence): all images of one
+  // tool run merge into a single user message item, so N image-bearing tools
+  // still yield exactly one follow-up item.
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_a'), readToolUse('toolu_b')],
+      },
+      {
+        role: 'user',
+        content: [pngToolResult('toolu_a'), pngToolResult('toolu_b')],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.input.map(item => item.type)).toEqual([
+    'function_call',
+    'function_call',
+    'function_call_output',
+    'function_call_output',
+    'message',
+    'message',
+  ])
+  const imageItems = userImageItems(request.input)
+  expect(imageItems).toHaveLength(1)
+  expect(
+    (imageItems[0] as { content: Array<Record<string, unknown>> }).content.filter(
+      part => part.type === 'input_image',
+    ),
+  ).toHaveLength(2)
+  expectContiguousFunctionCallOutputs(request.input)
+})
+
+test('mixed text + image tool results stay ordered before a following user message', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_shot'), readToolUse('toolu_txt')],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_shot',
+            content: [
+              { type: 'text', text: 'screenshot taken' },
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/png',
+                  data: IMAGE_B64,
+                },
+              },
+            ],
+          },
+          textToolResult('toolu_txt', 'plain output'),
+        ],
+      },
+      { role: 'user', content: 'continue' },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.input.map(item => item.type)).toEqual([
+    'function_call',
+    'function_call',
+    'function_call_output',
+    'function_call_output',
+    'message',
+    'message',
+  ])
+  expect(
+    (request.input[2] as { output: string }).output,
+  ).toBe('screenshot taken')
+  expect((request.input[3] as { output: string }).output).toBe('plain output')
+  expect(userImageItems(request.input)).toHaveLength(1)
+  const trailing = request.input[5] as {
+    role: string
+    content: Array<Record<string, unknown>>
+  }
+  expect(trailing.role).toBe('user')
+  expect(trailing.content).toEqual([{ type: 'input_text', text: 'continue' }])
+  expectContiguousFunctionCallOutputs(request.input)
+})
+
+test('tool_results split over consecutive user messages stay contiguous and flush images once', () => {
+  // Same merge contract across consecutive user messages: the two runs'
+  // tool_results belong to one tool round, so their images share one message.
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_a'), readToolUse('toolu_b')],
+      },
+      { role: 'user', content: [pngToolResult('toolu_a')] },
+      { role: 'user', content: [pngToolResult('toolu_b')] },
+      { role: 'user', content: 'continue' },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.input.map(item => item.type)).toEqual([
+    'function_call',
+    'function_call',
+    'function_call_output',
+    'function_call_output',
+    'message',
+    'message',
+  ])
+  const imageItems = userImageItems(request.input)
+  expect(imageItems).toHaveLength(1)
+  expect(
+    (imageItems[0] as { content: Array<Record<string, unknown>> }).content.filter(
+      part => part.type === 'input_image',
+    ),
+  ).toHaveLength(2)
+  const trailing = request.input[5] as {
+    role: string
+    content: Array<Record<string, unknown>>
+  }
+  expect(trailing.role).toBe('user')
+  expect(trailing.content).toEqual([{ type: 'input_text', text: 'continue' }])
+  expectContiguousFunctionCallOutputs(request.input)
+})
+
+test('plain text function call outputs keep the pre-fix shape (no image follow-up items)', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_a'), readToolUse('toolu_b')],
+      },
+      {
+        role: 'user',
+        content: [
+          textToolResult('toolu_a', 'first'),
+          textToolResult('toolu_b', 'second'),
+        ],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.input.map(item => item.type)).toEqual([
+    'function_call',
+    'function_call',
+    'function_call_output',
+    'function_call_output',
+    'message',
+  ])
+  expect(userImageItems(request.input)).toHaveLength(0)
+  expect(
+    request.input
+      .filter(item => item.type === 'function_call_output')
+      .map(item => (item as { output: string }).output),
+  ).toEqual(['first', 'second'])
+  expectContiguousFunctionCallOutputs(request.input)
+})
+
+// --- Tool run boundaries (pending image queue must not leak across runs) ---
+
+test('two independent image tool rounds stay isolated (one merged image item per run)', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_r1a'), readToolUse('toolu_r1b')],
+      },
+      {
+        role: 'user',
+        content: [pngToolResult('toolu_r1a'), pngToolResult('toolu_r1b')],
+      },
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_r2a'), readToolUse('toolu_r2b')],
+      },
+      {
+        role: 'user',
+        content: [pngToolResult('toolu_r2a'), pngToolResult('toolu_r2b')],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.input.map(item => item.type)).toEqual([
+    'function_call',
+    'function_call',
+    'function_call_output',
+    'function_call_output',
+    'message',
+    'function_call',
+    'function_call',
+    'function_call_output',
+    'function_call_output',
+    'message',
+    'message',
+  ])
+  const imageItems = userImageItems(request.input)
+  expect(imageItems).toHaveLength(2)
+  const labelsOf = (item: (typeof imageItems)[number]) =>
+    (item.content as Array<Record<string, unknown>>)
+      .filter(part => part.type === 'input_text')
+      .map(part => part.text)
+  expect(labelsOf(imageItems[0])).toEqual([
+    '[Images returned by tool call toolu_r1a]',
+    '[Images returned by tool call toolu_r1b]',
+  ])
+  expect(labelsOf(imageItems[1])).toEqual([
+    '[Images returned by tool call toolu_r2a]',
+    '[Images returned by tool call toolu_r2b]',
+  ])
+  // 第二轮图片不得混进第一轮消息（pending 队列必须在 assistant 边界清空）。
+  expect(JSON.stringify(imageItems[0])).not.toContain('toolu_r2')
+  expect(JSON.stringify(imageItems[1])).not.toContain('toolu_r1')
+  expectContiguousFunctionCallOutputs(request.input)
+})
+
+test('user message with tool_result image + text + direct image keeps both images', () => {
+  const directImage = {
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: IMAGE_B64 },
+  }
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      { role: 'assistant', content: [readToolUse('toolu_mix')] },
+      {
+        role: 'user',
+        content: [
+          pngToolResult('toolu_mix'),
+          { type: 'text', text: 'and this one too' },
+          directImage,
+        ],
+      },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.input.map(item => item.type)).toEqual([
+    'function_call',
+    'function_call_output',
+    'message',
+    'message',
+  ])
+  // 工具图片先 flush，随后才是同一 user 消息的文本 + 直接图片内容。
+  expect(
+    (request.input[2] as { content: Array<Record<string, unknown>> }).content,
+  ).toEqual([
+    { type: 'input_text', text: '[Images returned by tool call toolu_mix]' },
+    { type: 'input_image', image_url: `data:image/png;base64,${IMAGE_B64}` },
+  ])
+  expect(
+    (request.input[3] as { content: Array<Record<string, unknown>> }).content,
+  ).toEqual([
+    { type: 'input_text', text: 'and this one too' },
+    { type: 'input_image', image_url: `data:image/png;base64,${IMAGE_B64}` },
+  ])
+  const totalImages = request.input.reduce(
+    (count, item) =>
+      count +
+      (item.type === 'message'
+        ? (item.content as Array<Record<string, unknown>>).filter(
+            part => part.type === 'input_image',
+          ).length
+        : 0),
+    0,
+  )
+  expect(totalImages).toBe(2)
+  expectContiguousFunctionCallOutputs(request.input)
+})
+
+test('request ending with a multi-image tool round flushes one merged user image item', () => {
+  const request = convertAnthropicRequestToResponses({
+    model: 'test-model',
+    messages: [
+      {
+        role: 'assistant',
+        content: [readToolUse('toolu_a'), readToolUse('toolu_b')],
+      },
+      {
+        role: 'user',
+        content: [pngToolResult('toolu_a'), pngToolResult('toolu_b')],
+      },
+    ] as unknown as BetaMessageParam[],
+  })
+
+  expect(request.input.map(item => item.type)).toEqual([
+    'function_call',
+    'function_call',
+    'function_call_output',
+    'function_call_output',
+    'message',
+  ])
+  const lastContent = (
+    request.input[4] as { content: Array<Record<string, unknown>> }
+  ).content
+  expect(lastContent.filter(part => part.type === 'input_image')).toHaveLength(2)
+  expect(lastContent.filter(part => part.type === 'input_text')).toHaveLength(2)
+  expectContiguousFunctionCallOutputs(request.input)
+})
