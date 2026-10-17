@@ -1,3 +1,5 @@
+import { getModelProfile } from '../customApiStorage.js'
+import { isProfileSelection } from './profileIdentity.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
 import { isModelAlias, isModelFamilyAlias } from './aliases.js'
 import { parseUserSpecifiedModel } from './model.js'
@@ -98,6 +100,10 @@ function familyHasSpecificEntries(
  * 3. Full model IDs ("claude-opus-4-5-20251101") — exact match only
  */
 export function isModelAllowed(model: string): boolean {
+  if (isProfileSelection(model)) {
+    const profile = getModelProfile(model)
+    return profile ? isModelAllowed(profile.model) : false
+  }
   const settings = getSettings_DEPRECATED() || {}
   const { availableModels } = settings
   if (!availableModels) {

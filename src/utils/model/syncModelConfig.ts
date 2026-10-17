@@ -6,6 +6,7 @@ import {
   type ModelProfile,
 } from '../customApiStorage.js'
 import { updateSettingsForSource } from '../settings/settings.js'
+import { getProfileId } from './profileIdentity.js'
 
 /**
  * Persist a model change to .claude.json (mirror), secure storage and
@@ -25,12 +26,13 @@ export function syncModelConfigToDisk(
   credentialSourceProfile?: ModelProfile,
 ): void {
   const profile = credentialSourceProfile ?? getModelProfile(model)
-  let credsUpdate: Record<string, unknown> = {}
+  let credsUpdate: Record<string, unknown> = { activeProfileId: undefined }
 
   if (clearCredentials) {
-    credsUpdate = { provider: undefined as unknown as string, baseURL: undefined as unknown as string, apiKey: undefined as unknown as string, authTokenType: undefined as unknown as string }
+    credsUpdate = { activeProfileId: undefined, provider: undefined, baseURL: undefined, apiKey: undefined, authTokenType: undefined }
   } else if (profile) {
     credsUpdate = {
+      activeProfileId: getProfileId(profile),
       provider: profile.provider,
       baseURL: profile.baseURL,
       apiKey: profile.apiKey,

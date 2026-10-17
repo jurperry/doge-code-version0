@@ -1,3 +1,4 @@
+import { getModelEnvironment } from './runtimeModelContext.js'
 import memoize from 'lodash-es/memoize.js'
 import { getAPIProvider } from './providers.js'
 
@@ -7,7 +8,7 @@ import { getAPIProvider } from './providers.js'
 export function matchesTierModel(model: string): boolean {
   const normalized = model.toLowerCase().replace(/\[.*?\]$/i, '')
   for (const tier of TIERS) {
-    const pinned = process.env[tier.modelEnvVar]
+    const pinned = getModelEnvironment()[tier.modelEnvVar]
     if (pinned && normalized === pinned.toLowerCase().replace(/\[.*?\]$/i, '')) {
       return true
     }
@@ -45,15 +46,15 @@ export const get3PModelCapabilityOverride = memoize(
   (model: string, capability: ModelCapabilityOverride): boolean | undefined => {
     const provider = getAPIProvider()
     // Allow capability overrides for OpenAI-compatible APIs (custom base URL)
-    const isCustomApi = process.env.ANTHROPIC_BASE_URL && provider === 'firstParty'
+    const isCustomApi = getModelEnvironment().ANTHROPIC_BASE_URL && provider === 'firstParty'
 
     if (provider === 'firstParty' && !isCustomApi) {
       return undefined
     }
     const m = model.toLowerCase().replace(/\[.*?\]$/, '')
     for (const tier of TIERS) {
-      const pinned = process.env[tier.modelEnvVar]
-      const capabilities = process.env[tier.capabilitiesEnvVar]
+      const pinned = getModelEnvironment()[tier.modelEnvVar]
+      const capabilities = getModelEnvironment()[tier.capabilitiesEnvVar]
       if (!pinned || capabilities === undefined) continue
       if (m !== pinned.toLowerCase().replace(/\[.*?\]$/, '')) continue
       return capabilities
@@ -64,15 +65,15 @@ export const get3PModelCapabilityOverride = memoize(
     }
     return undefined
   },
-  (model, capability) => `${model.toLowerCase()}:${capability}`,
+  (model, capability) => JSON.stringify([
+    model.toLowerCase(), capability, getAPIProvider(), getModelEnvironment().ANTHROPIC_BASE_URL,
+    TIERS.map(t => [getModelEnvironment()[t.modelEnvVar], getModelEnvironment()[t.capabilitiesEnvVar]]),
+  ]),
 )
 
 /**
- * Clear the memoized capability overrides. The memo key is only
- * `model:capability` while the value reads the ANTHROPIC_DEFAULT_*_MODEL /
- * *_SUPPORTED_CAPABILITIES env vars, so every rewrite of those vars (profile
- * apply/clear/rollback, tier restore) must invalidate the cache or the
- * previous provider's capability strings stick until process restart.
+ * Bound cache lifetime when root profile configuration changes. Scoped
+ * workers include their tier configuration in the key and remain independent.
  */
 export function clearModelCapabilityOverrideCache(): void {
   get3PModelCapabilityOverride.cache.clear()

@@ -189,6 +189,7 @@ export type GlobalConfig = {
     model?: string
     savedModels?: string[]
     modelProfiles?: unknown[]
+    activeProfileId?: string
     /**
      * @deprecated Tier selections are session-scoped (2026-09-07 provider
      * refactor). No longer written or restored; scrubbed by

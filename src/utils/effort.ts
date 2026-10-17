@@ -1,3 +1,4 @@
+import { getModelEnvironment } from './model/runtimeModelContext.js'
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { isUltrathinkEnabled } from './thinking.js'
 import { getInitialSettings } from './settings/settings.js'
@@ -45,7 +46,7 @@ export function modelSupportsEffort(model: string): boolean {
   // without explicit ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES.
   // Third-party APIs (OpenAI-compatible) generally accept effort/temperature.
   // Also support custom API endpoints (ANTHROPIC_BASE_URL) even if provider is firstParty.
-  const isCustomApi = process.env.ANTHROPIC_BASE_URL && !isFirstPartyAnthropicBaseUrl()
+  const isCustomApi = getModelEnvironment().ANTHROPIC_BASE_URL && !isFirstPartyAnthropicBaseUrl()
   if ((getAPIProvider() !== 'firstParty' || isCustomApi) && matchesTierModel(model)) {
     return true
   }
@@ -72,7 +73,7 @@ export function modelSupportsMaxEffort(model: string): boolean {
   // For 3P custom API: if the model matches a tier model, assume max_effort
   // is supported (same rationale as modelSupportsEffort).
   // Also support custom API endpoints (ANTHROPIC_BASE_URL) even if provider is firstParty.
-  const isCustomApi = process.env.ANTHROPIC_BASE_URL && !isFirstPartyAnthropicBaseUrl()
+  const isCustomApi = getModelEnvironment().ANTHROPIC_BASE_URL && !isFirstPartyAnthropicBaseUrl()
   if ((getAPIProvider() !== 'firstParty' || isCustomApi) && matchesTierModel(model)) {
     return true
   }

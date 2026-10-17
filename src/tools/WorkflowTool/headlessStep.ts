@@ -6,6 +6,7 @@ import { errorMessage } from '../../utils/errors.js'
 import { killPosixProcessTree } from '../../utils/processTree.js'
 import { AgentUsageTracker } from '../../utils/agentUsage.js'
 import { WORKFLOW_STEP_CHILD_ENV } from './stepChildEnv.js'
+import { resolveTierModel } from '../../utils/model/tierResolver.js'
 
 export interface StepOutcome {
   status: 'completed' | 'failed' | 'stopped'
@@ -20,9 +21,8 @@ export function profileStepModel(profile: ModelProfile, requested?: string): str
   if (!model || model === 'inherit') return profile.model
   const tier = /^(opus|sonnet|haiku)(\[\d+m\])?$/i.exec(model)
   if (!tier) return model
-  const mapped = tier[1]!.toLowerCase() === 'opus' ? profile.defaultOpusModel
-    : tier[1]!.toLowerCase() === 'sonnet' ? profile.defaultSonnetModel : profile.defaultHaikuModel
-  const resolved = mapped || profile.model
+  const resolved = resolveTierModel({ tier: tier[1]!.toLowerCase() as 'opus' | 'sonnet' | 'haiku',
+    env: {}, profile, mainModel: profile.model })!
   return tier[2] && !/\[\d+m\]$/i.test(resolved) ? resolved + tier[2] : resolved
 }
 

@@ -19,6 +19,7 @@ import {
 } from '../../utils/auth.js'
 import type { AccountInfo } from '../../utils/config.js'
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
+import { canUpdateModelOAuthAccount } from '../../utils/model/runtimeModelContext.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { getOauthProfileFromOauthToken } from './getOauthProfile.js'
 import type {
@@ -211,7 +212,7 @@ export async function refreshOAuthToken(
       : await fetchProfileInfo(accessToken)
 
     // Update the stored properties if they have changed
-    if (profileInfo && config.oauthAccount) {
+    if (profileInfo && config.oauthAccount && canUpdateModelOAuthAccount()) {
       const updates: Partial<AccountInfo> = {}
       if (profileInfo.displayName !== undefined) {
         updates.displayName = profileInfo.displayName

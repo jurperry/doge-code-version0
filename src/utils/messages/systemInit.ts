@@ -15,6 +15,7 @@ import { getAnthropicApiKeyWithSource } from '../auth.js'
 import { getCwd } from '../cwd.js'
 import { getFastModeState } from '../fastMode.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
+import { getModelEnvironment } from '../model/runtimeModelContext.js'
 
 // TODO(next-minor): remove this translation once SDK consumers have migrated
 // to the 'Agent' tool name. The wire name was renamed Task → Agent in #19647,
@@ -65,6 +66,7 @@ export function buildSystemInitMessage(inputs: SystemInitInputs): SDKMessage {
       status: client.type,
     })),
     model: inputs.model,
+    profile_id: getModelEnvironment().DOGE_ACTIVE_MODEL_PROFILE,
     permissionMode: inputs.permissionMode,
     slash_commands: inputs.commands
       .filter(c => c.userInvocable !== false)

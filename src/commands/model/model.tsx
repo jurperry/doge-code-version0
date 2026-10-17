@@ -1,3 +1,5 @@
+import { getModelProfile } from '../../utils/customApiStorage.js';
+import { isProfileSelection } from '../../utils/model/profileIdentity.js';
 import { c as _c } from "react/compiler-runtime";
 import chalk from 'chalk';
 import * as React from 'react';
@@ -373,6 +375,10 @@ export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
   return <ModelPickerWrapper onDone={onDone} />;
 };
 function renderModelLabel(model: string | null): string {
+  if (model && isProfileSelection(model)) {
+    const profile = getModelProfile(model)
+    return profile ? `${profile.model} (${profile.providerName ?? 'provider'})` : 'Removed provider'
+  }
   if (model === null) {
     // "Default (recommended)" resolves through the ACTIVE provider (env
     // sonnet tier → stored profile's sonnet field → ANTHROPIC_MODEL →

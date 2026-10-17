@@ -1,3 +1,4 @@
+import { getModelConnection, readModelApiStorage } from '../../utils/model/runtimeModelContext.js'
 import type {
   BetaContentBlock,
   BetaContentBlockParam,
@@ -24,7 +25,6 @@ import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
-import { readCustomApiStorage } from 'src/utils/customApiStorage.js'
 import { recordNetworkRetryUsage } from 'src/utils/sessionStorage.js'
 import {
   convertAnthropicRequestToOpenAI,
@@ -541,21 +541,17 @@ export async function verifyApiKey(
     return true
   }
 
-  const customApiStorage = readCustomApiStorage()
-  const compatProvider =
-    getGlobalCompatProvider() !== 'anthropic'
-      ? getGlobalCompatProvider()
-      : customApiStorage.provider ?? 'anthropic'
+  const compatProvider = getModelConnection().provider
   if (compatProvider === 'responses') {
     try {
       const reader = await createResponsesCompatStream(
         {
           apiKey,
-          baseURL: customApiStorage.baseURL || process.env.ANTHROPIC_BASE_URL || '',
+          baseURL: getModelConnection().baseURL,
           fetch: globalThis.fetch,
         },
         {
-          model: customApiStorage.model || process.env.ANTHROPIC_MODEL?.trim() || getSmallFastModel(),
+          model: getSmallFastModel(),
           input: [{
             type: 'message',
             role: 'user',
@@ -1886,21 +1882,15 @@ async function* queryModel(
         // BetaMessageStream calls partialParse() on every input_json_delta, which we don't need
         // since we handle tool input accumulation ourselves
         // biome-ignore lint/plugin: main conversation loop handles attribution separately
-        const customApiStorage = readCustomApiStorage()
         // Environment variable takes priority over persisted customApiStorage:
         // launch scripts (start_deepseek.ps1 etc.) set
         // CLAUDE_CODE_COMPATIBLE_API_PROVIDER explicitly and should not be
         // silently overridden by stale persisted values.
-        const envCompatProvider = process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER
-        const compatProvider = envCompatProvider
-          ? getGlobalCompatProvider()
-          : (customApiStorage.provider ?? getGlobalCompatProvider())
+        const connection = getModelConnection()
+        const compatProvider = connection.provider
         if (compatProvider === 'openai' || compatProvider === 'responses') {
-          // Environment variables take priority over persisted customApiStorage:
-          // launch scripts set env vars explicitly and should not be silently
-          // overridden by stale persisted values.
-          const apiKey = process.env.DOGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || customApiStorage.apiKey || ''
-          const baseURL = process.env.ANTHROPIC_BASE_URL || customApiStorage.baseURL || ''
+          const apiKey = connection.apiKey || ''
+          const baseURL = connection.baseURL
 
           if (compatProvider === 'openai') {
             // OpenAI compat does not use thinking config (params.thinking is not
@@ -2097,7 +2087,7 @@ async function* queryModel(
         const part = rawPart as BetaRawMessageStreamEvent
         if (!part) {
           throw new Error(
-            `[claude.ts] stream yielded undefined part; compatProvider=${readCustomApiStorage().provider ?? 'anthropic'} model=${options.model}`,
+            `[claude.ts] stream yielded undefined part; compatProvider=${readModelApiStorage().provider ?? 'anthropic'} model=${options.model}`,
           )
         }
         const now = Date.now()

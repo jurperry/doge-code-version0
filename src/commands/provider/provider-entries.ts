@@ -7,6 +7,7 @@ import {
   type ModelProfile,
 } from '../../utils/customApiStorage.js'
 import { maskSecret } from './provider-storage.js'
+import { getProfileId } from '../../utils/model/profileIdentity.js'
 
 export type ProviderEntry = {
   model: string
@@ -89,16 +90,19 @@ export function getMainModels(): string[] {
 
 /** Entries for the /provider menu and /provider list. */
 export function getProviderEntries(): ProviderEntry[] {
-  let current: string | undefined
-  try {
-    current = readCustomApiStorage().model ?? getGlobalConfig().customApiEndpoint?.model
-  } catch { /* ignore */ }
-  const currentKey = normalizeModelName(current ?? '')
-  return getMainModels().map(model => ({
-    model,
-    profile: getModelProfile(model),
-    isCurrent: normalizeModelName(model) === currentKey,
-  }))
+  const stored = readCustomApiStorage()
+  const profiles = stored.modelProfiles ?? []
+  const current = process.env.ANTHROPIC_MODEL || stored.model || getGlobalConfig().customApiEndpoint?.model
+  const activeId = process.env.DOGE_ACTIVE_MODEL_PROFILE || stored.activeProfileId
+  const active = activeId ? profiles.find(p => getProfileId(p) === activeId) : current ? getModelProfile(current) : undefined
+  const entries: ProviderEntry[] = profiles.map(profile => ({ model: profile.model, profile,
+    isCurrent: active ? getProfileId(profile) === getProfileId(active) : false }))
+  for (const model of getMainModels()) {
+    if (!profiles.some(p => normalizeModelName(p.model) === normalizeModelName(model))) {
+      entries.push({ model, isCurrent: normalizeModelName(current ?? '') === normalizeModelName(model) })
+    }
+  }
+  return entries
 }
 
 /** One-line description for menu entries. */

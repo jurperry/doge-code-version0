@@ -2,6 +2,7 @@
  * Shared utilities for spawning teammates across different backends.
  */
 
+import { getModelEnvironment } from '../model/runtimeModelContext.js'
 import { quote } from '../bash/shellQuote.js'
 
 /**
@@ -17,6 +18,8 @@ const TEAMMATE_ENV_VARS = [
   'CLAUDE_CODE_USE_FOUNDRY',
   // Custom API endpoint
   'ANTHROPIC_BASE_URL',
+  'DOGE_ACTIVE_MODEL_PROFILE',
+  'ANTHROPIC_MODEL',
   // API protocol selection — without it a tmux teammate falls back to the
   // anthropic format while the lead talks openai/responses to the same URL
   'CLAUDE_CODE_COMPATIBLE_API_PROVIDER',
@@ -65,7 +68,7 @@ export function buildInheritedEnvVars(): string {
   const envVars = ['CLAUDECODE=1', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1']
 
   for (const key of TEAMMATE_ENV_VARS) {
-    const value = process.env[key]
+    const value = getModelEnvironment()[key]
     if (value !== undefined && value !== '') {
       envVars.push(`${key}=${quote([value])}`)
     }

@@ -66,9 +66,9 @@ function resolveTierModel(
  *    model). Legacy activeTier/tierModels fields are scrubbed from secure
  *    storage here as a one-time migration.
  */
-export function restoreTierStateFromStorage(): void {
+export function restoreTierStateFromStorage(options?: { restoreTiers?: boolean }): void {
   const storage = readCustomApiStorage()
-  const mainModel = storage.model?.trim()
+  const mainModel = process.env.ANTHROPIC_MODEL?.trim() || storage.model?.trim()
   // First-party users have no custom API config to restore.
   if (!mainModel) return
 
@@ -87,6 +87,10 @@ export function restoreTierStateFromStorage(): void {
   // (pre-clearCredentials behavior) from the intact modelProfiles entry, so a
   // bare `doge` launch can authenticate again without manual re-setup.
   healStoredCredentials()
+
+  // The CLI restores the complete profile later in managedEnv, after settings
+  // are available. Do not pre-fill disk-baseline tiers before that selection.
+  if (options?.restoreTiers === false) return
 
   // Restore the tier→model mapping for all three tiers from the active
   // profile's own tier slots.

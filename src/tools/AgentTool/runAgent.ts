@@ -1,3 +1,4 @@
+import { iterateWithModelEnvironment } from '../../utils/model/runtimeModelContext.js'
 import { feature } from 'bun:bundle'
 import { getScopedEffort, withScopedEffort } from '../../utils/effortContext.js'
 import type { UUID } from 'crypto'
@@ -248,7 +249,11 @@ function isRecordableMessage(
   )
 }
 
-export async function* runAgent({
+export function runAgent(input: Parameters<typeof runAgentInContext>[0]): ReturnType<typeof runAgentInContext> {
+  return iterateWithModelEnvironment(() => runAgentInContext(input))
+}
+
+async function* runAgentInContext({
   agentDefinition,
   promptMessages,
   toolUseContext,

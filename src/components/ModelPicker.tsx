@@ -1,3 +1,5 @@
+import { getModelProfile } from '../utils/customApiStorage.js';
+import { profileSelection } from '../utils/model/profileIdentity.js';
 import { c as _c } from "react/compiler-runtime";
 import capitalize from 'lodash-es/capitalize.js';
 import * as React from 'react';
@@ -57,7 +59,8 @@ export function ModelPicker(t0) {
   // row while a session-scoped switch is running, which reads as "I'm on
   // the wrong model".
   const effectiveInitial = sessionModel ?? initial;
-  const initialValue = effectiveInitial === null ? NO_PREFERENCE : effectiveInitial;
+  const activeProfile = effectiveInitial ? getModelProfile(effectiveInitial) : undefined;
+  const initialValue = effectiveInitial === null ? NO_PREFERENCE : activeProfile ? profileSelection(activeProfile) : effectiveInitial;
   const [focusedValue, setFocusedValue] = useState(initialValue);
   const isFastMode = useAppState(_temp);
   const [hasToggledEffort, setHasToggledEffort] = useState(false);
@@ -89,7 +92,7 @@ export function ModelPicker(t0) {
         opt =>
           opt.value === effectiveInitial ||
           (opt.value !== null &&
-            normalizeModelName(opt.value) === normalizeModelName(effectiveInitial)),
+            normalizeModelName(getModelProfile(opt.value)?.model ?? opt.value) === normalizeModelName(effectiveInitial)),
       )
     ) {
       let t5;

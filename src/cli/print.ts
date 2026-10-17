@@ -4068,6 +4068,7 @@ function runHeadlessStreaming(
             ...getSettingsWithSources(),
             applied: {
               model,
+              profileId: process.env.DOGE_ACTIVE_MODEL_PROFILE ?? null,
               // Numeric effort (ant-only) → null; SDK schema is string-level only.
               effort: typeof effort === 'string' ? effort : null,
             },

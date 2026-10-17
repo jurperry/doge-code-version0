@@ -1,7 +1,8 @@
 import { isRemoteManagedSettingsEligible } from '../services/remoteManagedSettings/syncCache.js'
 import { clearCACertsCache } from './caCerts.js'
 import { getGlobalConfig } from './config.js'
-import { getModelProfile, readCustomApiStorage } from './customApiStorage.js'
+import { readMergedCustomApiStorage, modelProfileEnvPatch } from './customApiStorage.js'
+import { matchModelProfile, resolveProfileReference } from './model/profileIdentity.js'
 import { enforceApiKeyExclusivity } from './apiKeyExclusivity.js'
 import { isEnvTruthy } from './envUtils.js'
 import {
@@ -136,7 +137,7 @@ export function applySafeConfigEnvironmentVariables(): void {
   // filterSettingsEnv strips keys that were in the spawn env snapshot so
   // the desktop host's operational vars (OTEL, etc.) are not overridden.
   Object.assign(process.env, filterSettingsEnv(getGlobalConfig().env))
-  applyPersistedCustomApiEndpointEnv()
+  applyPersistedCustomApiEndpointEnv(filterSettingsEnv(getGlobalConfig().env))
 
   // Apply ALL env vars from trusted setting sources, policySettings last.
   // Gate on isSettingSourceEnabled so SDK settingSources: [] (isolation mode)
@@ -193,7 +194,7 @@ export function applySafeConfigEnvironmentVariables(): void {
  */
 export function applyConfigEnvironmentVariables(): void {
   Object.assign(process.env, filterSettingsEnv(getGlobalConfig().env))
-  applyPersistedCustomApiEndpointEnv()
+  applyPersistedCustomApiEndpointEnv({ ...filterSettingsEnv(getGlobalConfig().env), ...filterSettingsEnv(getSettings_DEPRECATED()?.env) })
 
   Object.assign(process.env, filterSettingsEnv(getSettings_DEPRECATED()?.env))
 
@@ -211,115 +212,34 @@ export function applyConfigEnvironmentVariables(): void {
   configureGlobalAgents()
 }
 
-function applyPersistedCustomApiEndpointEnv(): void {
-  const customApiEndpoint = {
-    ...(getGlobalConfig().customApiEndpoint ?? {}),
-    ...readCustomApiStorage(),
+// Track only values injected by startup, so a later settings phase can select
+// another profile without mistaking our own defaults for explicit user env.
+const restoredProfileEnv = new Map<string, string>()
+
+function applyPersistedCustomApiEndpointEnv(overrides: Record<string, string> = {}): void {
+  for (const [key, value] of restoredProfileEnv) {
+    if (process.env[key] === value && !Object.hasOwn(overrides, key)) delete process.env[key]
   }
-
-  // Only apply the persisted model if ANTHROPIC_MODEL is not already
-  // explicitly set in the environment. Otherwise the user's explicit
-  // env var (e.g. deepseek-v4-pro[1m]) gets silently overwritten by
-  // the last saved value from settings/customApiStorage.
-  if (customApiEndpoint?.model && !process.env.ANTHROPIC_MODEL) {
-    process.env.ANTHROPIC_MODEL = customApiEndpoint.model
+  restoredProfileEnv.clear()
+  const stored = readMergedCustomApiStorage()
+  const profiles = stored.modelProfiles ?? []
+  const sourceEnv = { ...process.env, ...overrides }
+  const explicitMain = sourceEnv.ANTHROPIC_MODEL
+  const explicitProfile = sourceEnv.DOGE_ACTIVE_MODEL_PROFILE
+    ? resolveProfileReference(profiles, sourceEnv.DOGE_ACTIVE_MODEL_PROFILE) : undefined
+  const savedProfile = !explicitMain && !sourceEnv.ANTHROPIC_BASE_URL && stored.activeProfileId
+    ? resolveProfileReference(profiles, stored.activeProfileId) : undefined
+  const profile = explicitProfile ?? savedProfile ?? matchModelProfile(profiles, explicitMain || stored.model || '', sourceEnv)
+  const patch = profile ? modelProfileEnvPatch(profile) : {
+    ANTHROPIC_MODEL: stored.model, ANTHROPIC_BASE_URL: stored.baseURL,
+    CLAUDE_CODE_COMPATIBLE_API_PROVIDER: stored.provider,
+    [stored.authTokenType === 'ANTHROPIC_AUTH_TOKEN' ? 'ANTHROPIC_AUTH_TOKEN' : 'DOGE_API_KEY']: stored.apiKey,
   }
-
-  // When starting without env vars (pure `doge` launch, no start_.ps1),
-  // the top-level credentials in customApiStorage reflect the LAST model
-  // added via /provider add, not necessarily the active model. If multiple
-  // models are configured and /model was used to switch, the top-level
-  // provider/baseURL/apiKey may belong to a different model than the
-  // top-level model field — this causes credential misalignment on restart.
-  //
-  // Fix: when the active model has a stored profile, apply its full
-  // credentials (provider, baseURL, apiKey) to override any stale
-  // top-level values. Start scripts (start_.ps1) take priority because
-  // they set env vars BEFORE this function runs — the env var guards
-  // prevent overwriting them.
-  const activeModel = process.env.ANTHROPIC_MODEL || customApiEndpoint?.model
-  let hasProfileCredentials = false
-  
-  if (activeModel) {
-    const profile = getModelProfile(activeModel)
-    if (profile) {
-      // Apply provider if not already set by env
-      if (profile.provider && !process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER) {
-        process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER = profile.provider
-      }
-      // Apply baseURL from profile if not already set by env
-      if (profile.baseURL && !process.env.ANTHROPIC_BASE_URL) {
-        process.env.ANTHROPIC_BASE_URL = profile.baseURL
-      }
-      // Apply API key from profile if neither DOGE_API_KEY nor ANTHROPIC_AUTH_TOKEN is set
-      if (profile.apiKey && !process.env.DOGE_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
-        if (profile.authTokenType === 'ANTHROPIC_AUTH_TOKEN') {
-          process.env.ANTHROPIC_AUTH_TOKEN = profile.apiKey
-        } else {
-          process.env.DOGE_API_KEY = profile.apiKey
-        }
-        hasProfileCredentials = true
-      }
-      // Apply context window from profile
-      if (profile.contextWindow !== undefined && !process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOW) {
-        process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOW = String(profile.contextWindow)
-      }
-
-      // Apply tier model configuration from profile if not already set by env.
-      // Without this, /model shows Opus/Sonnet/Haiku all pointing to the main model
-      // because the tier env vars are never populated at startup when no PS script runs.
-      if (profile.defaultOpusModel && !process.env.ANTHROPIC_DEFAULT_OPUS_MODEL) {
-        process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = profile.defaultOpusModel
-      }
-      if (profile.defaultSonnetModel && !process.env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
-        process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = profile.defaultSonnetModel
-      }
-      if (profile.defaultHaikuModel && !process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL) {
-        process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = profile.defaultHaikuModel
-      }
-
-      // Apply sub-agent model from profile
-      if (profile.subagentModel && !process.env.CLAUDE_CODE_SUBAGENT_MODEL) {
-        process.env.CLAUDE_CODE_SUBAGENT_MODEL = profile.subagentModel
-      }
-
-      // Apply capability overrides from profile
-      if (profile.opusCapabilities && !process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES) {
-        process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES = profile.opusCapabilities
-      }
-      if (profile.sonnetCapabilities && !process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES) {
-        process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = profile.sonnetCapabilities
-      }
-
-      // Apply behavior flags from profile
-      if (profile.disableNonessentialTraffic && !process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) {
-        process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
-      }
-      if (profile.disableNonstreamingFallback && !process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK) {
-        process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK = '1'
-      }
-    }
-  }
-
-  // Only apply top-level credentials if profile did NOT provide them.
-  // Top-level credentials are only used as fallback when no profile exists
-  // for the active model.
-  if (!hasProfileCredentials) {
-    if (customApiEndpoint?.baseURL && !process.env.ANTHROPIC_BASE_URL) {
-      process.env.ANTHROPIC_BASE_URL = customApiEndpoint.baseURL
-    }
-
-    // Only apply persisted API key when neither DOGE_API_KEY nor
-    // ANTHROPIC_AUTH_TOKEN is already set in the environment. These two
-    // are mutually exclusive — the start script will set one of them.
-    // Applying the persisted key when the other token type is active
-    // causes auth conflicts and routes the wrong key to the API.
-    if (customApiEndpoint?.apiKey && !process.env.DOGE_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
-      if (customApiEndpoint.authTokenType === 'ANTHROPIC_AUTH_TOKEN') {
-        process.env.ANTHROPIC_AUTH_TOKEN = customApiEndpoint.apiKey
-      } else {
-        process.env.DOGE_API_KEY = customApiEndpoint.apiKey
-      }
-    }
+  const hasExplicitKey = !!(process.env.DOGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN)
+  for (const [key, value] of Object.entries(patch)) {
+    if (!value || process.env[key]) continue
+    if (hasExplicitKey && (key === 'DOGE_API_KEY' || key === 'ANTHROPIC_AUTH_TOKEN')) continue
+    process.env[key] = value
+    restoredProfileEnv.set(key, value)
   }
 }

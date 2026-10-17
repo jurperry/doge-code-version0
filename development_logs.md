@@ -500,6 +500,13 @@
 2. 解决：引擎确定模型与身份后统一注册执行；拆分 headlessStep 传输与 stepTranscript 转存，provider 模型映射、agent 参数、stdin 大文本、--no-session-persistence、隔离子任务 ID / 工具 ID / 转录 ID；重试消息撤回保留 UUID / API ID 兼容并修复父链、失败用量回流父记录。工作流步骤及其嵌套代理仅发 SDK 通知，逐步反馈单独显示和持久化，最终伞通知携带实际输出；同 API 等待所属后台代理。中断 / end_session / 空闲 Esc 共享停止工作流，Windows taskkill 整树、POSIX ps 后代快照先杀子进程再杀组。单字符串参数完整保留，多字段支持引号和 named 输入；API 终态、Agent(type) 范围与后台切换分别抽共享 helper。实际 mock provider 全链 43 项通过，包括断流重试、失败 / 超时 / 继续、同步 API 失败、受限嵌套和 120 秒自动转后台；全套按文件隔离验证，鉴权依赖测试用虚拟 key（单进程全量有既有共享状态污染）。Windows 进程回收实测；POSIX 仅辅助解析测试。
 3. 位置：src/tools/WorkflowTool/{engine,headlessStep,stepTranscript,spec}.ts 与相邻测试；src/tools/AgentTool/{runAgent,agentToolUtils,agentCompletion,agentScope,AgentTool}；src/tasks/Local{Agent,Workflow}Task、src/utils/{sessionStorage,processTree,slashCommandParsing,sdkEventQueue}、src/utils/task/framework、src/cli/print、src/hooks/useCancelRequest。App 仓 tools/verify-workflow-cli.mjs / verify-workflow-app.mjs 共用隔离 fixture，安装验收见 App docs/workflow-agent-validation-2026-10-04.md。
 
+## 十九、2026-10-17 模型配置与运行上下文收敛
+
+### 70. 活跃 Profile 身份、启动档位与运行中代理的 API 隔离
+1. 问题：磁盘 Profile A 的档位可在启动 env B 前注入；同模型 ID 的多个 provider 选择/删除身份不明；异步子代理和进程内 teammate 在 leader 切换后可能混用新协议、地址、模型或鉴权，工作流各自重复档位 fallback。
+2. 解决：启动只按显式身份/主模型/连接补齐选中 Profile 缺失字段；新增稳定 Profile ID（新建 UUID，旧配置兼容），会话选择与显式固化区分；统一纯档位解析与 API 连接读取。worker 创建即绑定 AsyncLocalStorage 快照，包含 env、存储、主模型来源、/login Key 与 OAuth 来源/账户；同账户刷新共享，旧账户刷新禁止覆盖新登录。保留普通 Agent、团队、workflow 各自优先级及 inherit；跨 Profile workflow 继续隔离子进程，兼容旧名称引用。apiKeyHelper 动态刷新、云 SDK 外部凭据链与 tmux env-only 凭据传递不在本轮改造范围。
+3. 位置：src/utils/model/{tierResolver,profileIdentity,runtimeModelContext}.ts、managedEnv/customApiStorage/auth、provider/model 选择器、services/api、services/oauth/client、AgentTool/runAgent、swarm/{inProcessRunner,spawnUtils}、WorkflowTool/{profiles,headlessStep}；回归 tools/model-*.test.ts、tools/e2e-model-routing.ts 与现有模型/provider/team e2e，方案和走线图见 docs/superpowers/specs/2026-10-17-model-routing-design.md。GUI 同步补充 init.profile_id 与 get_settings.applied.profileId（null 明确无身份，optional 兼容旧端），避免恢复时用磁盘默认覆盖运行连接；对应 sdk schemas、cli/print、messages/systemInit 与 tools/model-profile-wire.test.ts。扩展后全量 110 文件 831 项通过，真实三协议/Agent/workflow HTTP 通过。
+
 ## 演进注记（已剔除的失效记录去向）
 
 - `/add-model`、`/remove-model` 命令及其表单类修复：命令已由 `/provider` 取代（provider 为中心重构，见 git 历史），`captureModelProfile` 已删除。

@@ -11,6 +11,7 @@ process.env.CLAUDE_CONFIG_DIR = TMP
 process.env.NODE_ENV = 'test'
 rmSync(TMP, { recursive: true, force: true })
 mkdirSync(TMP, { recursive: true })
+process.on('exit', () => rmSync(TMP, { recursive: true, force: true }))
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
@@ -131,7 +132,7 @@ text = lastText()
 check(isStep(text, 3, 'Base URL'), `选择列表过界 ↓ 应切到 Step 3: Base URL，实际帧: ${text.slice(0, 120)}`)
 
 // ② Base URL 是第 3 步，输入区序号应为 3（修复前恒为 1；差分帧里 "." 可能被跳过）
-check(/❯ 3/.test(text) || /(^|\s)3\.\s+/.test(text), `Base URL 输入区序号显示 3，实际帧: ${text.slice(0, 120)}`)
+check(/(?:❯|>)\s*3(?:\.|\s)/.test(text) || /(^|\s)3\.\s+/.test(text), `Base URL 输入区序号显示 3，实际帧: ${text.slice(0, 120)}`)
 
 // ③ ↑ 回 provider 步骤（焦点回到 anthropic），再 ↑ 过界回 name
 await sendKeys(UP)

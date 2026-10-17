@@ -5,13 +5,14 @@ const root = resolve(import.meta.dir, '..')
 const testRoot = join(root, 'test')
 await mkdir(testRoot, { recursive: true })
 const sandbox = await mkdtemp(join(testRoot, 'network-isolated-suite-'))
-const files = [...new Bun.Glob('src/**/*.test.{ts,tsx}').scanSync({ cwd: root })].sort()
+const files = [...new Bun.Glob('{src,tools}/**/*.test.{ts,tsx}').scanSync({ cwd: root })].sort()
 const results: Array<{ file: string; exit: number; pass: number; fail: number }> = []
 try {
   for (const file of files) {
     const env = { ...process.env }
     for (const key of Object.keys(env)) if (/^(ANTHROPIC_|DOGE_|CLAUDE_CODE_)/.test(key)) delete env[key]
     env.CLAUDE_CONFIG_DIR = join(sandbox, String(results.length))
+    env.CLAUDE_CODE_TEST_FIXTURES_ROOT = env.CLAUDE_CONFIG_DIR
     env.NODE_ENV = 'test'
     // These existing feature tests enter bare mode and enumerate tools/models.
     // They need a local dummy key; credential recovery tests must stay key-free.

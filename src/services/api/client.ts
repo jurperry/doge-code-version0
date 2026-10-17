@@ -1,3 +1,4 @@
+import { getModelEnvironment, getModelConnection } from '../../utils/model/runtimeModelContext.js'
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk'
 import { randomUUID } from 'crypto'
 import type { GoogleAuth } from 'google-auth-library'
@@ -16,7 +17,6 @@ import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
-import { readCustomApiStorage } from 'src/utils/customApiStorage.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
 import { requestFetch, requestTimeouts, validateModelEndpoint } from './requestLifecycle.js'
 import {
@@ -100,20 +100,12 @@ export async function getAnthropicClient({
   fetchOverride?: ClientOptions['fetch']
   source?: string
 }): Promise<Anthropic> {
-  if (process.env.ANTHROPIC_BASE_URL) validateModelEndpoint(process.env.ANTHROPIC_BASE_URL)
-  // Env var takes priority over stored provider so start scripts
-  // (which set CLAUDE_CODE_COMPATIBLE_API_PROVIDER) are not overridden
-  // by a stale customApiStorage.provider from a previous /model switch.
-  // getGlobalCompatProvider() returns 'anthropic' as default, so we only
-  // use its non-default values (openai/responses) as the explicit env choice.
-  const envProvider = getGlobalCompatProvider()
-  const customApiProvider =
-    (envProvider !== 'anthropic' ? envProvider : undefined) ??
-    readCustomApiStorage().provider ??
-    'anthropic'
-  const containerId = process.env.CLAUDE_CODE_CONTAINER_ID
-  const remoteSessionId = process.env.CLAUDE_CODE_REMOTE_SESSION_ID
-  const clientApp = process.env.CLAUDE_AGENT_SDK_CLIENT_APP
+  if (getModelEnvironment().ANTHROPIC_BASE_URL) validateModelEndpoint(getModelEnvironment().ANTHROPIC_BASE_URL)
+  const connection = getModelConnection()
+  const customApiProvider = connection.provider
+  const containerId = getModelEnvironment().CLAUDE_CODE_CONTAINER_ID
+  const remoteSessionId = getModelEnvironment().CLAUDE_CODE_REMOTE_SESSION_ID
+  const clientApp = getModelEnvironment().CLAUDE_AGENT_SDK_CLIENT_APP
   const customHeaders = getCustomHeaders()
   const defaultHeaders: { [key: string]: string } = {
     'x-app': 'cli',
@@ -130,12 +122,12 @@ export async function getAnthropicClient({
 
   // Log API client configuration for HFI debugging
   logForDebugging(
-    `[API:request] Creating client, ANTHROPIC_CUSTOM_HEADERS present: ${!!process.env.ANTHROPIC_CUSTOM_HEADERS}, has Authorization header: ${!!customHeaders['Authorization']}`,
+    `[API:request] Creating client, ANTHROPIC_CUSTOM_HEADERS present: ${!!getModelEnvironment().ANTHROPIC_CUSTOM_HEADERS}, has Authorization header: ${!!customHeaders['Authorization']}`,
   )
 
   // Add additional protection header if enabled via env var
   const additionalProtectionEnabled = isEnvTruthy(
-    process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION,
+    getModelEnvironment().CLAUDE_CODE_ADDITIONAL_PROTECTION,
   )
   if (additionalProtectionEnabled) {
     defaultHeaders['x-anthropic-additional-protection'] = 'true'
@@ -163,33 +155,33 @@ export async function getAnthropicClient({
       fetch: resolvedFetch,
     }),
   }
-  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)) {
+  if (isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_BEDROCK)) {
     const { AnthropicBedrock } = await import('@anthropic-ai/bedrock-sdk')
     // Use region override for small fast model if specified
     const awsRegion =
       model === getSmallFastModel() &&
-      process.env.ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION
-        ? process.env.ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION
+      getModelEnvironment().ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION
+        ? getModelEnvironment().ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION
         : getAWSRegion()
 
     const bedrockArgs: ConstructorParameters<typeof AnthropicBedrock>[0] = {
       ...ARGS,
       awsRegion,
-      ...(isEnvTruthy(process.env.CLAUDE_CODE_SKIP_BEDROCK_AUTH) && {
+      ...(isEnvTruthy(getModelEnvironment().CLAUDE_CODE_SKIP_BEDROCK_AUTH) && {
         skipAuth: true,
       }),
       ...(isDebugToStdErr() && { logger: createStderrLogger() }),
     }
 
     // Add API key authentication if available
-    if (process.env.AWS_BEARER_TOKEN_BEDROCK) {
+    if (getModelEnvironment().AWS_BEARER_TOKEN_BEDROCK) {
       bedrockArgs.skipAuth = true
       // Add the Bearer token for Bedrock API key authentication
       bedrockArgs.defaultHeaders = {
         ...bedrockArgs.defaultHeaders,
-        Authorization: `Bearer ${process.env.AWS_BEARER_TOKEN_BEDROCK}`,
+        Authorization: `Bearer ${getModelEnvironment().AWS_BEARER_TOKEN_BEDROCK}`,
       }
-    } else if (!isEnvTruthy(process.env.CLAUDE_CODE_SKIP_BEDROCK_AUTH)) {
+    } else if (!isEnvTruthy(getModelEnvironment().CLAUDE_CODE_SKIP_BEDROCK_AUTH)) {
       // Refresh auth and get credentials with cache clearing
       const cachedCredentials = await refreshAndGetAwsCredentials()
       if (cachedCredentials) {
@@ -201,13 +193,13 @@ export async function getAnthropicClient({
     // we have always been lying about the return type - this doesn't support batching or models
     return new AnthropicBedrock(bedrockArgs) as unknown as Anthropic
   }
-  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)) {
+  if (isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_FOUNDRY)) {
     const { AnthropicFoundry } = await import('@anthropic-ai/foundry-sdk')
     // Determine Azure AD token provider based on configuration
     // SDK reads ANTHROPIC_FOUNDRY_API_KEY by default
     let azureADTokenProvider: (() => Promise<string>) | undefined
-    if (!process.env.ANTHROPIC_FOUNDRY_API_KEY) {
-      if (isEnvTruthy(process.env.CLAUDE_CODE_SKIP_FOUNDRY_AUTH)) {
+    if (!getModelEnvironment().ANTHROPIC_FOUNDRY_API_KEY) {
+      if (isEnvTruthy(getModelEnvironment().CLAUDE_CODE_SKIP_FOUNDRY_AUTH)) {
         // Mock token provider for testing/proxy scenarios (similar to Vertex mock GoogleAuth)
         azureADTokenProvider = () => Promise.resolve('')
       } else {
@@ -231,10 +223,10 @@ export async function getAnthropicClient({
     // we have always been lying about the return type - this doesn't support batching or models
     return new AnthropicFoundry(foundryArgs) as unknown as Anthropic
   }
-  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)) {
+  if (isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_VERTEX)) {
     // Refresh GCP credentials if gcpAuthRefresh is configured and credentials are expired
     // This is similar to how we handle AWS credential refresh for Bedrock
-    if (!isEnvTruthy(process.env.CLAUDE_CODE_SKIP_VERTEX_AUTH)) {
+    if (!isEnvTruthy(getModelEnvironment().CLAUDE_CODE_SKIP_VERTEX_AUTH)) {
       await refreshGcpCredentialsIfNeeded()
     }
 
@@ -264,19 +256,19 @@ export async function getAnthropicClient({
     // Check project environment variables in same order as google-auth-library
     // See: https://github.com/googleapis/google-auth-library-nodejs/blob/main/src/auth/googleauth.ts
     const hasProjectEnvVar =
-      process.env['GCLOUD_PROJECT'] ||
-      process.env['GOOGLE_CLOUD_PROJECT'] ||
-      process.env['gcloud_project'] ||
-      process.env['google_cloud_project']
+      getModelEnvironment()['GCLOUD_PROJECT'] ||
+      getModelEnvironment()['GOOGLE_CLOUD_PROJECT'] ||
+      getModelEnvironment()['gcloud_project'] ||
+      getModelEnvironment()['google_cloud_project']
 
     // Check for credential file paths (service account or ADC)
     // Note: We're checking both standard and lowercase variants to be safe,
     // though we should verify what google-auth-library actually checks
     const hasKeyFile =
-      process.env['GOOGLE_APPLICATION_CREDENTIALS'] ||
-      process.env['google_application_credentials']
+      getModelEnvironment()['GOOGLE_APPLICATION_CREDENTIALS'] ||
+      getModelEnvironment()['google_application_credentials']
 
-    const googleAuth = isEnvTruthy(process.env.CLAUDE_CODE_SKIP_VERTEX_AUTH)
+    const googleAuth = isEnvTruthy(getModelEnvironment().CLAUDE_CODE_SKIP_VERTEX_AUTH)
       ? ({
           // Mock GoogleAuth for testing/proxy scenarios
           getClient: () => ({
@@ -296,7 +288,7 @@ export async function getAnthropicClient({
           ...(hasProjectEnvVar || hasKeyFile
             ? {}
             : {
-                projectId: process.env.ANTHROPIC_VERTEX_PROJECT_ID,
+                projectId: getModelEnvironment().ANTHROPIC_VERTEX_PROJECT_ID,
               }),
         })
 
@@ -312,13 +304,14 @@ export async function getAnthropicClient({
 
   // Determine authentication method based on available tokens
   const clientConfig: ConstructorParameters<typeof Anthropic>[0] = {
-    apiKey: isClaudeAISubscriber() ? null : apiKey || getAnthropicApiKey(),
+    baseURL: connection.baseURL,
+    apiKey: isClaudeAISubscriber() ? null : apiKey || (connection.authTokenType === 'DOGE_API_KEY' ? connection.apiKey || getAnthropicApiKey() : null),
     authToken: isClaudeAISubscriber()
-      ? getClaudeAIOAuthTokens()?.accessToken
-      : undefined,
+      ? getClaudeAIOAuthTokens()?.accessToken ?? null
+      : connection.authTokenType === 'ANTHROPIC_AUTH_TOKEN' ? connection.apiKey : null,
     // Set baseURL from OAuth config when using staging OAuth
-    ...(process.env.USER_TYPE === 'ant' &&
-    isEnvTruthy(process.env.USE_STAGING_OAUTH)
+    ...(getModelEnvironment().USER_TYPE === 'ant' &&
+    isEnvTruthy(getModelEnvironment().USE_STAGING_OAUTH)
       ? { baseURL: getOauthConfig().BASE_API_URL }
       : {}),
     ...ARGS,
@@ -335,10 +328,7 @@ export async function getAnthropicClient({
 }
 
 export function getGlobalCompatProvider(): 'anthropic' | 'openai' | 'responses' {
-  const provider = process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER
-  return provider === 'openai' || provider === 'responses'
-    ? provider
-    : 'anthropic'
+  return getModelConnection().provider
 }
 
 async function configureApiKeyHeaders(
@@ -352,9 +342,10 @@ async function configureApiKeyHeaders(
   // header is skipped. Startup enforces the same precedence via
   // enforceApiKeyExclusivity (utils/apiKeyExclusivity.ts); this is the
   // last-line defense for env changes that happen after startup.
-  if (process.env.DOGE_API_KEY) return
+  const connection = getModelConnection()
+  if (connection.apiKey && connection.authTokenType === 'DOGE_API_KEY') return
   const token =
-    process.env.ANTHROPIC_AUTH_TOKEN ||
+    (connection.authTokenType === 'ANTHROPIC_AUTH_TOKEN' ? connection.apiKey : undefined) ||
     (await getApiKeyFromApiKeyHelper(isNonInteractiveSession))
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
@@ -363,7 +354,7 @@ async function configureApiKeyHeaders(
 
 function getCustomHeaders(): Record<string, string> {
   const customHeaders: Record<string, string> = {}
-  const customHeadersEnv = process.env.ANTHROPIC_CUSTOM_HEADERS
+  const customHeadersEnv = getModelEnvironment().ANTHROPIC_CUSTOM_HEADERS
 
   if (!customHeadersEnv) return customHeaders
 

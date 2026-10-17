@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { saveGlobalConfig } from '../../utils/config.js'
 import {
   isSameProviderEntry,
@@ -10,6 +11,7 @@ import {
 } from '../../utils/customApiStorage.js'
 import { updateSettingsForSource } from '../../utils/settings/settings.js'
 import { switchModelProfileAtomicBound } from '../../utils/model/switchModelProfile.bindings.js'
+import { getProfileId } from '../../utils/model/profileIdentity.js'
 
 /** API format used at the protocol-conversion boundary. */
 export type ProviderFormat = 'anthropic' | 'openai' | 'responses'
@@ -138,7 +140,7 @@ export function upsertModelProfile(
   const idx = selfIdx >= 0 ? selfIdx : profiles.findIndex(p => isSameProviderEntry(p, profile))
   if (idx < 0) return [...profiles, profile]
   const next = [...profiles]
-  next[idx] = profile
+  next[idx] = { ...profile, ...(profiles[idx]?.id ? { id: profiles[idx]!.id } : {}) }
   return next
 }
 
@@ -188,6 +190,8 @@ export async function saveAndActivateProvider(
   self?: ModelProfile,
 ): Promise<void> {
   const stored = deps.readStorage()
+  const anchor = self ?? (stored.modelProfiles ?? []).find(p => isSameProviderEntry(p, profile))
+  profile = { ...profile, id: anchor ? getProfileId(anchor) : profile.id ?? randomUUID() }
   const modelProfiles = upsertModelProfile(stored.modelProfiles ?? [], profile, self)
   // The replaced entry's OLD main model must leave savedModels (the
   // /provider menu is driven by savedModels) unless a remaining profile
@@ -207,6 +211,7 @@ export async function saveAndActivateProvider(
   }
   savedModels = dedupeSavedModels(savedModels, profile.model)
   const credentials = {
+    activeProfileId: profile.id,
     provider: profile.provider,
     baseURL: profile.baseURL,
     apiKey: profile.apiKey,

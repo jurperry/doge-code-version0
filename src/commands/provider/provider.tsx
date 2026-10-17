@@ -7,6 +7,7 @@ import { getModelProfile, type ModelProfile } from '../../utils/customApiStorage
 import { formatCustomModelLabel } from '../../utils/model/model.js'
 import { describeProviderEntry, formatProviderEntry, getProviderEntries } from './provider-entries.js'
 import { ProviderForm } from './provider-form.js'
+import { profileSelection } from '../../utils/model/profileIdentity.js'
 import { doRemoveProvider, RemoveProviderPicker } from './provider-remove.js'
 
 const USAGE = [
@@ -65,7 +66,7 @@ export function ProviderMenu({ onDone }: ProviderMenuProps): React.ReactNode {
   const entries = getProviderEntries()
   const options = [
     ...entries.map(e => ({
-      value: `edit:${e.model}`,
+      value: `edit:${e.profile ? profileSelection(e.profile) : e.model}`,
       label: formatCustomModelLabel(e.model),
       description: e.isCurrent
         ? `${describeProviderEntry(e)} · currently active`
@@ -122,6 +123,7 @@ export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
     if (sub === 'remove' || sub === 'rm') {
       if (restArgs) {
         const result = doRemoveProvider(restArgs)
+        if (result.activeModel) _context.setAppState(prev => ({ ...prev, mainLoopModelForSession: result.activeModel! }))
         onDone(result.message, { display: result.success ? undefined : 'system' })
         return
       }

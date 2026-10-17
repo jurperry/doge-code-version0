@@ -26,7 +26,7 @@ afterEach(() => {
   clearModelCapabilityOverrideCache()
 })
 
-test('capability override reflects env rewrites once the cache is cleared', () => {
+test('capability override follows the current configuration without stale cache entries', () => {
   process.env.ANTHROPIC_BASE_URL = 'https://gw.test'
   process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'm-1'
   process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = 'effort,thinking'
@@ -34,8 +34,8 @@ test('capability override reflects env rewrites once the cache is cleared', () =
 
   // Same model, new capability set from a different provider profile.
   process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = 'max_effort'
-  // The memo key is model:capability only — stale without invalidation.
-  expect(get3PModelCapabilityOverride('m-1', 'effort')).toBe(true)
+  // Routing context is part of the memo key, including capability slots.
+  expect(get3PModelCapabilityOverride('m-1', 'effort')).toBe(false)
   clearModelCapabilityOverrideCache()
   expect(get3PModelCapabilityOverride('m-1', 'effort')).toBe(false)
   expect(get3PModelCapabilityOverride('m-1', 'max_effort')).toBe(true)

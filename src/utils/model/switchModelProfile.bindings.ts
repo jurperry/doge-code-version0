@@ -19,7 +19,7 @@
  * session-scoped in BOTH modes (they never persist — see switchTier).
  */
 import { logForDebugging } from '../debug.js'
-import { applyModelProfile, clearLegacyTierState, getModelProfile, normalizeModelName, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
+import { applyModelProfile, clearLegacyTierState, getModelProfile, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
 import {
   switchModelProfileAtomic as switchModelProfileAtomicCore,
   switchTier as switchTierCore,
@@ -27,6 +27,7 @@ import {
   type TierAlias,
 } from './switchModelProfile.js'
 import { noopSyncToDisk } from './modelSwitchScope.js'
+import { resolveTierModel } from './tierResolver.js'
 
 type SyncToDisk = (
   model: string,
@@ -60,31 +61,7 @@ function bindCommit(setAppState: (f: (prev: any) => any) => void) {
 export function findProfileByModel(
   model: string | null | undefined,
 ): ModelProfile | null {
-  if (!model) return null
-  const target = normalizeModelName(model)
-  const matches = (readCustomApiStorage().modelProfiles ?? []).filter(
-    p => normalizeModelName(p.model) === target,
-  )
-  if (matches.length === 0) return null
-  if (matches.length > 1) {
-    const envBase = process.env.ANTHROPIC_BASE_URL?.trim()
-    const envKey = process.env.DOGE_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN
-    if (envBase) {
-      const sameEndpoint =
-        matches.find(
-          p =>
-            p.baseURL?.trim() === envBase &&
-            (!p.apiKey || p.apiKey === envKey),
-        ) ?? matches.find(p => p.baseURL?.trim() === envBase)
-      if (sameEndpoint) {
-        logForDebugging(
-          `[modelSwitch] ${matches.length} profiles share model '${model}' — using the active endpoint's profile '${sameEndpoint.providerName ?? sameEndpoint.model}'`,
-        )
-        return sameEndpoint
-      }
-    }
-  }
-  return matches[0]
+  return model ? getModelProfile(model) ?? null : null
 }
 
 /**
@@ -153,16 +130,6 @@ function storedMainProfile() {
   return storedMain ? { storedMain, profile: getModelProfile(storedMain) } : { storedMain: undefined, profile: undefined }
 }
 
-function storedProfileTierField(
-  profile: ModelProfile | undefined,
-  tier: 'opus' | 'sonnet' | 'haiku',
-): string | undefined {
-  return tier === 'opus'
-    ? profile?.defaultOpusModel
-    : tier === 'sonnet'
-      ? profile?.defaultSonnetModel
-      : profile?.defaultHaikuModel
-}
 
 /** The profile the ACTIVE env describes: env.ANTHROPIC_MODEL is written by
  *  applyModelProfile on every (session or global) provider switch, so when
@@ -195,19 +162,16 @@ function activeEnvProfile() {
  * model instead showed a STALE provider's model after a session-scoped
  * switch (disk baseline ≠ active provider).
  */
+function resolveActiveTier(tier: 'opus' | 'sonnet' | 'haiku'): string | undefined {
+  const active = activeEnvProfile()
+  const baseline = active.activeMain ? undefined : storedMainProfile()
+  return resolveTierModel({ tier, env: process.env,
+    profile: active.profile ?? baseline?.profile,
+    mainModel: active.activeMain || baseline?.storedMain })
+}
+
 export function resolveSessionDefaultModel(): string | null {
-  const { activeMain, profile: activeProfile } = activeEnvProfile()
-  if (activeMain || activeProfile) {
-    return process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
-      || storedProfileTierField(activeProfile, 'sonnet')
-      || activeMain
-      || null
-  }
-  const { storedMain, profile: baselineProfile } = storedMainProfile()
-  return process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
-    || storedProfileTierField(baselineProfile, 'sonnet')
-    || storedMain
-    || null
+  return resolveActiveTier('sonnet') ?? null
 }
 
 export function switchTierBound(
@@ -219,35 +183,7 @@ export function switchTierBound(
     syncToDisk: sessionScoped ? noopSyncToDisk : deps.syncToDisk,
     commitAppState: bindCommit(deps.setAppState),
     sessionScoped,
-    resolveTierModel: (t) => {
-      // Direct env lookup first: env reflects the ACTIVE provider (start
-      // script or a just-applied profile) and bypasses
-      // parseUserSpecifiedModel's fallback chain, which consults
-      // getUserSpecifiedModelSetting() and can be polluted by a previous
-      // tier switch's mainLoopModelOverride (e.g. after switching to Haiku,
-      // getDefaultOpusModel would fallback to Haiku's real model).
-      // When env lacks the tier var (profile has none configured —
-      // applyModelProfile deletes it), fall back within the ACTIVE
-      // provider (its profile field, then its main model) before ever
-      // consulting the disk baseline: a baseline tier model id sent to the
-      // active provider's endpoint is a wrong-model request.
-      const envKey =
-        t === 'opus' ? 'ANTHROPIC_DEFAULT_OPUS_MODEL'
-        : t === 'sonnet' ? 'ANTHROPIC_DEFAULT_SONNET_MODEL'
-        : 'ANTHROPIC_DEFAULT_HAIKU_MODEL'
-      const { activeMain, profile: activeProfile } = activeEnvProfile()
-      if (activeMain || activeProfile) {
-        return process.env[envKey]
-          || storedProfileTierField(activeProfile, t)
-          || activeMain
-          || t
-      }
-      const { storedMain, profile } = storedMainProfile()
-      return process.env[envKey]
-        || storedProfileTierField(profile, t)
-        || storedMain
-        || t
-    },
+    resolveTierModel: t => resolveActiveTier(t) || t,
     resolveDefaultModel: resolveSessionDefaultModel,
     clearLegacyTier: clearLegacyTierState,
     getStoredMainModel: () => {

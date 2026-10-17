@@ -1,8 +1,10 @@
 import { chmodSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { saveGlobalConfig } from './config.js'
+import { getGlobalConfig, saveGlobalConfig } from './config.js'
 import { getGlobalClaudeFile } from './env.js'
 import { getSecureStorage } from './secureStorage/index.js'
 import { clearModelCapabilityOverrideCache } from './model/modelSupportOverrides.js'
+import { ACTIVE_PROFILE_ENV, getProfileId, matchModelProfile, resolveProfileReference } from './model/profileIdentity.js'
+import { getModelEnvironment, readModelApiStorage } from './model/runtimeModelContext.js'
 
 export type TierAliasName = 'opus' | 'sonnet' | 'haiku'
 
@@ -23,6 +25,7 @@ export type TierModelsSnapshot = {
  * needed to fully switch between different API providers/models.
  */
 export type ModelProfile = {
+  id?: string
   model: string
   /**
    * User-facing provider name (e.g. "deepseek官方", "glm官方"). Unique across
@@ -66,6 +69,7 @@ export type ModelProfile = {
 }
 
 export type CustomApiStorageData = {
+  activeProfileId?: string
   provider?: 'anthropic' | 'openai' | 'responses'
   baseURL?: string
   apiKey?: string
@@ -106,6 +110,7 @@ export function readCustomApiStorage(): CustomApiStorageData {
 function parseCustomApiStorage(raw: object): CustomApiStorageData {
   const value = raw as Record<string, unknown>
   return {
+    activeProfileId: typeof value.activeProfileId === 'string' ? value.activeProfileId : undefined,
     provider:
       value.provider === 'openai' || value.provider === 'anthropic' || value.provider === 'responses'
         ? value.provider
@@ -161,6 +166,7 @@ export function normalizeProviderName(name: string): string {
  * edits land in place instead of appending a same-name duplicate.
  */
 export function isSameProviderEntry(a: ModelProfile, b: ModelProfile): boolean {
+  if (a.id && b.id) return a.id === b.id
   const an = a.providerName?.trim()
   const bn = b.providerName?.trim()
   if (an && bn) return normalizeProviderName(an) === normalizeProviderName(bn)
@@ -340,7 +346,8 @@ export function healStoredCredentials(): boolean {
   const current = readCustomApiStorage()
   const model = current.model?.trim()
   if (!model) return false
-  const profile = getModelProfile(model)
+  const profile = (current.activeProfileId ? resolveProfileReference(current.modelProfiles ?? [], current.activeProfileId) : undefined)
+    ?? matchModelProfile(current.modelProfiles ?? [], model, {})
   if (!profile?.apiKey) return false
 
   const credsMatch =
@@ -427,10 +434,12 @@ export function normalizeModelName(name: string): string {
 }
 
 export function getModelProfile(modelName: string): ModelProfile | undefined {
-  const normalized = normalizeModelName(modelName)
-  return readCustomApiStorage().modelProfiles?.find(
-    p => normalizeModelName(p.model) === normalized,
-  )
+  return matchModelProfile(readModelApiStorage().modelProfiles ?? [], modelName, getModelEnvironment())
+}
+
+/** Secure storage is authoritative; the global copy is a legacy fallback. */
+export function readMergedCustomApiStorage(): CustomApiStorageData {
+  return { ...(getGlobalConfig().customApiEndpoint ?? {}), ...readCustomApiStorage() } as CustomApiStorageData
 }
 
 /**
@@ -444,6 +453,7 @@ export function modelProfileEnvPatch(
   profile: ModelProfile,
 ): Record<string, string | undefined> {
   const patch: Record<string, string | undefined> = {
+    [ACTIVE_PROFILE_ENV]: getProfileId(profile),
     ANTHROPIC_MODEL: profile.model,
     ANTHROPIC_BASE_URL: profile.baseURL,
     CLAUDE_CODE_COMPATIBLE_API_PROVIDER: profile.provider,
@@ -551,6 +561,7 @@ export function applyModelProfile(profile: ModelProfile, opts?: { persist?: bool
   writeCustomApiStorage({
     ...current,
     model: profile.model,
+    activeProfileId: getProfileId(profile),
     activeTier: undefined,
     tierModels: undefined,
   })

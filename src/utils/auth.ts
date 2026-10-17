@@ -1,3 +1,4 @@
+import { getModelEnvironment, getModelLoginApiKey, getModelOAuthTokens, readUpdatedModelOAuthTokens, updateModelOAuthTokens, canPersistModelOAuthTokens, hasModelEnvironment, readModelApiStorage } from './model/runtimeModelContext.js'
 import chalk from 'chalk'
 import { exec } from 'child_process'
 import { execa } from 'execa'
@@ -77,7 +78,6 @@ import {
 import { sleep } from './sleep.js'
 import { jsonParse } from './slowOperations.js'
 import { clearToolSchemaCache } from './toolSchemaCache.js'
-import { readCustomApiStorage } from './customApiStorage.js'
 
 /** Default TTL for API key helper cache in milliseconds (5 minutes) */
 const DEFAULT_API_KEY_HELPER_TTL = 5 * 60 * 1000
@@ -110,21 +110,21 @@ export function isAnthropicAuthEnabled(): boolean {
   // ~/.claude settings (apiKeyHelper, settings.env.DOGE_API_KEY) MUST NOT
   // flip this — they'd cause a header mismatch with the proxy and a bogus
   // "invalid x-api-key" from the API. See src/ssh/sshAuthProxy.ts.
-  if (process.env.ANTHROPIC_UNIX_SOCKET) {
-    return !!process.env.CLAUDE_CODE_OAUTH_TOKEN
+  if (getModelEnvironment().ANTHROPIC_UNIX_SOCKET) {
+    return !!getModelEnvironment().CLAUDE_CODE_OAUTH_TOKEN
   }
 
   const is3P =
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
+    isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_BEDROCK) ||
+    isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_VERTEX) ||
+    isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_FOUNDRY)
 
   // Check if user has configured an external API key source
   // This allows externally-provided API keys to work (without requiring proxy configuration)
   const settings = getSettings_DEPRECATED() || {}
   const apiKeyHelper = settings.apiKeyHelper
   const hasExternalAuthToken =
-    process.env.ANTHROPIC_AUTH_TOKEN ||
+    getModelEnvironment().ANTHROPIC_AUTH_TOKEN ||
     apiKeyHelper ||
     process.env.CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR
 
@@ -165,11 +165,11 @@ export function getAuthTokenSource() {
     return { source: 'none' as const, hasToken: false }
   }
 
-  if (process.env.ANTHROPIC_AUTH_TOKEN && !isManagedOAuthContext()) {
+  if (getModelEnvironment().ANTHROPIC_AUTH_TOKEN && !isManagedOAuthContext()) {
     return { source: 'ANTHROPIC_AUTH_TOKEN' as const, hasToken: true }
   }
 
-  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+  if (getModelEnvironment().CLAUDE_CODE_OAUTH_TOKEN) {
     return { source: 'CLAUDE_CODE_OAUTH_TOKEN' as const, hasToken: true }
   }
 
@@ -182,7 +182,7 @@ export function getAuthTokenSource() {
     // doesn't exist. Call sites fall through correctly — the new source is
     // !== 'none' (cli/handlers/auth.ts → oauth_token) and not in the
     // isEnvVarToken set (auth.ts:1844 → generic re-login message).
-    if (process.env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR) {
+    if (getModelEnvironment().CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR) {
       return {
         source: 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR' as const,
         hasToken: true,
@@ -238,8 +238,8 @@ export function getAnthropicApiKeyWithSource(
   // the --settings flag. Never touches keychain, config file, or approval
   // lists. 3P (Bedrock/Vertex/Foundry) uses provider creds, not this path.
   if (isBareMode()) {
-    if (process.env.DOGE_API_KEY) {
-      return { key: process.env.DOGE_API_KEY, source: 'DOGE_API_KEY' }
+    if (getModelEnvironment().DOGE_API_KEY) {
+      return { key: getModelEnvironment().DOGE_API_KEY, source: 'DOGE_API_KEY' }
     }
     if (getConfiguredApiKeyHelper()) {
       return {
@@ -256,23 +256,21 @@ export function getAnthropicApiKeyWithSource(
   // https://anthropic.slack.com/archives/C08428WSLKV/p1747331773214779
   const apiKeyEnvSource: ApiKeySource | undefined = isRunningOnHomespace()
     ? undefined
-    : process.env.DOGE_API_KEY
+    : getModelEnvironment().DOGE_API_KEY
       ? 'DOGE_API_KEY'
-      : process.env.ANTHROPIC_AUTH_TOKEN
+      : getModelEnvironment().ANTHROPIC_AUTH_TOKEN
         ? 'ANTHROPIC_AUTH_TOKEN'
         : undefined
   const apiKeyEnv = apiKeyEnvSource
-    ? process.env[apiKeyEnvSource]
+    ? getModelEnvironment()[apiKeyEnvSource]
     : undefined
 
-  const customApiStorage = readCustomApiStorage()
-  const globalCustomApiEndpoint = getGlobalConfig().customApiEndpoint
-  const persistedCustomApiKey =
-    customApiStorage.apiKey || globalCustomApiEndpoint?.apiKey
+  const customApiStorage = readModelApiStorage()
+  const persistedCustomApiKey = customApiStorage.apiKey
   // When the key comes from persistent storage (no env var), the stored
   // authTokenType says which header style it was saved for.
   const persistedSource: ApiKeySource =
-    (customApiStorage.authTokenType ?? globalCustomApiEndpoint?.authTokenType) ===
+    customApiStorage.authTokenType ===
     'ANTHROPIC_AUTH_TOKEN'
       ? 'ANTHROPIC_AUTH_TOKEN'
       : 'DOGE_API_KEY'
@@ -284,7 +282,7 @@ export function getAnthropicApiKeyWithSource(
       ? persistedSource
       : 'DOGE_API_KEY'
   const effectiveApiKeyEnv = apiKeyEnv || persistedCustomApiKey
-  const compatProviderEnv = process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER
+  const compatProviderEnv = getModelEnvironment().CLAUDE_CODE_COMPATIBLE_API_PROVIDER
   // Env var takes priority over stored provider so start scripts
   // (which set CLAUDE_CODE_COMPATIBLE_API_PROVIDER) are not overridden
   // by a stale customApiStorage.provider from a previous /model switch.
@@ -325,8 +323,8 @@ export function getAnthropicApiKeyWithSource(
 
     if (
       !apiKeyEnv &&
-      !process.env.CLAUDE_CODE_OAUTH_TOKEN &&
-      !process.env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
+      !getModelEnvironment().CLAUDE_CODE_OAUTH_TOKEN &&
+      !getModelEnvironment().CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
     ) {
       throw new Error(
         'DOGE_API_KEY or CLAUDE_CODE_OAUTH_TOKEN env var is required',
@@ -387,7 +385,9 @@ export function getAnthropicApiKeyWithSource(
     }
   }
 
-  const apiKeyFromConfigOrMacOSKeychain = getApiKeyFromConfigOrMacOSKeychain()
+  const capturedLoginKey = getModelLoginApiKey()
+  const apiKeyFromConfigOrMacOSKeychain = capturedLoginKey === undefined
+    ? getApiKeyFromConfigOrMacOSKeychain() : capturedLoginKey
   if (apiKeyFromConfigOrMacOSKeychain) {
     return apiKeyFromConfigOrMacOSKeychain
   }
@@ -1273,6 +1273,10 @@ export function saveOAuthTokensIfNeeded(tokens: OAuthTokens): {
   try {
     const storageData = secureStorage.read() || {}
     const existingOauth = storageData.claudeAiOauth
+    if (!canPersistModelOAuthTokens(existingOauth)) {
+      updateModelOAuthTokens(tokens)
+      return { success: true }
+    }
 
     storageData.claudeAiOauth = {
       accessToken: tokens.accessToken,
@@ -1312,15 +1316,15 @@ export function saveOAuthTokensIfNeeded(tokens: OAuthTokens): {
   }
 }
 
-export const getClaudeAIOAuthTokens = memoize((): OAuthTokens | null => {
+const cachedClaudeAIOAuthTokens = memoize((): OAuthTokens | null => {
   // --bare: API-key-only. No OAuth env tokens, no keychain, no credentials file.
   if (isBareMode()) return null
 
   // Check for force-set OAuth token from environment variable
-  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+  if (getModelEnvironment().CLAUDE_CODE_OAUTH_TOKEN) {
     // Return an inference-only token (unknown refresh and expiry)
     return {
-      accessToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      accessToken: getModelEnvironment().CLAUDE_CODE_OAUTH_TOKEN,
       refreshToken: null,
       expiresAt: null,
       scopes: ['user:inference'],
@@ -1358,6 +1362,14 @@ export const getClaudeAIOAuthTokens = memoize((): OAuthTokens | null => {
     return null
   }
 })
+
+export const getClaudeAIOAuthTokens = Object.assign(
+  (): OAuthTokens | null => {
+    const scoped = getModelOAuthTokens()
+    return scoped === undefined ? cachedClaudeAIOAuthTokens() : scoped
+  },
+  { cache: cachedClaudeAIOAuthTokens.cache },
+)
 
 /**
  * Clears all OAuth token caches. Call this on 401 errors to ensure
@@ -1457,11 +1469,13 @@ async function handleOAuth401ErrorImpl(
  * (which don't hit the keychain), and only uses async for storage reads.
  */
 export async function getClaudeAIOAuthTokensAsync(): Promise<OAuthTokens | null> {
+  const scoped = await readUpdatedModelOAuthTokens()
+  if (scoped !== undefined) return scoped
   if (isBareMode()) return null
 
   // Env var and FD tokens are sync and don't hit the keychain
   if (
-    process.env.CLAUDE_CODE_OAUTH_TOKEN ||
+    getModelEnvironment().CLAUDE_CODE_OAUTH_TOKEN ||
     getOAuthTokenFromFileDescriptor()
   ) {
     return getClaudeAIOAuthTokens()
@@ -1488,6 +1502,7 @@ export function checkAndRefreshOAuthTokenIfNeeded(
   retryCount = 0,
   force = false,
 ): Promise<boolean> {
+  if (hasModelEnvironment()) return checkAndRefreshOAuthTokenIfNeededImpl(retryCount, force)
   // Deduplicate concurrent non-retry, non-force calls
   if (retryCount === 0 && !force) {
     if (pendingRefreshCheck) {
@@ -1597,6 +1612,7 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
         : lockedTokens.scopes,
     })
     saveOAuthTokensIfNeeded(refreshedTokens)
+    updateModelOAuthTokens(refreshedTokens, lockedTokens)
 
     // Clear the cache after refreshing token
     getClaudeAIOAuthTokens.cache?.clear?.()
@@ -1652,9 +1668,9 @@ export function is1PApiCustomer(): boolean {
 
   // Exclude Vertex, Bedrock, and Foundry customers
   if (
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
+    isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_BEDROCK) ||
+    isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_VERTEX) ||
+    isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_FOUNDRY)
   ) {
     return false
   }
@@ -1791,9 +1807,9 @@ export function getSubscriptionName(): string {
 /** Check if using third-party services (Bedrock or Vertex or Foundry) */
 export function isUsing3PServices(): boolean {
   return !!(
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
+    isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_BEDROCK) ||
+    isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_VERTEX) ||
+    isEnvTruthy(getModelEnvironment().CLAUDE_CODE_USE_FOUNDRY)
   )
 }
 
@@ -1984,7 +2000,7 @@ export async function validateForceLoginOrg(): Promise<OrgValidationResult> {
   // `claude ssh` remote: real auth lives on the local machine and is injected
   // by the proxy. The placeholder token can't be validated against the profile
   // endpoint. The local side already ran this check before establishing the session.
-  if (process.env.ANTHROPIC_UNIX_SOCKET) {
+  if (getModelEnvironment().ANTHROPIC_UNIX_SOCKET) {
     return { valid: true }
   }
 

@@ -1,3 +1,4 @@
+import { captureModelEnvironment, runWithModelEnvironment } from '../model/runtimeModelContext.js'
 /**
  * In-process teammate runner
  *
@@ -1764,7 +1765,8 @@ export function startInProcessTeammate(config: InProcessRunnerConfig): void {
   // the full config object (including toolUseContext) while the promise is
   // pending - which can be hours for a long-running teammate.
   const agentId = config.identity.agentId
-  void runInProcessTeammate(config).catch(error => {
+  const snapshot = captureModelEnvironment()
+  void runWithModelEnvironment(snapshot, () => runInProcessTeammate(config)).catch(error => {
     logForDebugging(`[inProcessRunner] Unhandled error in ${agentId}: ${error}`)
   })
 }

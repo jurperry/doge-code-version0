@@ -1470,6 +1470,7 @@ export const SDKSystemMessageSchema = lazySchema(() =>
   z.object({
     type: z.literal('system'),
     subtype: z.literal('init'),
+    profile_id: z.string().optional(),
     agents: z.array(z.string()).optional(),
     apiKeySource: ApiKeySourceSchema(),
     betas: z.array(z.string()).optional(),

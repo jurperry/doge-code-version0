@@ -1,3 +1,4 @@
+import { getModelEnvironment } from './runtimeModelContext.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { getGlobalConfig } from '../config.js'
 import { readCustomApiStorage } from '../customApiStorage.js'
@@ -47,7 +48,7 @@ export function getAgentModel(
   // value — resolve from the agent definition/parent — not a literal model id
   // (parseUserSpecifiedModel passes unknown strings through unchanged, which
   // would send the literal "inherit" to the API and 404).
-  const subagentModelEnv = process.env.CLAUDE_CODE_SUBAGENT_MODEL
+  const subagentModelEnv = getModelEnvironment().CLAUDE_CODE_SUBAGENT_MODEL
   if (!options?.ignoreEnvironmentOverride && subagentModelEnv && subagentModelEnv.toLowerCase() !== 'inherit') {
     return parseUserSpecifiedModel(subagentModelEnv)
   }

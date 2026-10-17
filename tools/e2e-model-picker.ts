@@ -61,6 +61,7 @@ const { restoreTierStateFromStorage } = await import('../src/utils/model/restore
 restoreTierStateFromStorage()
 
 const { getModelOptions } = await import('../src/utils/model/modelOptions.js')
+const { getModelProfile } = await import('../src/utils/customApiStorage.js')
 const options = getModelOptions(false)
 
 console.log('=== /model 列表 ===')
@@ -71,11 +72,12 @@ for (const opt of options) {
 const failures: string[] = []
 const check = (cond: boolean, msg: string) => { if (!cond) failures.push(msg) }
 
-const desc = (v: string | null) => options.find(o => o.value === v)?.description ?? '(missing)'
-const glmRow = options.find(o => o.value === 'glm-5.3')
+const isModel = (value: string | null, model: string | null) => value === model || (value !== null && getModelProfile(value)?.model === model)
+const desc = (v: string | null) => options.find(o => isModel(o.value, v))?.description ?? '(missing)'
+const glmRow = options.find(o => isModel(o.value, 'glm-5.3'))
 check(!!glmRow, 'glm-5.3 应有一条 provider 行')
 check(desc('glm-5.3') === 'Custom model(glm官方)', `glm 行描述应为 Custom model(glm官方)，实际: ${desc('glm-5.3')}`)
-check(options.some(o => o.value === 'deepseek-v4-pro[1m]' && String(o.description).includes('Custom model(deepseek官方)')), '主模型行应带 Custom model(deepseek官方)')
+check(options.some(o => isModel(o.value, 'deepseek-v4-pro[1m]') && String(o.description).includes('Custom model(deepseek官方)')), '主模型行应带 Custom model(deepseek官方)')
 check(String(desc('opus')).includes('deepseek-v4-pro'), `Opus 档未配置应回落主模型，实际: ${desc('opus')}`)
 check(String(desc('haiku')).includes('deepseek-v4-flash') && !String(desc('haiku')).includes('glm'), `Haiku 档应显示本 provider 的 deepseek-v4-flash，实际: ${desc('haiku')}`)
 check(!options.some(o => o.value === 'glm-5.3-flash'), '其他 provider 的档位模型不应单独成行')

@@ -295,7 +295,8 @@ test('saveAndActivateProvider persists profile, credentials and saved list, then
   expect(h.getStorage().model).toBe('deepseek-v4-pro')
   expect(h.getStorage().savedModels).toEqual(['old-model', 'deepseek-v4-pro'])
   expect(h.getStorage().modelProfiles).toHaveLength(2)
-  expect(h.getStorage().modelProfiles?.[1]).toBe(profile)
+  expect(h.getStorage().modelProfiles?.[1]).toMatchObject(profile)
+  expect(h.getStorage().activeProfileId).toBe(h.getStorage().modelProfiles?.[1]?.id)
   expect(h.getStorage().apiKey).toBe('sk-test')
   expect(h.getStorage().provider).toBe('openai')
   expect(h.getStorage().authTokenType).toBe('DOGE_API_KEY')
@@ -309,7 +310,7 @@ test('saveAndActivateProvider persists profile, credentials and saved list, then
   expect(h.settingsUpdates).toEqual([{ model: 'deepseek-v4-pro' }])
 
   // Atomic activation is invoked with the saved profile
-  expect(h.getSwitchCall()?.profile).toBe(profile)
+  expect(h.getSwitchCall()?.profile).toMatchObject(profile)
 
   // Activation syncToDisk moves the model field but keeps credentials (explicit-save semantics)
   h.getSwitchCall()!.syncToDisk('deepseek-v4-pro', true)

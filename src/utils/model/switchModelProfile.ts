@@ -68,6 +68,7 @@ export function restoreEnvSnapshot(snapshot: Record<ProfileManagedEnvKey, string
  * snapshot both; restore deletes whichever was undefined in the snapshot.
  */
 const APPLY_EXTRA_ENV_KEYS = [
+  'DOGE_ACTIVE_MODEL_PROFILE',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_BASE_URL',
   'DOGE_API_KEY',

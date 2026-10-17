@@ -24,7 +24,7 @@
 - **双密钥严格互斥**：`DOGE_API_KEY` → `x-api-key` header；`ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer`；并存时启动卫兵 `enforceApiKeyExclusivity`（`src/utils/apiKeyExclusivity.ts`）按激活 profile 裁决：删除落败一方的 env 并告警，不拒绝启动
 - **与官方 Claude Code 数据完全隔离（创始原则）**：全局配置目录 `~/.doge`（`CLAUDE_CONFIG_DIR` 可覆盖；注意全局配置文件名为 `~/.doge/.claude.json`，是隔离原则下保留的历史命名）。项目级一切资源（agents/skills/commands/settings 等）一律在 `<项目>/.doge/` 下，代码不读也不写任何 `.claude/` 路径。接触 `.claude/` 的例外共三处：`src/utils/ide.ts` 读官方 VSCode 扩展 lockfile、`src/utils/doctorDiagnostic.ts` 检测官方安装（均为有意的官方互操作）；`src/utils/sandbox/sandbox-adapter.ts` 对 `<cwd>/.claude/settings*.json` 与 `.claude/skills` 加 deny-write 沙箱保护（防写，非读写）
 - 技术栈：TypeScript（ESM）+ React JSX/Ink TUI；CLI 解析用 Commander（`src/main.tsx`）；运行时 Bun ≥ 1.3.5、Node ≥ 24，依赖以 `bun.lock` 为准；**无打包构建产物**，直接以 Bun 运行 TS 源码（分发 = git 源码 + `bun link`，无 CI）；`tsconfig.json` `strict: false`、别名 `src/*`；代码风格：多数文件无分号、单引号
-- **模型配置优先级**：持久化的 ModelProfile（`~/.doge` 内存储）优先于启动 env——`applyPersistedCustomApiEndpointEnv` 按活跃模型恢复完整 profile 凭据，详见 development_logs.md。排障时先查持久化配置，再怀疑 env
+- **模型配置优先级**：启动时显式 env / settings.env 优先；`applyPersistedCustomApiEndpointEnv` 按显式 Profile 身份、主模型与连接定位 Profile，仅补齐缺失值，避免磁盘 A 档位混入启动 B。未指定启动主模型/连接时恢复持久化 activeProfileId；`/model` 默认会话级，`--save` 才固化。运行中 worker 保留创建时模型/连接快照，排障同时检查启动配置、活跃 Profile 与 worker 创建时间（详见 development_logs.md）
 - **高风险面**：`src/utils/computerUse/` 涉及真实键鼠注入与截图，改动需充分手动验证；API Key 持久化在 `~/.doge`（`.credentials.json`，另有 `~/.doge/.claude.json` 镜像与 `~/.doge/backups/` 备份），不得写入仓库、提交 git 或打进日志
 
 ### 关键环境变量（完整语义见源码与 development_logs.md）

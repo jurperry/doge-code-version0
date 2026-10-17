@@ -35,6 +35,8 @@ import { has1mContext, has2mContext } from '../context.js'
 import { getGlobalConfig } from '../config.js'
 import { getModelProfile, normalizeModelName, readCustomApiStorage } from '../customApiStorage.js'
 import { getGlobalCompatProvider } from '../../services/api/client.js'
+import { resolveTierModel } from './tierResolver.js'
+import { profileSelection } from './profileIdentity.js'
 
 // @[MODEL LAUNCH]: Update all the available and default model option strings below.
 
@@ -347,9 +349,9 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || activeProfile?.defaultSonnetModel
     const haikuExplicit =
       process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || activeProfile?.defaultHaikuModel
-    const opusModel = opusExplicit || mainModel
-    const sonnetModel = sonnetExplicit || mainModel
-    const haikuModel = haikuExplicit || mainModel
+    const opusModel = resolveTierModel({ tier: 'opus', env: process.env, profile: activeProfile, mainModel })!
+    const sonnetModel = resolveTierModel({ tier: 'sonnet', env: process.env, profile: activeProfile, mainModel })!
+    const haikuModel = resolveTierModel({ tier: 'haiku', env: process.env, profile: activeProfile, mainModel })!
 
     const options: ModelOption[] = [
       getDefaultOptionForUser(),
@@ -357,7 +359,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
 
     // Add the main model as a first-class option so it's always visible
     // and selectable, even when tiers inherit from it.
-    if (customConfiguredModel) {
+    if (customConfiguredModel && !activeProfile) {
       options.push({
         value: customConfiguredModel,
         label: formatCustomModelLabel(customConfiguredModel),
@@ -402,10 +404,9 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     const shownKeys = new Set(activeKey ? [activeKey] : [])
     for (const profile of providerProfiles) {
       const key = normalizeModelName(profile.model)
-      if (shownKeys.has(key)) continue
       shownKeys.add(key)
       options.push({
-        value: profile.model,
+        value: profileSelection(profile),
         label: formatCustomModelLabel(profile.model),
         description: profile.providerName
           ? `Custom model(${profile.providerName})`
@@ -667,7 +668,7 @@ export function getModelOptions(fastMode = false): ModelOption[] {
         opt.value === customModel ||
         (opt.value !== null &&
           customModel !== null &&
-          normalizeModelName(opt.value) === normalizeModelName(customModel)),
+          normalizeModelName(getModelProfile(opt.value)?.model ?? opt.value) === normalizeModelName(customModel)),
     )
   ) {
     return filterModelOptionsByAllowlist(options)

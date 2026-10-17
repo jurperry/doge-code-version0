@@ -1,3 +1,4 @@
+import { getModelEnvironment, getModelMainLoopOverride, getModelSettingsModel } from './runtimeModelContext.js'
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 /**
  * Ensure that any model codenames introduced here are also added to
@@ -5,7 +6,6 @@
  * literals with process.env.USER_TYPE === 'ant' for Bun to remove the codenames
  * during dead code elimination
  */
-import { getMainLoopModelOverride } from '../../bootstrap/state.js'
 import {
   getSubscriptionType,
   isClaudeAISubscriber,
@@ -29,13 +29,16 @@ import { LIGHTNING_BOLT } from '../../constants/figures.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { type ModelAlias, isModelAlias } from './aliases.js'
 import { capitalize } from '../stringUtils.js'
+import { resolveTierModel } from './tierResolver.js'
+import { getModelProfile } from '../customApiStorage.js'
+import { isProfileSelection } from './profileIdentity.js'
 
 export type ModelShortName = string
 export type ModelName = string
 export type ModelSetting = ModelName | ModelAlias | null
 
 export function getSmallFastModel(): ModelName {
-  return process.env.ANTHROPIC_SMALL_FAST_MODEL || getDefaultHaikuModel()
+  return getModelEnvironment().ANTHROPIC_SMALL_FAST_MODEL || getDefaultHaikuModel()
 }
 
 export function isNonCustomOpusModel(model: ModelName): boolean {
@@ -62,12 +65,11 @@ export function isNonCustomOpusModel(model: ModelName): boolean {
 export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
   let specifiedModel: ModelSetting | undefined
 
-  const modelOverride = getMainLoopModelOverride()
+  const modelOverride = getModelMainLoopOverride()
   if (modelOverride !== undefined) {
     specifiedModel = modelOverride
   } else {
-    const settings = getSettings_DEPRECATED() || {}
-    specifiedModel = process.env.ANTHROPIC_MODEL || settings.model || undefined
+    specifiedModel = getModelEnvironment().ANTHROPIC_MODEL || getModelSettingsModel() || undefined
   }
 
   // Ignore the user-specified model if it's not in the availableModels allowlist.
@@ -103,93 +105,24 @@ export function getBestModel(): ModelName {
 }
 
 // @[MODEL LAUNCH]: Update the default Opus model (3P providers may lag so keep defaults unchanged).
+function resolveDefaultTier(tier: 'opus' | 'sonnet' | 'haiku', fallback: string): ModelName {
+  const selected = getUserSpecifiedModelSetting()
+  const main = selected && !isModelAlias(selected) ? selected : getModelEnvironment().ANTHROPIC_MODEL
+  return resolveTierModel({ tier, env: getModelEnvironment(),
+    mainModel: main && !isModelAlias(main) ? main : undefined, fallback })!
+}
+
 export function getDefaultOpusModel(): ModelName {
-  // Explicit tier env var takes priority
-  if (process.env.ANTHROPIC_DEFAULT_OPUS_MODEL) {
-    return process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
-  }
-
-  // Inherit from user's configured main model (env var or settings).
-  // Skip model aliases (e.g. 'sonnet', 'haiku') — they would create a
-  // circular resolution (getUserSpecifiedModelSetting → alias →
-  // getDefaultOpusModel → getUserSpecifiedModelSetting → alias …).
-  // Fall through to ANTHROPIC_MODEL directly instead.
-  const userModel = getUserSpecifiedModelSetting()
-  if (userModel && !isModelAlias(userModel)) {
-    return userModel
-  }
-
-  // Direct fallback to ANTHROPIC_MODEL env var (bypasses settings/state chain)
-  if (process.env.ANTHROPIC_MODEL) {
-    return process.env.ANTHROPIC_MODEL
-  }
-
-  // 3P providers (Bedrock, Vertex, Foundry) — kept as a separate branch
-  // even when values match, since 3P availability lags firstParty and
-  // these will diverge again at the next model launch.
-  if (getAPIProvider() !== 'firstParty') {
-    return getModelStrings().opus48
-  }
-  return getModelStrings().opus48
+  return resolveDefaultTier('opus', getModelStrings().opus48)
 }
 
-// @[MODEL LAUNCH]: Update the default Sonnet model (3P providers may lag so keep defaults unchanged).
 export function getDefaultSonnetModel(): ModelName {
-  if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
-    return process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
-  }
-
-  // BUGFIX: Fallback to user's main model if no env var is set
-  // This ensures the displayed model matches what will actually be used
-  // Skip model aliases (e.g. 'sonnet', 'opus', 'haiku') — when the user
-  // selected a tier alias and the tier env var is NOT set, the alias
-  // stored in AppState would loop back through this function via
-  // getUserSpecifiedModelSetting(), creating circular resolution.
-  // Fall through to ANTHROPIC_MODEL directly for non-aliases only.
-  const userModel = getUserSpecifiedModelSetting()
-  if (userModel && !isModelAlias(userModel)) {
-    // Return the raw model setting without parsing to avoid recursion
-    return userModel
-  }
-
-  // Direct fallback to ANTHROPIC_MODEL env var (bypasses settings/state chain)
-  if (process.env.ANTHROPIC_MODEL) {
-    return process.env.ANTHROPIC_MODEL
-  }
-
-  // Default to Sonnet 4.5 for 3P since they may not have 4.6 yet
-  if (getAPIProvider() !== 'firstParty') {
-    return getModelStrings().sonnet45
-  }
-  return getModelStrings().sonnet5
+  return resolveDefaultTier('sonnet', getAPIProvider() === 'firstParty'
+    ? getModelStrings().sonnet5 : getModelStrings().sonnet45)
 }
 
-// @[MODEL LAUNCH]: Update the default Haiku model (3P providers may lag so keep defaults unchanged).
 export function getDefaultHaikuModel(): ModelName {
-  if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL) {
-    return process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
-  }
-
-  // BUGFIX: Fallback to user's main model if no env var is set
-  // This ensures the displayed model matches what will actually be used
-  // Skip model aliases (e.g. 'sonnet', 'opus', 'haiku') — when the user
-  // selected a tier alias and the tier env var is NOT set, the alias
-  // stored in AppState would loop back through this function via
-  // getUserSpecifiedModelSetting(), creating circular resolution.
-  // Fall through to ANTHROPIC_MODEL directly for non-aliases only.
-  const userModel = getUserSpecifiedModelSetting()
-  if (userModel && !isModelAlias(userModel)) {
-    // Return the raw model setting without parsing to avoid recursion
-    return userModel
-  }
-
-  // Direct fallback to ANTHROPIC_MODEL env var (bypasses settings/state chain)
-  if (process.env.ANTHROPIC_MODEL) {
-    return process.env.ANTHROPIC_MODEL
-  }
-
-  // Haiku 4.5 is available on all platforms (first-party, Foundry, Bedrock, Vertex)
-  return getModelStrings().haiku45
+  return resolveDefaultTier('haiku', getModelStrings().haiku45)
 }
 
 /**
@@ -516,6 +449,11 @@ export function getPublicModelName(model: ModelName): string {
 export function parseUserSpecifiedModel(
   modelInput: ModelName | ModelAlias,
 ): ModelName {
+  if (isProfileSelection(modelInput)) {
+    const profile = getModelProfile(modelInput)
+    if (!profile) throw new Error('Provider profile no longer exists; select a provider again.')
+    return profile.model
+  }
   const modelInputTrimmed = modelInput.trim()
   const normalizedModel = modelInputTrimmed.toLowerCase()
 

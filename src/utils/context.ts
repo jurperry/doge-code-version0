@@ -1,3 +1,4 @@
+import { getModelEnvironment } from './model/runtimeModelContext.js'
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { CONTEXT_1M_BETA_HEADER } from '../constants/betas.js'
 import { getGlobalConfig } from './config.js'
@@ -74,7 +75,7 @@ export function getContextWindowForModel(
   // This allows any user (not just ant) to specify the exact context window for their model.
   // Useful for third-party APIs (DeepSeek, GLM, Gemini, etc.) where modelCapabilities
   // cannot auto-detect the context window.
-  const envContextWindow = process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOW
+  const envContextWindow = getModelEnvironment().CLAUDE_CODE_MODEL_CONTEXT_WINDOW
   if (envContextWindow) {
     const parsed = parseInt(envContextWindow, 10)
     if (!isNaN(parsed) && parsed > 0) {

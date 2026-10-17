@@ -308,7 +308,7 @@ async function main(): Promise<void> {
   // from persisted custom API storage before any UI or query code reads them.
   // Only fills in vars a start script didn't already set.
   const { restoreTierStateFromStorage } = await import('../utils/model/restoreTierState.js');
-  restoreTierStateFromStorage();
+  restoreTierStateFromStorage({ restoreTiers: false });
   profileCheckpoint('cli_before_main_import');
   if (process.env.CLAUDE_CODE_ENTRYPOINT === 'sdk-ts') {
     console.error('[DOGE-DEBUG] About to import main.js');

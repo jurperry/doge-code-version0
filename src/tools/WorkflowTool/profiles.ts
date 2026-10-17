@@ -1,3 +1,4 @@
+import { resolveProfileReference } from '../../utils/model/profileIdentity.js'
 /**
  * Provider-profile lookup for workflow steps (CLI 2.1.282).
  * Kept separate from engine.ts so command generation stays a light import
@@ -31,6 +32,7 @@ export function collectWorkflowProfiles(): ModelProfile[] {
 export function findWorkflowProfile(name: string): ModelProfile | undefined {
   const profiles = collectWorkflowProfiles()
   return (
+    resolveProfileReference(profiles, name) ??
     profiles.find(p => p.providerName === name) ??
     profiles.find(p => p.model === name)
   )

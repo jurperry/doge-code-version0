@@ -10,6 +10,8 @@ import {
   AuthenticationError,
 } from '@anthropic-ai/sdk'
 import { getModelStrings } from './modelStrings.js'
+import { getModelProfile } from '../customApiStorage.js'
+import { isProfileSelection } from './profileIdentity.js'
 import { getGlobalConfig } from '../config.js'
 
 // Cache valid models to avoid repeated API calls
@@ -21,7 +23,9 @@ const validModelCache = new Map<string, boolean>()
 export async function validateModel(
   model: string,
 ): Promise<{ valid: boolean; error?: string }> {
-  const normalizedModel = model.trim()
+  const selectedProfile = isProfileSelection(model) ? getModelProfile(model) : undefined
+  if (isProfileSelection(model) && !selectedProfile) return { valid: false, error: 'Provider profile no longer exists.' }
+  const normalizedModel = selectedProfile?.model ?? model.trim()
   const customBaseURL = getGlobalConfig().customApiEndpoint?.baseURL
 
   // Empty model is invalid
@@ -36,6 +40,8 @@ export async function validateModel(
       error: `Model '${normalizedModel}' is not in the list of available models`,
     }
   }
+
+  if (selectedProfile) return { valid: true }
 
   // Check if it's a known alias (these are always valid)
   const lowerModel = normalizedModel.toLowerCase()

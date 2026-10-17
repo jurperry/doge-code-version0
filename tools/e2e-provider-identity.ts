@@ -17,6 +17,7 @@ process.env.CLAUDE_CONFIG_DIR = TMP
 process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
 rmSync(TMP, { recursive: true, force: true })
 mkdirSync(TMP, { recursive: true })
+process.on('exit', () => rmSync(TMP, { recursive: true, force: true }))
 
 const OLD_MODEL = 'deepseek-flash[1m]'
 const NEW_MODEL = 'deepseek-flash-v2[1m]'
