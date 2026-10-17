@@ -14,7 +14,8 @@
 3. **测试目录分工（test=临时，tools=可复用）**：`test/` 只存放临时测试产物（脚本、图片、视频、日志、沙箱、样例文件等），测试结束后全部删除，不在 git 内跟踪；`tools/` 是可复用测试脚本（e2e、repro、probe、mock、验证脚本等）的唯一存放地，受 git 跟踪。任何测试类脚本禁止散落在仓库其他位置——要复用的进 `tools/`，一次性用完即删的进 `test/`。
 4. **C 盘写入纪律**：向 C 盘（或任何系统盘/系统临时目录）写入任何内容必须遵守——测试期间如需写入，测试结束后必须删除本次产生的全部测试数据，不允许留存在 C 盘内。
 5. **提交与风格**：提交信息用简短祈使句（历史风格如 `Support web search for openai and responses API formats`，中英文均有）；坚持最小化、可审计的改动；带 `ANT-ONLY import markers must not be reordered` 注释的 import 禁止重排序。
-6. **收尾必过 code-review 与回归**：每次完成开发，必须发起子代理（subagent）对本轮改动做 code-review，并做好全量的功能测试与回归验证（单测 + 相关 e2e + `bun run version` 冒烟），review 与回归通过才算完成。编码全程遵循高内聚低耦合、代码规范清晰，调试文字要少（能删则删，不留临时 console/debug 输出）。
+6. **收尾必过 code-review 与全量测试回归**：每次完成开发，必须发起子代理对本轮改动做 code-review，并做好全量的功能测试与回归验证（单测 + 相关 e2e + `bun run version` 冒烟），review 与全量功能测试回归通过才算完成。
+7. **代码各司其职**：编码全程遵循高内聚低耦合、代码规范清晰，调试文字要少（能删则删，不留临时 console/debug 输出）。
 
 ## 二、项目概述
 
