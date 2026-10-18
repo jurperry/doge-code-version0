@@ -58,6 +58,10 @@ export type ModelProfile = {
   opusCapabilities?: string
   /** Capabilities string for Sonnet model */
   sonnetCapabilities?: string
+  /** Capabilities string for Haiku model */
+  haikuCapabilities?: string
+  /** Explicitly disable the effort parameter for this provider's models */
+  disableEffort?: boolean
 
   // --- Behavior configuration ---
   /** Disable non-essential network traffic */
@@ -469,6 +473,9 @@ export function modelProfileEnvPatch(
       profile.opusCapabilities,
     ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
       profile.sonnetCapabilities,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
+      profile.haikuCapabilities,
+    CLAUDE_CODE_DISABLE_EFFORT: profile.disableEffort ? '1' : undefined,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: profile
       .disableNonessentialTraffic
       ? '1'

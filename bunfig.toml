@@ -6,3 +6,6 @@ BUDDY = "true"
 
 [define]
 BUDDY = "true"
+
+[test]
+preload = ["./tools/test-setup.ts"]

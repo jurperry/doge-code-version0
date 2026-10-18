@@ -27,6 +27,7 @@ import {
   createEmptyAttributionState,
 } from '../utils/commitAttribution.js'
 import type { EffortValue } from '../utils/effort.js'
+import type { EffortMemory } from '../utils/effortMemory.js'
 import type { FileHistoryState } from '../utils/fileHistory.js'
 import type { REPLHookContext } from '../utils/hooks/postSamplingHooks.js'
 import type { SessionHooksState } from '../utils/hooks/sessionHooks.js'
@@ -423,8 +424,11 @@ export type AppState = DeepImmutable<{
   fastMode?: boolean
   // Advisor model for server-side advisor tool (undefined = disabled).
   advisorModel?: string
-  // Effort value
+  // Effort value for the current model
   effortValue?: EffortValue
+  // Session-scoped per-model effort memory (effortMemory.ts). Switching models
+  // restores each model's own level instead of carrying one value across all.
+  effortByModel?: EffortMemory
   // Set synchronously in launchUltraplan before the detached flow starts.
   // Prevents duplicate launches during the ~5s window before
   // ultraplanSessionUrl is set by teleportToRemote. Cleared by launchDetached
@@ -567,6 +571,7 @@ export function getDefaultAppState(): AppState {
     authVersion: 0,
     initialMessage: null,
     effortValue: undefined,
+    effortByModel: {},
     activeOverlays: new Set<string>(),
     fastMode: false,
   }

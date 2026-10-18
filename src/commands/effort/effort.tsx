@@ -1,10 +1,11 @@
 import { c as _c } from "react/compiler-runtime";
 import * as React from 'react';
 import { useMainLoopModel } from '../../hooks/useMainLoopModel.js';
+import { rememberEffortForModel } from '../../utils/effortMemory.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { useAppState, useSetAppState } from '../../state/AppState.js';
 import type { LocalJSXCommandOnDone } from '../../types/command.js';
-import { type EffortValue, getDisplayedEffortLevel, getEffortEnvOverride, getEffortValueDescription, isEffortLevel, toPersistableEffort } from '../../utils/effort.js';
+import { type EffortValue, describeEffortApplication, getDisplayedEffortLevel, getEffortEnvOverride, getEffortValueDescription, isEffortLevel, toPersistableEffort } from '../../utils/effort.js';
 import { updateSettingsForSource } from '../../utils/settings/settings.js';
 const COMMON_HELP_ARGS = ['help', '-h', '--help'];
 type EffortCommandResult = {
@@ -108,35 +109,49 @@ function _temp(s) {
   return s.effortValue;
 }
 function ApplyEffortAndClose(t0) {
-  const $ = _c(6);
+  const $ = _c(7);
   const {
     result,
     onDone
   } = t0;
   const setAppState = useSetAppState();
+  const model = useMainLoopModel();
   const {
     effortUpdate,
     message
   } = result;
   let t1;
   let t2;
-  if ($[0] !== effortUpdate || $[1] !== message || $[2] !== onDone || $[3] !== setAppState) {
+  if ($[0] !== effortUpdate || $[1] !== message || $[2] !== onDone || $[3] !== setAppState || $[6] !== model) {
     t1 = () => {
       if (effortUpdate) {
         setAppState(prev => ({
           ...prev,
-          effortValue: effortUpdate.value
+          effortValue: effortUpdate.value,
+          effortByModel: rememberEffortForModel(prev.effortByModel, model, effortUpdate.value)
         }));
       }
-      onDone(message);
+      // Surface capability mismatches instead of letting the send-time silent
+      // downgrade/drop look like the requested level took effect.
+      let finalMessage = message;
+      if (effortUpdate && effortUpdate.value !== undefined) {
+        const application = describeEffortApplication(model, effortUpdate.value);
+        if (!application.supported) {
+          finalMessage += ' · 当前模型不支持 effort，本次选择不会发送到 API';
+        } else if (application.downgraded) {
+          finalMessage += ` · 当前模型不支持 ${effortUpdate.value}，实际按 ${application.applied} 发送`;
+        }
+      }
+      onDone(finalMessage);
     };
-    t2 = [setAppState, effortUpdate, message, onDone];
+    t2 = [setAppState, effortUpdate, message, onDone, model];
     $[0] = effortUpdate;
     $[1] = message;
     $[2] = onDone;
     $[3] = setAppState;
     $[4] = t1;
     $[5] = t2;
+    $[6] = model;
   } else {
     t1 = $[4];
     t2 = $[5];
@@ -147,7 +162,7 @@ function ApplyEffortAndClose(t0) {
 export async function call(onDone: LocalJSXCommandOnDone, _context: unknown, args?: string): Promise<React.ReactNode> {
   args = args?.trim() || '';
   if (COMMON_HELP_ARGS.includes(args)) {
-    onDone('Usage: /effort [low|medium|high|xhigh|max|auto]\n\nEffort levels:\n- low: Quick, straightforward implementation\n- medium: Balanced approach with standard testing\n- high: Comprehensive implementation with extensive testing\n- xhigh: Higher-intensity reasoning between high and max\n- max: Maximum capability with deepest reasoning (Opus 4.8 only)\n- auto: Use the default effort level for your model');
+    onDone('Usage: /effort [low|medium|high|xhigh|max|auto]\n\nEffort levels:\n- low: Quick, straightforward implementation\n- medium: Balanced approach with standard testing\n- high: Comprehensive implementation with extensive testing\n- xhigh: Higher-intensity reasoning between high and max\n- max: Maximum capability with deepest reasoning (model/gateway dependent)\n- auto: Use the default effort level for your model');
     return;
   }
   if (!args || args === 'current' || args === 'status') {

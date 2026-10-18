@@ -530,7 +530,21 @@ export const SDKControlGetSettingsResponseSchema = lazySchema(() =>
           profileId: z.string().nullable().optional(),
           // String levels only — numeric effort is ant-only and the
           // Zod→proto generator can't emit enum∪number unions.
-          effort: z.enum(['low', 'medium', 'high', 'max']).nullable(),
+          effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).nullable(),
+          /** Raw user/env selection before capability downgrades. */
+          requestedEffort: z
+            .enum(['low', 'medium', 'high', 'xhigh', 'max'])
+            .nullable()
+            .optional(),
+          supportsEffort: z.boolean().optional(),
+          supportsMax: z.boolean().optional(),
+          supportedEffortLevels: z
+            .array(z.enum(['low', 'medium', 'high', 'xhigh', 'max']))
+            .optional(),
+          /** Gateway-mapped wire value (null for budget-style providers). */
+          wireEffort: z.string().nullable().optional(),
+          gateway: z.string().nullable().optional(),
+          wireDetail: z.string().nullable().optional(),
         })
         .optional()
         .describe(

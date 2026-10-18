@@ -59,6 +59,12 @@ export type OpenAIChatRequest = {
   }>
   tool_choice?: 'auto' | { type: 'function'; function: { name: string } }
   max_tokens?: number
+  /**
+   * Standard Chat Completions reasoning control (o-series / gpt-5 family).
+   * Sent for all OpenAI-compatible providers; gateways that do not understand
+   * it ignore the field, matching Anthropic's "unknown param" tolerance.
+   */
+  reasoning_effort?: string
   // Chat Completions-native web search knob (e.g. gpt-4o-search-preview).
   web_search_options?: {
     search_context_size?: 'low' | 'medium' | 'high'
@@ -223,6 +229,8 @@ export function convertAnthropicRequestToOpenAI(input: {
   temperature?: number
   max_tokens?: number
   output_config?: { effort?: string }
+  /** Provider-specific thinking controls (e.g. Qwen enable_thinking). */
+  extra_body?: Record<string, unknown>
 }): OpenAIChatRequest {
   // Trust the model from the query engine's resolution chain (which already
   // accounts for /model overrides, settings, and env vars). Do NOT re-read
@@ -385,6 +393,8 @@ export function convertAnthropicRequestToOpenAI(input: {
   ) as unknown as { name?: string; max_uses?: number | null } | undefined
 
   return {
+    // Provider-specific thinking controls first: core fields below always win.
+    ...(input.extra_body ?? {}),
     model: targetModel,
     messages,
     temperature: input.temperature,
@@ -416,7 +426,9 @@ export function convertAnthropicRequestToOpenAI(input: {
       : input.tool_choice?.type === 'auto'
         ? { tool_choice: 'auto' as const }
         : {}),
-    ...(input.output_config?.effort ? { effort: input.output_config.effort } : {}),
+    ...(input.output_config?.effort
+      ? { reasoning_effort: input.output_config.effort }
+      : {}),
   }
 }
 

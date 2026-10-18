@@ -247,6 +247,8 @@ export function convertAnthropicRequestToResponses(input: {
   temperature?: number
   max_tokens?: number
   output_config?: { effort?: string }
+  /** Provider-specific thinking controls (merged into the request root). */
+  extra_body?: Record<string, unknown>
 }): ResponsesRequest {
   // Trust the model from the query engine's resolution chain (which already
   // accounts for /model overrides, settings, and env vars). Do NOT re-read
@@ -396,6 +398,8 @@ export function convertAnthropicRequestToResponses(input: {
   }
 
   return {
+    // Provider-specific thinking controls first: core fields below always win.
+    ...(input.extra_body ?? {}),
     model: targetModel,
     input: convertedInput,
     instructions: getSystemInstructions(input.system),

@@ -29,6 +29,38 @@ test('invalid OpenAI endpoint is a terminal configuration error before fetch', a
   expect(requests).toBe(0)
 })
 
+test('maps output_config.effort to the standard reasoning_effort field', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'gateway-model',
+    messages: [{ role: 'user', content: 'hi' }],
+    output_config: { effort: 'xhigh' },
+  } as Parameters<typeof convertAnthropicRequestToOpenAI>[0])
+  expect(request.reasoning_effort).toBe('xhigh')
+  expect((request as Record<string, unknown>).effort).toBeUndefined()
+  expect((request as Record<string, unknown>).output_config).toBeUndefined()
+})
+
+test('omits reasoning_effort when effort is not requested', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'gateway-model',
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+  expect(request.reasoning_effort).toBeUndefined()
+})
+
+test('merges provider-specific thinking extra body fields (Qwen budget mode)', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'qwen3.8-max',
+    messages: [{ role: 'user', content: 'hi' }],
+    extra_body: { enable_thinking: true, thinking_budget: 16384 },
+  })
+  expect(request).toMatchObject({
+    enable_thinking: true,
+    thinking_budget: 16384,
+  })
+  expect(request.reasoning_effort).toBeUndefined()
+})
+
 function stubFetch(response: Response): typeof globalThis.fetch {
   return (() => Promise.resolve(response)) as unknown as typeof globalThis.fetch
 }

@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test'
 import { PROFILE_MANAGED_ENV_KEYS } from './profileEnvKeys.js'
 
-test('PROFILE_MANAGED_ENV_KEYS contains the exact 9 keys audited from applyModelProfile', () => {
+test('PROFILE_MANAGED_ENV_KEYS contains the exact 11 keys audited from applyModelProfile', () => {
   expect(PROFILE_MANAGED_ENV_KEYS).toEqual([
     'ANTHROPIC_DEFAULT_OPUS_MODEL',
     'ANTHROPIC_DEFAULT_SONNET_MODEL',
@@ -9,6 +9,8 @@ test('PROFILE_MANAGED_ENV_KEYS contains the exact 9 keys audited from applyModel
     'CLAUDE_CODE_SUBAGENT_MODEL',
     'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
     'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
+    'CLAUDE_CODE_DISABLE_EFFORT',
     'CLAUDE_CODE_MODEL_CONTEXT_WINDOW',
     'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
     'CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK',

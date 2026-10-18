@@ -1,83 +1,28 @@
-import { getModelEnvironment } from './model/runtimeModelContext.js'
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { isUltrathinkEnabled } from './thinking.js'
 import { getInitialSettings } from './settings/settings.js'
 import { isProSubscriber, isMaxSubscriber, isTeamSubscriber } from './auth.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
-import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './model/providers.js'
-import { get3PModelCapabilityOverride, matchesTierModel } from './model/modelSupportOverrides.js'
-import { isEnvTruthy } from './envUtils.js'
 import type { EffortLevel } from 'src/entrypoints/sdk/runtimeTypes.js'
 import { getScopedEffort } from './effortContext.js'
+import {
+  EFFORT_LEVELS,
+  getEffortCapability,
+} from './model/effortCapabilities.js'
+import { planEffortWire } from './model/effortGateway.js'
+import { resolveAntModel } from './model/antModels.js'
 
 export type { EffortLevel }
-
-export const EFFORT_LEVELS = [
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-] as const satisfies readonly EffortLevel[]
+export { EFFORT_LEVELS }
 
 export type EffortValue = EffortLevel | number
 
-// @[MODEL LAUNCH]: Add the new model to the allowlist if it supports the effort parameter.
 export function modelSupportsEffort(model: string): boolean {
-  const m = model.toLowerCase()
-  if (isEnvTruthy(process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT)) {
-    return true
-  }
-  const supported3P = get3PModelCapabilityOverride(model, 'effort')
-  if (supported3P !== undefined) {
-    return supported3P
-  }
-  // Supported by a subset of Claude 4 models
-  if (m.includes('opus-4-8') || m.includes('sonnet-5')) {
-    return true
-  }
-  // Exclude any other known legacy models (haiku, older opus/sonnet variants)
-  if (m.includes('haiku') || m.includes('sonnet') || m.includes('opus')) {
-    return false
-  }
-
-  // For 3P custom API: if the model matches one of the pinned
-  // ANTHROPIC_DEFAULT_*_MODEL env vars, assume effort is supported even
-  // without explicit ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES.
-  // Third-party APIs (OpenAI-compatible) generally accept effort/temperature.
-  // Also support custom API endpoints (ANTHROPIC_BASE_URL) even if provider is firstParty.
-  const isCustomApi = getModelEnvironment().ANTHROPIC_BASE_URL && !isFirstPartyAnthropicBaseUrl()
-  if ((getAPIProvider() !== 'firstParty' || isCustomApi) && matchesTierModel(model)) {
-    return true
-  }
-
-  // Default to true for unknown model strings on 1P.
-  // Do not default to true for 3P as they have different formats for their
-  // model strings (ex. anthropics/claude-code#30795)
-  return getAPIProvider() === 'firstParty'
+  return getEffortCapability(model).supportsEffort
 }
 
-// @[MODEL LAUNCH]: Add the new model to the allowlist if it supports 'max' effort.
-// Per API docs, 'max' is Opus 4.8 only for public models — other models return an error.
 export function modelSupportsMaxEffort(model: string): boolean {
-  const supported3P = get3PModelCapabilityOverride(model, 'max_effort')
-  if (supported3P !== undefined) {
-    return supported3P
-  }
-  if (model.toLowerCase().includes('opus-4-8')) {
-    return true
-  }
-  if (process.env.USER_TYPE === 'ant' && resolveAntModel(model)) {
-    return true
-  }
-  // For 3P custom API: if the model matches a tier model, assume max_effort
-  // is supported (same rationale as modelSupportsEffort).
-  // Also support custom API endpoints (ANTHROPIC_BASE_URL) even if provider is firstParty.
-  const isCustomApi = getModelEnvironment().ANTHROPIC_BASE_URL && !isFirstPartyAnthropicBaseUrl()
-  if ((getAPIProvider() !== 'firstParty' || isCustomApi) && matchesTierModel(model)) {
-    return true
-  }
-  return false
+  return getEffortCapability(model).supportsMax
 }
 
 export function isEffortLevel(value: string): value is EffortLevel {
@@ -158,7 +103,69 @@ export function getEffortEnvOverride(): EffortValue | null | undefined {
 }
 
 /**
- * Resolve the effort value that will actually be sent to the API for a given
+ * Capability + gateway mapping for one explicitly requested value.
+ * Returns undefined when nothing can be sent (model or gateway unsupported).
+ */
+function applyEffortForValue(
+  model: string,
+  value: EffortValue,
+): { applied: EffortValue | undefined; reason?: string } {
+  const capability = getEffortCapability(model)
+  if (!capability.supportsEffort) {
+    return { applied: undefined, reason: '该模型不支持 effort' }
+  }
+  if (typeof value === 'number') {
+    return { applied: value }
+  }
+  const clamped =
+    (value === 'max' || value === 'xhigh') && !capability.supportsMax
+      ? 'high'
+      : value
+  const plan = planEffortWire({ model, requested: clamped })
+  if (!plan.wireEffort && !plan.extraBody) {
+    return { applied: undefined, reason: plan.detail ?? '该端点不支持 effort' }
+  }
+  return { applied: plan.applied ?? clamped, reason: plan.detail }
+}
+
+/**
+ * Outcome of asking for one effort value on a model, without env overrides.
+ * Used for user-facing warnings ("requested max → sent high") and tests.
+ */
+export function describeEffortApplication(
+  model: string,
+  value: EffortValue | undefined,
+): {
+  supported: boolean
+  requested: EffortValue | undefined
+  applied: EffortValue | undefined
+  downgraded: boolean
+  reason?: string
+} {
+  const capability = getEffortCapability(model)
+  if (!capability.supportsEffort) {
+    return {
+      supported: false,
+      requested: value,
+      applied: undefined,
+      downgraded: false,
+      reason: '该模型不支持 effort',
+    }
+  }
+  if (value === undefined) {
+    return { supported: true, requested: undefined, applied: undefined, downgraded: false }
+  }
+  const outcome = applyEffortForValue(model, value)
+  return {
+    supported: outcome.applied !== undefined,
+    requested: value,
+    applied: outcome.applied,
+    downgraded: outcome.applied !== value,
+    reason: outcome.reason,
+  }
+}
+
+/** Resolve the effort value that will actually be sent to the API for a given
  * model, following the full precedence chain:
  *   env CLAUDE_CODE_EFFORT_LEVEL → appState.effortValue → model default
  *
@@ -177,7 +184,8 @@ export function resolveAppliedEffort(
   const resolved =
     scoped ? (scoped.value ?? getDefaultEffortForModel(model))
       : (envOverride ?? appStateEffortValue ?? getDefaultEffortForModel(model))
-  // API rejects 'max' on non-Opus-4.6 models — downgrade to 'high'.
+  // max/xhigh are only valid for models whose capability matrix declares them;
+  // otherwise fall back to high (the API's usual default).
   if (
     (resolved === 'max' || resolved === 'xhigh') &&
     !modelSupportsMaxEffort(model)
@@ -185,6 +193,20 @@ export function resolveAppliedEffort(
     return 'high'
   }
   return resolved
+}
+
+/**
+ * Full chain (env/appState/model default) + capability clamp + gateway mapping.
+ * This is the value user-facing UI should report as "applied"; undefined means
+ * no effort parameter will be sent.
+ */
+export function getAppliedEffortValue(
+  model: string,
+  appStateEffort: EffortValue | undefined,
+): EffortValue | undefined {
+  const resolved = resolveAppliedEffort(model, appStateEffort)
+  if (resolved === undefined) return undefined
+  return applyEffortForValue(model, resolved).applied
 }
 
 /**
@@ -196,8 +218,9 @@ export function getDisplayedEffortLevel(
   model: string,
   appStateEffort: EffortValue | undefined,
 ): EffortLevel {
-  const resolved = resolveAppliedEffort(model, appStateEffort) ?? 'high'
-  return convertEffortValueToLevel(resolved)
+  const applied = getAppliedEffortValue(model, appStateEffort)
+  // No effort parameter sent: show the API's usual default.
+  return applied !== undefined ? convertEffortValueToLevel(applied) : 'high'
 }
 
 /**
@@ -221,9 +244,13 @@ export function getEffortSuffix(
   if (resolved === undefined && process.env.CLAUDE_CODE_EFFORT_LEVEL?.toLowerCase() === 'unset') {
     return ''
   }
-  // No config at all → API defaults to 'high' → show 'high' for display accuracy
-  const display = resolved ?? 'high'
-  return ` with ${convertEffortValueToLevel(display)} effort`
+  const applied = getAppliedEffortValue(model, effortValue)
+  if (applied !== undefined) {
+    // Display the gateway-mapped level (what the API actually receives).
+    return ` with ${convertEffortValueToLevel(applied)} effort`
+  }
+  // No config / gateway without effort control → nothing to advertise.
+  return ''
 }
 
 export function isValidNumericEffort(value: number): boolean {
@@ -264,7 +291,7 @@ export function getEffortLevelDescription(level: EffortLevel): string {
     case 'xhigh':
       return 'Higher-intensity reasoning between high and max'
     case 'max':
-      return 'Maximum capability with deepest reasoning (Opus 4.8 only)'
+      return 'Maximum capability with deepest reasoning (model/gateway dependent)'
   }
 }
 

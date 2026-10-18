@@ -80,6 +80,8 @@ import {
   getSonnet1mExpTreatmentEnabled,
 } from '../../utils/context.js'
 import { resolveAppliedEffort } from '../../utils/effort.js'
+import { recordEffortRejection } from '../../utils/model/effortCapabilities.js'
+import { planEffortWire } from '../../utils/model/effortGateway.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { errorMessage } from '../../utils/errors.js'
 import { computeFingerprintFromMessages } from '../../utils/fingerprint.js'
@@ -147,7 +149,6 @@ import {
   AFK_MODE_BETA_HEADER,
   CONTEXT_1M_BETA_HEADER,
   CONTEXT_MANAGEMENT_BETA_HEADER,
-  EFFORT_BETA_HEADER,
   FAST_MODE_BETA_HEADER,
   PROMPT_CACHING_SCOPE_BETA_HEADER,
   REDACT_THINKING_BETA_HEADER,
@@ -439,26 +440,41 @@ function should1hCacheTTL(querySource?: QuerySource): boolean {
 }
 
 /**
+ * A 400 that blames the effort/reasoning parameter means this endpoint/model
+ * does not accept it. We disable it for the session and retry once without it
+ * instead of surfacing a hard error to the user.
+ */
+function isEffortRejectionError(error: unknown): boolean {
+  const candidate =
+    error instanceof APIError
+      ? error
+      : (error as { originalError?: unknown } | undefined)?.originalError
+  if (!(candidate instanceof APIError) || candidate.status !== 400) return false
+  const message = candidate.message ?? ''
+  // Only effort/reasoning_effort rejections; a thinking-budget 400 must not
+  // disable effort for the whole session.
+  return /effort|reasoning[_\s-]?effort/i.test(message)
+    && /invalid|unsupported|not support|unknown|unrecognized|unexpected/i.test(message)
+}
+
+/**
  * Configure effort parameters for API request.
  *
+ * `effortValue` is already the gateway-mapped wire value (see
+ * utils/model/effortGateway.ts): undefined means "nothing to send" — either the
+ * user chose auto, or the gateway/model has no effort control.
  */
 function configureEffortParams(
   effortValue: EffortValue | undefined,
   outputConfig: BetaOutputConfig,
   extraBodyParams: Record<string, unknown>,
-  betas: string[],
-  model: string,
 ): void {
-  if (!modelSupportsEffort(model) || 'effort' in outputConfig) {
+  if (effortValue === undefined || 'effort' in outputConfig) {
     return
   }
-
-  if (effortValue === undefined) {
-    betas.push(EFFORT_BETA_HEADER)
-  } else if (typeof effortValue === 'string') {
+  if (typeof effortValue === 'string') {
     // Send string effort level as is
     outputConfig.effort = effortValue
-    betas.push(EFFORT_BETA_HEADER)
   } else if (process.env.USER_TYPE === 'ant') {
     // Numeric effort override - ant-only (uses anthropic_internal)
     const existingInternal =
@@ -1496,7 +1512,38 @@ async function* queryModel(
     }
   }
 
-  const effort = resolveAppliedEffort(options.model, options.effortValue)
+  const effortConnection = getModelConnection()
+  const effortMaxOutputTokens =
+    options.maxOutputTokensOverride ??
+    getModelMaxOutputTokens(options.model).default
+  /** Plan for the most recent paramsFromContext() call (used by compat dispatch). */
+  let currentEffortPlan: ReturnType<typeof planEffortWire> | undefined
+
+  /** Recompute per attempt so a runtime 400 rejection is honored on retry. */
+  function resolveEffortWireForRequest(): EffortValue | undefined {
+    const effort = resolveAppliedEffort(options.model, options.effortValue)
+    const effortAllowed =
+      typeof effort === 'number' ||
+      (effort !== undefined && modelSupportsEffort(options.model))
+    const plan =
+      effortAllowed && typeof effort === 'string'
+        ? planEffortWire({
+            model: options.model,
+            requested: effort,
+            protocol: effortConnection.provider,
+            baseURL: effortConnection.baseURL,
+            thinkingEnabled:
+              thinkingConfig.type !== 'disabled' &&
+              !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_THINKING),
+            maxOutputTokens: effortMaxOutputTokens,
+          })
+        : undefined
+    currentEffortPlan = plan
+    if (typeof effort === 'number') return effort
+    return effortAllowed && plan
+      ? (plan.wireEffort as EffortValue | undefined)
+      : undefined
+  }
 
   if (feature('PROMPT_CACHE_BREAK_DETECTION')) {
     // Exclude defer_loading tools from the hash -- the API strips them from the
@@ -1521,7 +1568,7 @@ async function* queryModel(
       autoModeActive: afkHeaderLatched,
       isUsingOverage: currentLimits.isUsingOverage ?? false,
       cachedMCEnabled: cacheEditingHeaderLatched,
-      effortValue: effort,
+      effortValue: resolveAppliedEffort(options.model, options.effortValue),
       extraBodyParams: getExtraBodyParams(),
     })
   }
@@ -1602,11 +1649,9 @@ async function* queryModel(
     }
 
     configureEffortParams(
-      effort,
+      resolveEffortWireForRequest(),
       outputConfig,
       extraBodyParams,
-      betasParams,
-      options.model,
     )
 
     configureTaskBudgetParams(
@@ -1886,7 +1931,9 @@ async function* queryModel(
         // launch scripts (start_deepseek.ps1 etc.) set
         // CLAUDE_CODE_COMPATIBLE_API_PROVIDER explicitly and should not be
         // silently overridden by stale persisted values.
-        const connection = getModelConnection()
+        // Same connection snapshot used for the effort wire mapping above, so
+        // protocol/baseURL cannot disagree between mapping and send.
+        const connection = effortConnection
         const compatProvider = connection.provider
         if (compatProvider === 'openai' || compatProvider === 'responses') {
           const apiKey = connection.apiKey || ''
@@ -1905,6 +1952,7 @@ async function* queryModel(
               temperature: options.temperatureOverride,
               max_tokens: params.max_tokens,
               output_config: params.output_config,
+              extra_body: currentEffortPlan?.extraBody,
             })
             if (!openAIRequest.messages || openAIRequest.messages.length === 0) {
               throw new Error(
@@ -1939,6 +1987,7 @@ async function* queryModel(
             temperature: options.temperatureOverride,
             max_tokens: params.max_tokens,
             output_config: params.output_config,
+            extra_body: currentEffortPlan?.extraBody,
           })
           if (!responsesRequest.input || responsesRequest.input.length === 0) {
             throw new Error(
@@ -1996,11 +2045,27 @@ async function* queryModel(
     async function* acquireStream(initialError?: unknown, discardPartial?: boolean, continuation?: boolean) {
       let generator = createGenerator(initialError, discardPartial, continuation)
       let hasAttemptedImageStripRetry = false
+      let hasAttemptedEffortFallback = false
       let e
       while (true) {
         try {
           e = await generator.next()
         } catch (errorFromRetry) {
+          // Effort parameter rejected by this endpoint/model: disable it for
+          // the session and retry once without it instead of failing the turn.
+          if (
+            !hasAttemptedEffortFallback &&
+            (currentEffortPlan?.wireEffort ||
+              currentEffortPlan?.extraBody) &&
+            isEffortRejectionError(errorFromRetry)
+          ) {
+            hasAttemptedEffortFallback = true
+            recordEffortRejection(options.model)
+            if (!retryBudget.consume()) throw errorFromRetry
+            retryBudget.terminalError = undefined
+            generator = createGenerator()
+            continue
+          }
           // Image/vision capability rejection: the endpoint doesn't support
           // image blocks (common for third-party Anthropic-compatible endpoints
           // like GLM/DeepSeek/Qwen). Strip images from this request only - not

@@ -292,10 +292,12 @@ import { applyProfileForModelIfMatch } from 'src/utils/model/switchModelProfile.
 import { getModelOptions } from 'src/utils/model/modelOptions.js'
 import {
   modelSupportsEffort,
-  modelSupportsMaxEffort,
-  EFFORT_LEVELS,
-  resolveAppliedEffort,
+  getAppliedEffortValue,
+  getEffortEnvOverride,
 } from 'src/utils/effort.js'
+import { getEffortCapability } from 'src/utils/model/effortCapabilities.js'
+import { planEffortWire } from 'src/utils/model/effortGateway.js'
+import { getModelConnection } from 'src/utils/model/runtimeModelContext.js'
 import { modelSupportsAdaptiveThinking } from 'src/utils/thinking.js'
 import { modelSupportsAutoMode } from 'src/utils/betas.js'
 import { ensureModelStringsInitialized } from 'src/utils/model/modelStrings.js'
@@ -1263,6 +1265,7 @@ function runHeadlessStreaming(
         ? getDefaultMainLoopModel()
         : parseUserSpecifiedModel(modelId)
     const hasEffort = modelSupportsEffort(resolvedModel)
+    const capability = getEffortCapability(resolvedModel)
     const hasAdaptiveThinking = modelSupportsAdaptiveThinking(resolvedModel)
     const hasFastMode = isFastModeSupportedByModel(option.value)
     const hasAutoMode = modelSupportsAutoMode(resolvedModel)
@@ -1272,9 +1275,7 @@ function runHeadlessStreaming(
       description: option.description,
       ...(hasEffort && {
         supportsEffort: true,
-        supportedEffortLevels: modelSupportsMaxEffort(resolvedModel)
-          ? [...EFFORT_LEVELS]
-          : EFFORT_LEVELS.filter(l => l !== 'max' && l !== 'xhigh'),
+        supportedEffortLevels: capability.levels,
       }),
       ...(hasAdaptiveThinking && { supportsAdaptiveThinking: true }),
       ...(hasFastMode && { supportsFastMode: true }),
@@ -4059,11 +4060,29 @@ function runHeadlessStreaming(
         } else if (message.request.subtype === 'get_settings') {
           const currentAppState = getAppState()
           const model = getMainLoopModel()
-          // modelSupportsEffort gate matches claude.ts — applied.effort must
-          // mirror what actually goes to the API, not just what's configured.
-          const effort = modelSupportsEffort(model)
-            ? resolveAppliedEffort(model, currentAppState.effortValue)
-            : undefined
+          // Applied effort already includes capability clamp + gateway mapping,
+          // so it mirrors what actually goes to the API.
+          const effort = getAppliedEffortValue(model, currentAppState.effortValue)
+          const capability = getEffortCapability(model)
+          const modelConnection = getModelConnection()
+          const effortWirePlan =
+            typeof effort === 'string'
+              ? planEffortWire({
+                  model,
+                  requested: effort,
+                  protocol: modelConnection.provider,
+                  baseURL: modelConnection.baseURL,
+                })
+              : undefined
+          // Requested value: env override wins over session state, mirroring
+          // resolveAppliedEffort; null means "no explicit request".
+          const envEffort = getEffortEnvOverride()
+          const requestedEffort =
+            envEffort === null
+              ? null
+              : typeof (envEffort ?? currentAppState.effortValue) === 'string'
+                ? ((envEffort ?? currentAppState.effortValue) as string)
+                : null
           sendControlResponseSuccess(message, {
             ...getSettingsWithSources(),
             applied: {
@@ -4071,6 +4090,16 @@ function runHeadlessStreaming(
               profileId: process.env.DOGE_ACTIVE_MODEL_PROFILE ?? null,
               // Numeric effort (ant-only) → null; SDK schema is string-level only.
               effort: typeof effort === 'string' ? effort : null,
+              // Gateway wire value after provider mapping (qwen budget mode has none).
+              wireEffort: effortWirePlan?.wireEffort ?? null,
+              gateway: effortWirePlan?.gateway ?? null,
+              wireDetail: effortWirePlan?.detail ?? null,
+              // Requested (user/env) value vs applied exposes silent downgrades
+              // and unsupported-model drops to the App/IDE.
+              requestedEffort,
+              supportsEffort: capability.supportsEffort,
+              supportsMax: capability.supportsMax,
+              supportedEffortLevels: capability.levels,
             },
           })
         } else if (message.request.subtype === 'stop_task') {

@@ -275,6 +275,8 @@ const WebBrowserPanelModule = feature('WEB_BROWSER_TOOL') ? require('../tools/We
 /* eslint-enable @typescript-eslint/no-require-imports */
 import { IssueFlagBanner } from '../components/PromptInput/IssueFlagBanner.js';
 import { useIssueFlagBanner } from '../hooks/useIssueFlagBanner.js';
+import { useEffortModelMemory } from '../hooks/useEffortModelMemory.js';
+import { rememberEffortForModel } from '../utils/effortMemory.js';
 import { CompanionSprite, CompanionFloatingBubble, MIN_COLS_FOR_FULL_SPRITE } from '../buddy/CompanionSprite.js';
 import { fireCompanionObserver } from '../buddy/observer.js';
 import { DevBar } from '../components/DevBar.js';
@@ -678,6 +680,8 @@ export function REPL({
   const ultraplanLaunchPending = useAppState(s => s.ultraplanLaunchPending);
   const viewingAgentTaskId = useAppState(s => s.viewingAgentTaskId);
   const setAppState = useSetAppState();
+  // Per-model effort memory: switching models restores that model's own level.
+  useEffortModelMemory();
 
   // Bootstrap: retained local_agent that hasn't loaded disk yet → read
   // sidechain JSONL and UUID-merge with whatever stream has appended so far.
@@ -4958,7 +4962,8 @@ export function REPL({
             if (selection !== 'dismiss') {
               setAppState(prev => ({
                 ...prev,
-                effortValue: selection
+                effortValue: selection,
+                effortByModel: rememberEffortForModel(prev.effortByModel, mainLoopModel, selection)
               }));
             }
           }} />}

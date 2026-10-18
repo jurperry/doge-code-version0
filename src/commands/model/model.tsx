@@ -10,6 +10,7 @@ import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEve
 import { useAppState, useSetAppState } from '../../state/AppState.js';
 import type { LocalJSXCommandCall } from '../../types/command.js';
 import type { EffortLevel } from '../../utils/effort.js';
+import { rememberEffortForModel } from '../../utils/effortMemory.js';
 import { isBilledAsExtraUsage } from '../../utils/extraUsage.js';
 import { clearFastModeCooldown, isFastModeAvailable, isFastModeEnabled, isFastModeSupportedByModel } from '../../utils/fastMode.js';
 import { MODEL_ALIASES, MODEL_FAMILY_ALIASES } from '../../utils/model/aliases.js';
@@ -64,22 +65,28 @@ function ModelPickerWrapper(t0) {
       // terminals are unaffected; DOGE_MODEL_SCOPE=global restores legacy
       // persist-everywhere behavior.
       const scope = resolveModelSwitchScope();
-      decideAndSwitch(model ?? null, {
+      void decideAndSwitch(model ?? null, {
         findProfile: findProfileByModel,
         switchModelProfileAtomicBound,
         switchTierBound,
         syncModelConfigToDisk,
         setAppState,
         scope,
+      }).then(() => {
+        // Only write effort after the model switch actually committed; a
+        // failed switch must not pollute the previous model's memory.
+        if (effort !== undefined) {
+          const targetModel = parseUserSpecifiedModel(model ?? getDefaultMainLoopModelSetting());
+          setAppState(prev => ({
+            ...prev,
+            effortValue: effort,
+            effortByModel: rememberEffortForModel(prev.effortByModel, targetModel, effort)
+          }));
+        }
       }).catch((e) => {
         // eslint-disable-next-line no-console
         console.error('Model switch failed:', e);
       });
-      // Only update effortValue when effort is explicitly set (user toggled in picker)
-      // Otherwise preserve the current effortValue to avoid losing previous /effort settings
-      if (effort !== undefined) {
-        setAppState(prev => ({ ...prev, effortValue: effort }));
-      }
       // NOTE: CLAUDE_CODE_EFFORT_LEVEL is handled by ModelPicker.handleSelect
       // (only deleted when user explicitly toggles effort via ← → keys).
       // When the user did NOT toggle, the env var is preserved and wins via

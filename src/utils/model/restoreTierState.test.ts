@@ -5,15 +5,32 @@ import { join } from 'path'
 // 集成测试：用临时 CLAUDE_CONFIG_DIR 隔离真实的 .claude.json/.credentials.json。
 // 产物写入仓库 test/ 目录（开发纪律），测试结束清理。
 const TMP_CONFIG_DIR = join(process.cwd(), 'test', 'tier-restore-config')
+/** Auth env vars shadow credentials; isolate them so the healing scenario is deterministic. */
+const AUTH_ENV_KEYS = [
+  'DOGE_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+] as const
+const savedAuthEnv = new Map<string, string | undefined>()
 
 beforeAll(() => {
   process.env.CLAUDE_CONFIG_DIR = TMP_CONFIG_DIR
   mkdirSync(TMP_CONFIG_DIR, { recursive: true })
+  for (const key of AUTH_ENV_KEYS) {
+    savedAuthEnv.set(key, process.env[key])
+    delete process.env[key]
+  }
 })
 
 afterAll(() => {
   delete process.env.CLAUDE_CONFIG_DIR
   rmSync(TMP_CONFIG_DIR, { recursive: true, force: true })
+  for (const key of AUTH_ENV_KEYS) {
+    const value = savedAuthEnv.get(key)
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
 })
 
 function writeCredentials(data: Record<string, unknown>): void {

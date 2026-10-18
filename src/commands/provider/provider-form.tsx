@@ -8,6 +8,7 @@ import {
   defaultProviderSaveDeps,
   findProviderNameConflict,
   maskSecret,
+  parseCapabilityCsv,
   saveAndActivateProvider,
   validateProviderForm,
   type ProviderFormValues,
@@ -15,9 +16,9 @@ import {
   type AuthTokenType,
 } from './provider-storage.js'
 
-type FormStep = 'name' | 'provider' | 'baseURL' | 'apiKey' | 'authTokenType' | 'model' | 'contextWindow' | 'opus' | 'sonnet' | 'haiku' | 'review'
+type FormStep = 'name' | 'provider' | 'baseURL' | 'apiKey' | 'authTokenType' | 'model' | 'contextWindow' | 'opus' | 'sonnet' | 'haiku' | 'opusCapabilities' | 'sonnetCapabilities' | 'haikuCapabilities' | 'disableEffort' | 'review'
 
-export const STEP_ORDER: FormStep[] = ['name', 'provider', 'baseURL', 'apiKey', 'authTokenType', 'model', 'contextWindow', 'opus', 'sonnet', 'haiku', 'review']
+export const STEP_ORDER: FormStep[] = ['name', 'provider', 'baseURL', 'apiKey', 'authTokenType', 'model', 'contextWindow', 'opus', 'sonnet', 'haiku', 'opusCapabilities', 'sonnetCapabilities', 'haikuCapabilities', 'disableEffort', 'review']
 
 // The form must open on the first step of STEP_ORDER. Exported so a test can
 // pin this — the flow once regressed into opening on 'provider' (API format)
@@ -66,6 +67,22 @@ const STEP_META: Record<Exclude<FormStep, 'review'>, { title: string; hint: stri
     title: 'Haiku model',
     hint: 'Optional. Model for Haiku-tier agents. Leave empty to inherit the main model.',
   },
+  opusCapabilities: {
+    title: 'Opus capabilities',
+    hint: 'Optional CSV: effort,max_effort,thinking,adaptive_thinking,interleaved_thinking. Declares what the Opus-tier model supports on a custom endpoint. Leave empty for auto-detection.',
+  },
+  sonnetCapabilities: {
+    title: 'Sonnet capabilities',
+    hint: 'Optional CSV: effort,max_effort,thinking,adaptive_thinking,interleaved_thinking. Declares what the Sonnet-tier model supports on a custom endpoint. Leave empty for auto-detection.',
+  },
+  haikuCapabilities: {
+    title: 'Haiku capabilities',
+    hint: 'Optional CSV: effort,max_effort,thinking,adaptive_thinking,interleaved_thinking. Declares what the Haiku-tier model supports on a custom endpoint. Leave empty for auto-detection.',
+  },
+  disableEffort: {
+    title: 'Effort parameter',
+    hint: 'Keep automatic by default. Disable only when the endpoint rejects or misinterprets the effort parameter.',
+  },
 }
 
 const PROVIDER_OPTIONS: { value: ProviderFormat; label: string; description: string }[] = [
@@ -77,6 +94,11 @@ const PROVIDER_OPTIONS: { value: ProviderFormat; label: string; description: str
 const AUTH_TOKEN_TYPE_OPTIONS: { value: AuthTokenType; label: string; description: string }[] = [
   { value: 'DOGE_API_KEY', label: 'DOGE_API_KEY (x-api-key)', description: 'Sent as the x-api-key header — default, works for most providers' },
   { value: 'ANTHROPIC_AUTH_TOKEN', label: 'ANTHROPIC_AUTH_TOKEN (Bearer)', description: 'Sent as Authorization: Bearer — for gateways that only accept token auth' },
+]
+
+const DISABLE_EFFORT_OPTIONS: { value: string; label: string; description: string }[] = [
+  { value: '0', label: 'Keep automatic (recommended)', description: 'Send effort when the model capability matrix allows it' },
+  { value: '1', label: 'Disable effort for this provider', description: 'Use when the endpoint rejects or misinterprets the effort parameter' },
 ]
 
 function initialValues(existing?: ModelProfile, initialModel?: string): ProviderFormValues {
@@ -91,6 +113,10 @@ function initialValues(existing?: ModelProfile, initialModel?: string): Provider
     opusModel: existing?.defaultOpusModel ?? '',
     sonnetModel: existing?.defaultSonnetModel ?? '',
     haikuModel: existing?.defaultHaikuModel ?? '',
+    opusCapabilities: existing?.opusCapabilities ?? '',
+    sonnetCapabilities: existing?.sonnetCapabilities ?? '',
+    haikuCapabilities: existing?.haikuCapabilities ?? '',
+    disableEffort: existing?.disableEffort === true,
   }
 }
 
@@ -104,6 +130,9 @@ function prefillForStep(step: FormStep, values: ProviderFormValues): string {
     case 'opus': return values.opusModel ?? ''
     case 'sonnet': return values.sonnetModel ?? ''
     case 'haiku': return values.haikuModel ?? ''
+    case 'opusCapabilities': return values.opusCapabilities ?? ''
+    case 'sonnetCapabilities': return values.sonnetCapabilities ?? ''
+    case 'haikuCapabilities': return values.haikuCapabilities ?? ''
     default: return ''
   }
 }
@@ -149,6 +178,9 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         case 'opus': return { ...v, opusModel: draft }
         case 'sonnet': return { ...v, sonnetModel: draft }
         case 'haiku': return { ...v, haikuModel: draft }
+        case 'opusCapabilities': return { ...v, opusCapabilities: draft }
+        case 'sonnetCapabilities': return { ...v, sonnetCapabilities: draft }
+        case 'haikuCapabilities': return { ...v, haikuCapabilities: draft }
         default: return v
       }
     })
@@ -206,6 +238,11 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
     }
     if (step === 'authTokenType') {
       setValues(v => ({ ...v, authTokenType: value as AuthTokenType }))
+      advance()
+      return
+    }
+    if (step === 'disableEffort') {
+      setValues(v => ({ ...v, disableEffort: value === '1' }))
       advance()
       return
     }
@@ -293,6 +330,20 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
     if (step === 'haiku') {
       setValues(v => ({ ...v, haikuModel: raw }))
       advance()
+      return
+    }
+    if (
+      step === 'opusCapabilities' ||
+      step === 'sonnetCapabilities' ||
+      step === 'haikuCapabilities'
+    ) {
+      const parsed = parseCapabilityCsv(raw)
+      if (parsed.error) {
+        setError(parsed.error)
+        return
+      }
+      setValues(v => ({ ...v, [step]: parsed.value ?? '' }))
+      advance()
     }
   }, [step, values.provider, advance, handleSave])
 
@@ -330,6 +381,19 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         visibleOptionCount={2}
       />
     )
+  } else if (step === 'disableEffort') {
+    body = (
+      <Select
+        options={DISABLE_EFFORT_OPTIONS}
+        defaultValue={values.disableEffort ? '1' : '0'}
+        defaultFocusValue={values.disableEffort ? '1' : '0'}
+        onChange={handleSelect}
+        onCancel={handleCancel}
+        onUpFromFirstItem={goPrevStep}
+        onDownFromLastItem={goNextStep}
+        visibleOptionCount={2}
+      />
+    )
   } else if (step === 'review') {
     const reviewOptions = [
       { value: 'edit:name', label: `Provider name: ${values.providerName || '(not set)'}`, description: 'Change' },
@@ -342,6 +406,10 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
       { value: 'edit:opus', label: `Opus model: ${values.opusModel || '(inherit main model)'}`, description: 'Change' },
       { value: 'edit:sonnet', label: `Sonnet model: ${values.sonnetModel || '(inherit main model)'}`, description: 'Change' },
       { value: 'edit:haiku', label: `Haiku model: ${values.haikuModel || '(inherit main model)'}`, description: 'Change' },
+      { value: 'edit:opusCapabilities', label: `Opus capabilities: ${values.opusCapabilities || '(auto)'}`, description: 'Change' },
+      { value: 'edit:sonnetCapabilities', label: `Sonnet capabilities: ${values.sonnetCapabilities || '(auto)'}`, description: 'Change' },
+      { value: 'edit:haikuCapabilities', label: `Haiku capabilities: ${values.haikuCapabilities || '(auto)'}`, description: 'Change' },
+      { value: 'edit:disableEffort', label: `Effort: ${values.disableEffort ? 'disabled for this provider' : 'automatic'}`, description: 'Change' },
       { value: '__SAVE__', label: 'Save and activate', description: 'Persist and switch to this provider now' },
     ]
     body = (
@@ -350,7 +418,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
         onChange={handleSelect}
         onCancel={handleCancel}
         onUpFromFirstItem={goPrevStep}
-        visibleOptionCount={11}
+        visibleOptionCount={15}
       />
     )
   } else {

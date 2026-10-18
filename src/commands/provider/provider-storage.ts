@@ -34,6 +34,50 @@ export type ProviderFormValues = {
   opusModel?: string
   sonnetModel?: string
   haikuModel?: string
+  /** Optional capability declarations per tier, CSV from the form. */
+  opusCapabilities?: string
+  sonnetCapabilities?: string
+  haikuCapabilities?: string
+  /** Explicitly disable the effort parameter for this provider. */
+  disableEffort?: boolean
+}
+
+/** Capabilities understood by the CLI capability matrix (see effortCapabilities.ts). */
+export const SUPPORTED_CAPABILITY_TOKENS = [
+  'effort',
+  'max_effort',
+  'thinking',
+  'adaptive_thinking',
+  'interleaved_thinking',
+] as const
+
+/**
+ * Parse the optional capability CSV typed in /provider add.
+ * Empty input means "no declaration"; unknown tokens are rejected rather than
+ * silently dropped, because a typo would otherwise disable the declared
+ * capability without notice.
+ */
+export function parseCapabilityCsv(raw: string | undefined): {
+  value?: string
+  error?: string
+} {
+  const trimmed = raw?.trim()
+  if (!trimmed) return {}
+  const tokens = trimmed
+    .toLowerCase()
+    .split(',')
+    .map(token => token.trim())
+    .filter(Boolean)
+  const invalid = tokens.filter(
+    token => !SUPPORTED_CAPABILITY_TOKENS.includes(token as (typeof SUPPORTED_CAPABILITY_TOKENS)[number]),
+  )
+  if (invalid.length > 0) {
+    return {
+      error: `Unknown capabilities: ${invalid.join(', ')}. Valid: ${SUPPORTED_CAPABILITY_TOKENS.join(', ')}`,
+    }
+  }
+  const unique = [...new Set(tokens)]
+  return { value: unique.length > 0 ? unique.join(',') : undefined }
 }
 
 /** Case-insensitive comparison key for provider names. */
@@ -87,6 +131,14 @@ export function validateProviderForm(
       return 'Context window must be a positive integer (tokens), e.g. 200000.'
     }
   }
+  for (const [label, raw] of [
+    ['Opus capabilities', values.opusCapabilities],
+    ['Sonnet capabilities', values.sonnetCapabilities],
+    ['Haiku capabilities', values.haikuCapabilities],
+  ] as const) {
+    const parsed = parseCapabilityCsv(raw)
+    if (parsed.error) return `${label}: ${parsed.error}`
+  }
   return undefined
 }
 
@@ -106,6 +158,10 @@ export function buildModelProfile(values: ProviderFormValues): ModelProfile {
     defaultOpusModel: values.opusModel?.trim() || undefined,
     defaultSonnetModel: values.sonnetModel?.trim() || undefined,
     defaultHaikuModel: values.haikuModel?.trim() || undefined,
+    opusCapabilities: parseCapabilityCsv(values.opusCapabilities).value,
+    sonnetCapabilities: parseCapabilityCsv(values.sonnetCapabilities).value,
+    haikuCapabilities: parseCapabilityCsv(values.haikuCapabilities).value,
+    disableEffort: values.disableEffort === true ? true : undefined,
   }
 }
 
