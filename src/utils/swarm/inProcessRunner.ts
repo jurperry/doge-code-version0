@@ -1,3 +1,4 @@
+import type { AgentModelSelection } from '../model/agentModelIdentity.js'
 import { captureModelEnvironment, runWithModelEnvironment } from '../model/runtimeModelContext.js'
 /**
  * In-process teammate runner
@@ -526,6 +527,7 @@ export type InProcessRunnerConfig = {
   abortController: AbortController
   /** Optional model override for this teammate */
   model?: string
+  modelSelection?: AgentModelSelection
   /** Optional system prompt override for this teammate */
   systemPrompt?: string
   /** How to apply the system prompt: 'replace' or 'append' to default */
@@ -946,6 +948,7 @@ export async function runInProcessTeammate(
     toolUseContext,
     abortController,
     model,
+    modelSelection,
     systemPrompt,
     systemPromptMode,
     allowedTools,
@@ -1279,6 +1282,7 @@ export async function runInProcessTeammate(
               querySource: 'agent:custom',
               override: { abortController: currentWorkAbortController, agentId: roundAgentId },
               model: model as ModelAlias | undefined,
+              modelSelection,
               preserveToolUseResults: true,
               availableTools: toolUseContext.options.tools,
               allowedTools,

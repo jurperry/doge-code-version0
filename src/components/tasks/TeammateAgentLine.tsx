@@ -25,7 +25,7 @@ import {
   PLAY_ICON,
   WHITE_CIRCLE,
 } from '../../constants/figures.js'
-import { shortModelName } from './shortModelName.js'
+import { formatAgentModel } from '../../utils/model/agentModelIdentity.js'
 import { useTerminalSize } from '../../hooks/useTerminalSize.js'
 import { stringWidth } from '../../ink/stringWidth.js'
 import { Box, Text, wrapText } from '../../ink.js'
@@ -51,7 +51,7 @@ function getAgentThemeColor(
  * match the local_agent form `sub-agent-<model>-<task>`.
  */
 export function teammateRowLabel(task: InProcessTeammateTaskState): string {
-  return `sub-agent-${task.identity.agentName}-${shortModelName(task.model, 'inherit')}`
+  return `sub-agent-${task.identity.agentName}-${formatAgentModel(task.model, task.modelSelection)}`
 }
 
 type TeammateAgentLineProps = {

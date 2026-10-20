@@ -1,3 +1,4 @@
+import { formatAgentModel } from '../utils/model/agentModelIdentity.js';
 import { c as _c } from "react/compiler-runtime";
 /**
  * CoordinatorTaskPanel — Steerable list of background agents.
@@ -84,7 +85,7 @@ export function CoordinatorTaskPanel(): React.ReactNode {
   // no sub-agents, so the team roster is a stable fixture below the prompt.
   return <Box flexDirection="column" marginTop={1}>
       <MainLine label={mainLabel} isSelected={selectedIndex === 0} isViewed={viewingAgentTaskId === undefined} onClick={() => exitTeammateView(setAppState)} />
-      {visibleTasks.map((task, i) => task.type === 'in_process_teammate' ? <TeammateAgentLine key={task.id} task={task} isSelected={selectedIndex === i + 1} isViewed={viewingAgentTaskId === task.id} onClick={() => enterTeammateView(task.id, setAppState)} /> : <AgentLine key={task.id} task={task} name={`sub-agent-${shortModelName(task.model, 'inherit')}`} isSelected={selectedIndex === i + 1} isViewed={viewingAgentTaskId === task.id} onClick={() => enterTeammateView(task.id, setAppState)} />)}
+      {visibleTasks.map((task, i) => task.type === 'in_process_teammate' ? <TeammateAgentLine key={task.id} task={task} isSelected={selectedIndex === i + 1} isViewed={viewingAgentTaskId === task.id} onClick={() => enterTeammateView(task.id, setAppState)} /> : <AgentLine key={task.id} task={task} name={`sub-agent-${formatAgentModel(task.model, task.modelSelection)}`} isSelected={selectedIndex === i + 1} isViewed={viewingAgentTaskId === task.id} onClick={() => enterTeammateView(task.id, setAppState)} />)}
     </Box>;
 }
 

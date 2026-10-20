@@ -1737,6 +1737,11 @@ export const SDKTaskStartedMessageSchema = lazySchema(() =>
     task_id: z.string(),
     tool_use_id: z.string().optional(),
     description: z.string(),
+    model: z.string().optional(),
+    model_selection: z.object({
+      requestedModel: z.string(), resolvedModel: z.string(),
+      source: z.enum(['environment', 'tool', 'definition', 'inherit', 'default']),
+    }).optional(),
     task_type: z.string().optional(),
     workflow_name: z
       .string()

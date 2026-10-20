@@ -47,6 +47,18 @@ test('GLM 5.3 only accepts low/high/max', () => {
   expect(planEffortWire({ requested: 'xhigh', ...base })).toMatchObject({ wireEffort: 'max', applied: 'max' })
 })
 
+test('GLM 5.3 and Flash map every protocol to the same three real levels', () => {
+  for (const model of ['glm-5.3', 'glm-5.3-flash[1m]']) {
+    for (const protocol of ['anthropic', 'openai', 'responses'] as const) {
+      const baseURL = 'https://open.bigmodel.cn/api/anthropic'
+      for (const [requested, real] of [['low','low'], ['medium','high'], ['high','high'], ['xhigh','max'], ['max','max']] as const) {
+        expect(planEffortWire({ model, protocol, baseURL, requested })).toMatchObject({ wireEffort: real, applied: real })
+      }
+      expect(planEffortWire({ model, protocol, baseURL, requested: undefined }).wireEffort).toBeUndefined()
+    }
+  }
+})
+
 test('GLM 5.2 maps low/medium → high and xhigh → max server-side', () => {
   const base = { model: 'glm-5.2', protocol: 'openai' as const, baseURL: 'https://open.bigmodel.cn/api/paas/v4' }
   expect(planEffortWire({ requested: 'xhigh', ...base })).toMatchObject({ wireEffort: 'xhigh', applied: 'max', downgraded: true })

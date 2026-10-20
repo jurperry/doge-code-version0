@@ -16,7 +16,8 @@ import {
   filterUnresolvedToolUses,
   filterWhitespaceOnlyAssistantMessages,
 } from '../../utils/messages.js'
-import { getAgentModel } from '../../utils/model/agent.js'
+import { resolveAgentModelSelection } from '../../utils/model/agentModelSelection.js'
+import { captureModelEnvironment, restoreAgentModelEnvironment, runWithModelEnvironment } from '../../utils/model/runtimeModelContext.js'
 import { getQuerySourceForAgent } from '../../utils/promptCategory.js'
 import {
   getAgentTranscript,
@@ -52,6 +53,7 @@ export async function resumeAgentBackground({
   canUseTool: CanUseToolFn
   invokingRequestId?: string
 }): Promise<ResumeAgentResult> {
+  const resumeEnvironment = captureModelEnvironment()
   const startTime = Date.now()
   const appState = toolUseContext.getAppState()
   // In-process teammates get a no-op setAppState; setAppStateForTasks
@@ -148,12 +150,10 @@ export async function resumeAgentBackground({
   }
 
   // Resolve model for analytics metadata (runAgent resolves its own internally)
-  const resolvedAgentModel = getAgentModel(
-    selectedAgent.model,
-    toolUseContext.options.mainLoopModel,
-    undefined,
-    permissionMode,
-  )
+  const modelEnvironment = restoreAgentModelEnvironment(agentId, meta?.modelConnection, resumeEnvironment)
+  const modelSelection = appState.tasks[agentId]?.modelSelection ?? meta?.modelSelection
+    ?? runWithModelEnvironment(modelEnvironment, () => resolveAgentModelSelection(selectedAgent.model, toolUseContext.options.mainLoopModel, undefined, permissionMode))
+  const resolvedAgentModel = modelSelection.resolvedModel
 
   const workerPermissionContext = {
     ...appState.toolPermissionContext,
@@ -165,6 +165,8 @@ export async function resumeAgentBackground({
 
   const runAgentParams: Parameters<typeof runAgent>[0] = {
     agentDefinition: selectedAgent,
+    modelSelection,
+    modelEnvironment,
     promptMessages: [
       ...resumedMessages,
       createUserMessage({ content: prompt }),
@@ -202,6 +204,8 @@ export async function resumeAgentBackground({
     selectedAgent,
     setAppState: rootSetAppState,
     toolUseId: toolUseContext.toolUseId,
+    model: resolvedAgentModel,
+    modelSelection,
   })
 
   const metadata = {

@@ -76,10 +76,10 @@ export function updateTaskState<T extends TaskState>(
  * Register a new task in AppState.
  */
 export function registerTask(task: TaskState, setAppState: SetAppState): void {
-  let isReplacement = false
+  let startsInvocation = false
   setAppState(prev => {
     const existing = prev.tasks[task.id]
-    isReplacement = existing !== undefined
+    startsInvocation = !existing || (isTerminalTaskStatus(existing.status) && task.status === 'running')
     // Carry forward UI-held state on re-register (resumeAgentBackground
     // replaces the task; user's retain shouldn't reset). startTime keeps
     // the panel sort stable; messages + diskLoaded preserve the viewed
@@ -89,6 +89,7 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
       existing && 'retain' in existing
         ? {
             ...task,
+            modelSelection: task.modelSelection ?? existing.modelSelection,
             retain: existing.retain,
             startTime: existing.startTime,
             messages: existing.messages,
@@ -99,8 +100,9 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
     return { ...prev, tasks: { ...prev.tasks, [task.id]: merged } }
   })
 
-  // Replacement (resume) — not a new start. Skip to avoid double-emit.
-  if (isReplacement) return
+  // A resumed terminal task starts another invocation under the same task ID.
+  // Running foreground/background handovers still share one lifecycle event.
+  if (!startsInvocation) return
 
   enqueueSdkEvent({
     type: 'system',
@@ -118,6 +120,7 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
     // LocalAgentTask/InProcessTeammate states carry the (possibly alias)
     // model string; other task types simply omit the field.
     model: 'model' in task ? (task.model as string | undefined) : undefined,
+    model_selection: task.modelSelection,
   })
 }
 

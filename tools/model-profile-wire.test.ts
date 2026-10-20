@@ -32,3 +32,21 @@ test('get_settings schema preserves the public runtime profile identity', async 
   const parsed = SDKControlGetSettingsResponseSchema().parse({ effective: {}, sources: [], applied: { model: 'shared-main', profileId: 'profile-b', effort: null } })
   expect(parsed.applied?.profileId).toBe('profile-b')
 })
+
+test('clearing an unchanged worktree preserves persisted worker model selection', async () => {
+  const { asAgentId } = await import('../src/types/ids.js')
+  const { writeAgentMetadata, readAgentMetadata } = await import('../src/utils/sessionStorage.js')
+  const agentId = asAgentId('metadata-selection')
+  const modelSelection = { requestedModel: 'haiku', resolvedModel: 'glm-5.3-flash', source: 'tool' as const }
+  await writeAgentMetadata(agentId, { agentType: 'general-purpose', modelSelection, worktreePath: 'E:/old-worktree' })
+  await writeAgentMetadata(agentId, { agentType: 'general-purpose', description: 'kept description', worktreePath: undefined })
+  expect((await readAgentMetadata(agentId))?.modelSelection).toEqual(modelSelection)
+  expect((await readAgentMetadata(agentId))?.worktreePath).toBeUndefined()
+})
+
+test('remote metadata remains independent of local worker identity patches', async () => {
+  const { writeRemoteAgentMetadata, readRemoteAgentMetadata } = await import('../src/utils/sessionStorage.js')
+  const record = { taskId: 'remote-safe', remoteTaskType: 'test', sessionId: 'remote-session', title: 'remote', command: 'test', spawnedAt: 1 }
+  await writeRemoteAgentMetadata(record.taskId, record)
+  expect(await readRemoteAgentMetadata(record.taskId)).toEqual(record)
+})

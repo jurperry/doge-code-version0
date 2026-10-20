@@ -266,7 +266,9 @@ export function getAnthropicApiKeyWithSource(
     : undefined
 
   const customApiStorage = readModelApiStorage()
-  const persistedCustomApiKey = customApiStorage.apiKey
+  // An empty host key means cleared, never another profile's disk default.
+  const persistedCustomApiKey = isEnvTruthy(getModelEnvironment().CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST)
+    ? undefined : customApiStorage.apiKey
   // When the key comes from persistent storage (no env var), the stored
   // authTokenType says which header style it was saved for.
   const persistedSource: ApiKeySource =

@@ -210,13 +210,20 @@ export function applyConfigEnvironmentVariables(): void {
 
   // Reconfigure proxy/mTLS agents to pick up any proxy env vars from settings
   configureGlobalAgents()
+  persistedProfileStartupComplete = true
+  restoredProfileEnv.clear()
 }
+
+let persistedProfileStartupComplete = false
 
 // Track only values injected by startup, so a later settings phase can select
 // another profile without mistaking our own defaults for explicit user env.
 const restoredProfileEnv = new Map<string, string>()
 
 function applyPersistedCustomApiEndpointEnv(overrides: Record<string, string> = {}): void {
+  // The desktop host supplies a complete connection snapshot, including empty
+  // values that clear optional fields. Never fill those from changing disk defaults.
+  if (persistedProfileStartupComplete || isEnvTruthy(process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST)) return
   for (const [key, value] of restoredProfileEnv) {
     if (process.env[key] === value && !Object.hasOwn(overrides, key)) delete process.env[key]
   }

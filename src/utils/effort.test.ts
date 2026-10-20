@@ -105,12 +105,12 @@ test('GLM 5.3 reports the mapped wire strength (xhigh → max)', () => {
   })
 })
 
-test('GLM Anthropic endpoint reports unsupported instead of pretending', () => {
+test('GLM Anthropic endpoint reports its actual supported strength', () => {
   process.env.ANTHROPIC_BASE_URL = 'https://open.bigmodel.cn/api/anthropic'
   process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER = 'anthropic'
   const result = describeEffortApplication('glm-5.3', 'high')
-  expect(result.supported).toBe(false)
-  expect(result.reason).toBeDefined()
+  expect(result.supported).toBe(true)
+  expect(result.applied).toBe('high')
 })
 
 test('xAI maps max down to the model wire ceiling (4.6 → xhigh, 4.5 → high)', () => {

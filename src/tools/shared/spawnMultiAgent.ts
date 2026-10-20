@@ -1,3 +1,6 @@
+import { captureModelEnvironment, runWithModelEnvironment } from '../../utils/model/runtimeModelContext.js'
+import { resolveAgentModelSelection } from '../../utils/model/agentModelSelection.js'
+import type { AgentModelSelection } from '../../utils/model/agentModelIdentity.js'
 /**
  * Shared spawn module for teammate creation.
  * Extracted from TeammateTool to allow reuse by AgentTool.
@@ -96,10 +99,13 @@ export function resolveTeammateModel(
   inputModel: string | undefined,
   leaderModel: string | null,
 ): string {
-  if (inputModel === 'inherit') {
-    return leaderModel ?? getDefaultTeammateModel(leaderModel)
-  }
-  return inputModel ?? getDefaultTeammateModel(leaderModel)
+  return resolveTeammateSelection(inputModel, leaderModel).resolvedModel
+}
+
+function resolveTeammateSelection(inputModel: string | undefined, leaderModel: string | null): AgentModelSelection {
+  const selection = resolveAgentModelSelection(undefined,
+    leaderModel ?? getDefaultMainLoopModel(), inputModel ?? getDefaultTeammateModel(leaderModel))
+  return inputModel === undefined ? { ...selection, source: selection.source === 'environment' ? 'environment' : 'default' } : selection
 }
 
 /**
@@ -352,7 +358,8 @@ async function handleSpawnSplitPane(
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
+  const modelSelection = resolveTeammateSelection(input.model, getLeaderModel(getAppState()))
+  const model = modelSelection.resolvedModel
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -522,6 +529,7 @@ async function handleSpawnSplitPane(
     teammateColor,
     prompt,
     model,
+    modelSelection,
     plan_mode_required,
     paneId,
     insideTmux,
@@ -595,7 +603,8 @@ async function handleSpawnSeparateWindow(
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
+  const modelSelection = resolveTeammateSelection(input.model, getLeaderModel(getAppState()))
+  const model = modelSelection.resolvedModel
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -739,6 +748,7 @@ async function handleSpawnSeparateWindow(
     teammateColor,
     prompt,
     model,
+    modelSelection,
     plan_mode_required,
     paneId,
     insideTmux: false,
@@ -814,6 +824,7 @@ function registerOutOfProcessTeammateTask(
     teammateColor,
     prompt,
     model,
+    modelSelection,
     plan_mode_required,
     paneId,
     insideTmux,
@@ -827,6 +838,7 @@ function registerOutOfProcessTeammateTask(
     prompt: string
     /** Resolved model spec (resolveTeammateModel) — shown in the panel row. */
     model?: string
+    modelSelection?: AgentModelSelection
     plan_mode_required?: boolean
     paneId: string
     insideTmux: boolean
@@ -858,6 +870,7 @@ function registerOutOfProcessTeammateTask(
     },
     prompt,
     model,
+    modelSelection,
     abortController,
     awaitingPlanApproval: false,
     permissionMode: plan_mode_required ? 'plan' : 'default',
@@ -897,7 +910,8 @@ async function handleSpawnInProcess(
   const { name, prompt, agent_type, plan_mode_required } = input
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
+  const modelSelection = resolveTeammateSelection(input.model, getLeaderModel(getAppState()))
+  const model = modelSelection.resolvedModel
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -946,6 +960,7 @@ async function handleSpawnInProcess(
     color: teammateColor,
     planModeRequired: plan_mode_required ?? false,
     model,
+    modelSelection,
   }
 
   const result = await spawnInProcessTeammate(config, context)
@@ -974,6 +989,7 @@ async function handleSpawnInProcess(
       prompt,
       description: input.description,
       model,
+      modelSelection,
       agentDefinition,
       teammateContext: result.teammateContext,
       // Strip messages: the teammate never reads toolUseContext.messages
@@ -1155,5 +1171,5 @@ export async function spawnTeammate(
   config: SpawnTeammateConfig,
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {
-  return handleSpawn(config, context)
+  return runWithModelEnvironment(captureModelEnvironment(), () => handleSpawn(config, context))
 }

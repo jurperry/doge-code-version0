@@ -1,3 +1,4 @@
+import type { AgentModelSelection } from './utils/model/agentModelIdentity.js'
 import { randomBytes } from 'crypto'
 import type { AppState } from './state/AppState.js'
 import type { AgentId } from './types/ids.js'
@@ -43,6 +44,7 @@ export type TaskContext = {
 
 // Base fields shared by all task states
 export type TaskStateBase = {
+  modelSelection?: AgentModelSelection
   id: string
   type: TaskType
   status: TaskStatus

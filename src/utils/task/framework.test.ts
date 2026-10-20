@@ -1,5 +1,7 @@
 import { test, expect } from 'bun:test'
-import { evictTerminalTask, PANEL_GRACE_MS } from './framework.js'
+import { evictTerminalTask, PANEL_GRACE_MS, registerTask } from './framework.js'
+import { setSdkEventTap } from '../sdkEventQueue.js'
+import type { TaskState } from '../../tasks/types.js'
 import type { AppState } from '../../state/AppState.js'
 
 type AnyTask = Record<string, unknown>
@@ -53,4 +55,41 @@ test('PANEL_GRACE_MS stays in sync with the teammate panel grace', async () => {
     '../../components/tasks/teammatePanel.js'
   )
   expect(PANEL_GRACE_MS).toBe(TEAMMATE_PANEL_GRACE_MS)
+})
+
+test('registerTask emits a new lifecycle on resume but not running handover', () => {
+  let state = { tasks: {} } as unknown as AppState
+  const events: Array<{ subtype: string; tool_use_id?: string }> = []
+  setSdkEventTap(event => { events.push(event) })
+  const setState = (updater: (previous: AppState) => AppState) => { state = updater(state) }
+  const task = { id: 'agent', type: 'local_agent', status: 'running', description: 'worker', toolUseId: 'spawn' } as TaskState
+  try {
+    registerTask(task, setState)
+    registerTask({ ...task }, setState)
+    expect(events).toHaveLength(1)
+    state = { ...state, tasks: { agent: { ...task, status: 'completed' } } }
+    registerTask({ ...task, toolUseId: 'resume' }, setState)
+    expect(events).toHaveLength(2)
+    expect(events[1]).toMatchObject({ subtype: 'task_started', tool_use_id: 'resume' })
+  } finally {
+    setSdkEventTap(undefined)
+  }
+})
+
+test('an old completion cannot consume the resumed invocation notification', async () => {
+  const { enqueueAgentNotification } = await import('../../tasks/LocalAgentTask/LocalAgentTask.js')
+  let state = { tasks: { agent: { id: 'agent', type: 'local_agent', status: 'running', toolUseId: 'resume', notified: false } } } as unknown as AppState
+  const events: unknown[] = []
+  setSdkEventTap(event => { events.push(event) })
+  const setAppState = (updater: (previous: AppState) => AppState) => { state = updater(state) }
+  try {
+    enqueueAgentNotification({ taskId: 'agent', description: 'old', status: 'completed', toolUseId: 'spawn', setAppState, notificationMode: 'sdk-only' })
+    expect(state.tasks.agent.notified).toBe(false)
+    expect(events).toHaveLength(0)
+    enqueueAgentNotification({ taskId: 'agent', description: 'new', status: 'completed', toolUseId: 'resume', setAppState, notificationMode: 'sdk-only' })
+    expect(state.tasks.agent.notified).toBe(true)
+    expect(events).toHaveLength(1)
+  } finally {
+    setSdkEventTap(undefined)
+  }
 })

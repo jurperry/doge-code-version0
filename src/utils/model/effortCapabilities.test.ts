@@ -137,8 +137,8 @@ test('gateways without a documented effort wire hide the levels', () => {
   process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER = 'anthropic'
   process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'glm-5.3'
   expect(getEffortCapability('glm-5.3')).toMatchObject({
-    supportsEffort: false,
-    levels: [],
+    supportsEffort: true,
+    levels: ['low', 'medium', 'high', 'xhigh', 'max'],
   })
 
   // Kimi's forced-thinking variants have no strength control either.
@@ -182,6 +182,27 @@ test('custom endpoints can explicitly disable effort', () => {
     supportsMax: false,
     levels: [],
   })
+})
+
+test('fresh default GLM tier profiles auto-detect effort with blank declarations', () => {
+  process.env.ANTHROPIC_BASE_URL = 'https://gateway.test'
+  for (const protocol of ['anthropic', 'openai', 'responses']) {
+    process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER = protocol
+    for (const model of ['glm-5.3[1m]', 'glm-5.3-flash[1m]']) {
+      for (const tier of ['OPUS', 'SONNET', 'HAIKU']) {
+        process.env[`ANTHROPIC_DEFAULT_${tier}_MODEL`] = model
+        process.env[`ANTHROPIC_DEFAULT_${tier}_MODEL_SUPPORTED_CAPABILITIES`] = ''
+      }
+      expect(getEffortCapability(model)).toMatchObject({
+        supportsEffort: true,
+        supportsMax: true,
+        levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      })
+      process.env.CLAUDE_CODE_DISABLE_EFFORT = '1'
+      expect(getEffortCapability(model).supportsEffort).toBe(false)
+      delete process.env.CLAUDE_CODE_DISABLE_EFFORT
+    }
+  }
 })
 
 test('third-party providers stay conservative unless declared', () => {

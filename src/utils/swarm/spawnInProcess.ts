@@ -1,3 +1,4 @@
+import type { AgentModelSelection } from '../model/agentModelIdentity.js'
 /**
  * In-process teammate spawning
  *
@@ -69,6 +70,7 @@ export type InProcessSpawnConfig = {
   planModeRequired: boolean
   /** Optional model override for this teammate */
   model?: string
+  modelSelection?: AgentModelSelection
 }
 
 /**
@@ -105,7 +107,7 @@ export async function spawnInProcessTeammate(
   config: InProcessSpawnConfig,
   context: SpawnContext,
 ): Promise<InProcessSpawnOutput> {
-  const { name, teamName, prompt, color, planModeRequired, model } = config
+  const { name, teamName, prompt, color, planModeRequired, model, modelSelection } = config
   const { setAppState } = context
 
   // Generate deterministic agent ID
@@ -166,6 +168,7 @@ export async function spawnInProcessTeammate(
       identity,
       prompt,
       model,
+      modelSelection,
       abortController,
       awaitingPlanApproval: false,
       spinnerVerb: sample(getSpinnerVerbs()),

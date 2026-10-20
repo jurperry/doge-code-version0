@@ -188,14 +188,6 @@ function planForGateway(
       }
       return { ...base, ...mapLevel(level, LOW_HIGH_MAX) }
     case 'glm':
-      if (protocol === 'anthropic') {
-        return {
-          ...base,
-          reason: 'gateway-unsupported',
-          detail:
-            'GLM Anthropic-compatible endpoint does not document an effort parameter; use the OpenAI-compatible endpoint for effort control.',
-        }
-      }
       return {
         ...base,
         ...mapLevel(

@@ -2,6 +2,19 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+
+## 2026-10-19 新会话空能力声明自动检测（2.1.310，APP 0.2.164）
+
+1. 遇到问题：App 新建默认会话把未填写的能力字段作为空环境变量传入；CLI 将其当显式无能力，GLM 最大 effort 被过滤，重选模型清除空值后才恢复。
+2. 解决方法：get3PModelCapabilityOverride 跳过空白声明，统一启动与运行时自动检测；非空声明、disableEffort、档位顺序、worker 快照及缓存键保持。两项新增测试 RED→GREEN，独立 Sol High 审查通过；全量与安装黑盒证据见邻仓 docs/validation/2026-10-19-effort-startup-validation.md。
+3. 代码位置：src/utils/model/modelSupportOverrides.ts、modelSupportOverrides.test.ts、effortCapabilities.test.ts；邻仓 tools/verify-effort-startup.mjs。
+
+## 2026-10-19 模型快照、GLM 映射与代理统一身份（2.1.309，APP 0.2.163）
+
+1. 遇到问题：宿主显式空 URL/key 可被磁盘默认补入，trusted 初始化后重复恢复默认会改变已有会话；agent/teammate 在不同层反复解析别名，resume 可混入新连接，worktree 元数据覆盖丢身份；恢复没有 SDK start，迟到旧通知会污染新轮。
+2. 解决方法：host-managed 显式连接完整生效，普通 CLI 只在启动恢复持久默认；新增纯模型身份/resolver 与 worker 环境快照，实际请求固定真实模型，面板统一 alias(real)；保存非敏感连接身份，跨进程恢复拒绝删除或改变端点/协议的 profile；元数据局部合并，GLM 5.3/Flash 三协议放行 low/high/max；terminal→running 发新 start，旧通知按工具调用隔离。GPT-6.1 Sol High 独立复审通过；全量及 APP 安装验证见邻仓 docs/validation/2026-10-19-model-session-safety-validation.md。
+3. 代码位置：utils/model/{agentModelIdentity,agentModelSelection,runtimeModelContext,effortGateway}.ts、managedEnv/auth/sessionStorage、AgentTool/runAgent/resumeAgent、LocalAgentTask、spawnMultiAgent/inProcessRunner、task/framework、sdkEventQueue/coreSchemas、CoordinatorAgentStatus/TeammateAgentLine；tools/model-{host-context,default-reload,resume-context}.test.ts 及 framework/模型相关单测。
+
 ## 2026-10-18 思考强度体系重构：单一能力矩阵、xhigh 全链路、网关映射与按模型记忆（2.1.308，APP 0.2.158）
 
 1. 遇到问题：effort 能力由四套分散规则判定（`effort.ts`、`thinking.ts`、`print.ts` 的 supportedEffortLevels、App 纯聊天能力表），4.6/4.7 等新模型、自定义端点与 OpenAI/Responses 网关已出现 CLI/App 不一致；`xhigh` 未进 `--effort`/SDK schema；OpenAI 兼容层发送非标准顶层 `effort`；不支持时静默降级/丢弃，用户看到所选档位但实际没有对应强度；切换模型会把一个档位带到所有模型。

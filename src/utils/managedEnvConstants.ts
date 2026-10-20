@@ -1,3 +1,5 @@
+import { PROFILE_MANAGED_ENV_KEYS } from './model/profileEnvKeys.js'
+
 /**
  * Environment variables that control inference routing: which provider to use,
  * which endpoint to hit, and which model IDs to send.
@@ -12,6 +14,8 @@
  * config vars (endpoint, project, region, auth) do.
  */
 const PROVIDER_MANAGED_ENV_VARS = new Set([
+  ...PROFILE_MANAGED_ENV_KEYS,
+  'CLAUDE_CODE_COMPATIBLE_API_PROVIDER',
   // The flag itself — settings can't unset it once the host set it
   'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
   // Provider selection

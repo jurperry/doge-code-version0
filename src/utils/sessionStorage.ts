@@ -1,3 +1,5 @@
+import type { ModelConnectionIdentity } from './model/runtimeModelContext.js'
+import type { AgentModelSelection } from './model/agentModelIdentity.js'
 import { feature } from 'bun:bundle'
 import { randomUUID, type UUID } from 'crypto'
 import type { Dirent } from 'fs'
@@ -312,6 +314,8 @@ async function getAgentMetadataPath(agentId: AgentId): Promise<string> {
 }
 
 export type AgentMetadata = {
+  modelConnection?: ModelConnectionIdentity
+  modelSelection?: AgentModelSelection
   agentType: string
   /** Worktree path if the agent was spawned with isolation: "worktree" */
   worktreePath?: string
@@ -336,7 +340,7 @@ export async function writeAgentMetadata(
 ): Promise<void> {
   const path = await getAgentMetadataPath(agentId)
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, JSON.stringify(metadata))
+  await writeFile(path, JSON.stringify({ ...await readAgentMetadata(agentId), ...metadata }))
 }
 
 export async function readAgentMetadata(

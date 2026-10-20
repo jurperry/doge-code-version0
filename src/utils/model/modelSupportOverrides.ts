@@ -55,7 +55,9 @@ export const get3PModelCapabilityOverride = memoize(
     for (const tier of TIERS) {
       const pinned = getModelEnvironment()[tier.modelEnvVar]
       const capabilities = getModelEnvironment()[tier.capabilitiesEnvVar]
-      if (!pinned || capabilities === undefined) continue
+      // Blank profile fields mean automatic detection. Spawn preserves empty
+      // strings while runtime environment updates delete them; both must agree.
+      if (!pinned || !capabilities?.trim()) continue
       if (m !== pinned.toLowerCase().replace(/\[.*?\]$/, '')) continue
       return capabilities
         .toLowerCase()

@@ -1,4 +1,6 @@
-import { iterateWithModelEnvironment } from '../../utils/model/runtimeModelContext.js'
+import type { AgentModelSelection } from '../../utils/model/agentModelIdentity.js'
+import type { ModelEnvironment } from '../../utils/model/runtimeModelContext.js'
+import { captureModelEnvironment, getModelConnectionIdentity, rememberAgentModelEnvironment, iterateWithModelEnvironment } from '../../utils/model/runtimeModelContext.js'
 import { feature } from 'bun:bundle'
 import { getScopedEffort, withScopedEffort } from '../../utils/effortContext.js'
 import type { UUID } from 'crypto'
@@ -250,11 +252,14 @@ function isRecordableMessage(
 }
 
 export function runAgent(input: Parameters<typeof runAgentInContext>[0]): ReturnType<typeof runAgentInContext> {
-  return iterateWithModelEnvironment(() => runAgentInContext(input))
+  const snapshot = input.modelEnvironment ?? captureModelEnvironment()
+  if (input.override?.agentId) rememberAgentModelEnvironment(input.override.agentId, snapshot)
+  return iterateWithModelEnvironment(() => runAgentInContext(input), snapshot)
 }
 
 async function* runAgentInContext({
   agentDefinition,
+  modelSelection,
   promptMessages,
   toolUseContext,
   canUseTool,
@@ -307,6 +312,8 @@ async function* runAgentInContext({
   }
   /** Workflow hosts display partial activity without persisting delta text. */
   onStreamEvent?: (message: StreamEvent) => void
+  modelSelection?: AgentModelSelection
+  modelEnvironment?: ModelEnvironment
   model?: ModelAlias
   maxTurns?: number
   /** Preserve toolUseResult on messages for subagents with viewable transcripts */
@@ -359,7 +366,7 @@ async function* runAgentInContext({
   const rootSetAppState =
     toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState
 
-  const resolvedAgentModel = override?.resolvedModel ?? getAgentModel(
+  const resolvedAgentModel = override?.resolvedModel ?? modelSelection?.resolvedModel ?? getAgentModel(
     agentDefinition.model,
     toolUseContext.options.mainLoopModel,
     model,
@@ -799,6 +806,8 @@ async function* runAgentInContext({
   initialMessages.forEach(relayTranscript)
   void writeAgentMetadata(agentId, {
     agentType: agentDefinition.agentType,
+    modelSelection,
+    modelConnection: getModelConnectionIdentity(),
     ...(worktreePath && { worktreePath }),
     ...(description && { description }),
   }).catch(_err => logForDebugging(`Failed to write agent metadata: ${_err}`))

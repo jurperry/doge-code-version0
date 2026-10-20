@@ -12,10 +12,9 @@ type TaskStartedEvent = {
   task_type?: string
   workflow_name?: string
   prompt?: string
-  /** Resolved model for this task (LocalAgentTask/InProcessTeammate states).
-   *  May still be an alias string — subagent models are re-resolved per turn
-   *  by getAgentModel. Absent for task types without a model (shell, dream). */
+  /** Resolved API model captured when this worker was created. */
   model?: string
+  model_selection?: import('./model/agentModelIdentity.js').AgentModelSelection
   agent_id?: string
 }
 

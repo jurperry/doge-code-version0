@@ -24,7 +24,8 @@ import { AbortError, errorMessage, toError } from '../../utils/errors.js';
 import type { CacheSafeParams } from '../../utils/forkedAgent.js';
 import { lazySchema } from '../../utils/lazySchema.js';
 import { createUserMessage, extractTextContent, isSyntheticMessage, normalizeMessages } from '../../utils/messages.js';
-import { getAgentModel } from '../../utils/model/agent.js';
+import { resolveAgentModelSelection } from '../../utils/model/agentModelSelection.js';
+import { captureModelEnvironment } from '../../utils/model/runtimeModelContext.js';
 import { permissionModeSchema } from '../../utils/permissions/PermissionMode.js';
 import type { PermissionResult } from '../../utils/permissions/PermissionResult.js';
 import { filterDeniedAgents, getDenyRuleForAgent } from '../../utils/permissions/permissions.js';
@@ -432,7 +433,9 @@ export const AgentTool = buildTool({
     }
 
     // Resolve agent params for logging (these are already resolved in runAgent)
-    const resolvedAgentModel = getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, isForkPath ? undefined : model, permissionMode);
+    const modelEnvironment = captureModelEnvironment();
+    const modelSelection = resolveAgentModelSelection(selectedAgent.model, toolUseContext.options.mainLoopModel, isForkPath ? undefined : model, permissionMode);
+    const resolvedAgentModel = modelSelection.resolvedModel;
     logEvent('tengu_agent_tool_selected', {
       agent_type: selectedAgent.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       model: resolvedAgentModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -621,6 +624,8 @@ export const AgentTool = buildTool({
     }
     const runAgentParams: Parameters<typeof runAgent>[0] = {
       agentDefinition: selectedAgent,
+      modelSelection,
+      modelEnvironment,
       promptMessages,
       toolUseContext,
       canUseTool,
@@ -691,7 +696,8 @@ export const AgentTool = buildTool({
           // writeAgentMetadata handling.
           void writeAgentMetadata(asAgentId(earlyAgentId), {
             agentType: selectedAgent.agentType,
-            description
+            description,
+            worktreePath: undefined
           }).catch(_err => logForDebugging(`Failed to clear worktree metadata: ${_err}`));
           return {};
         }
@@ -715,6 +721,7 @@ export const AgentTool = buildTool({
         // They are killed explicitly via chat:killAgents.
         toolUseId: toolUseContext.toolUseId,
         model: resolvedAgentModel,
+        modelSelection,
         workflowName: workflowParent?.workflowName,
         workflowRootAgentId: workflowParent?.workflowRootAgentId,
         parentAbortController: workflowParent ? toolUseContext.abortController : undefined
@@ -856,6 +863,7 @@ export const AgentTool = buildTool({
             toolUseId: toolUseContext.toolUseId,
             autoBackgroundMs: getAutoBackgroundMs() || undefined,
             model: resolvedAgentModel,
+            modelSelection,
             workflowName: workflowParent?.workflowName,
             workflowRootAgentId: workflowParent?.workflowRootAgentId,
             parentAbortController: workflowParent ? toolUseContext.abortController : undefined

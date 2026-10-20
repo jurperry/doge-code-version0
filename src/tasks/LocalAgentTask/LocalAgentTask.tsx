@@ -1,3 +1,4 @@
+import type { AgentModelSelection } from '../../utils/model/agentModelIdentity.js';
 import { getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js';
 import { OUTPUT_FILE_TAG, STATUS_TAG, SUMMARY_TAG, TASK_ID_TAG, TASK_NOTIFICATION_TAG, TOOL_USE_ID_TAG, WORKTREE_BRANCH_TAG, WORKTREE_PATH_TAG, WORKTREE_TAG } from '../../constants/xml.js';
 import { abortSpeculation } from '../../services/PromptSuggestion/speculation.js';
@@ -120,6 +121,7 @@ export type LocalAgentTaskState = TaskStateBase & {
   selectedAgent?: AgentDefinition;
   agentType: string;
   model?: string;
+  modelSelection?: AgentModelSelection;
   abortController?: AbortController;
   unregisterCleanup?: () => void;
   error?: string;
@@ -229,7 +231,7 @@ export function enqueueAgentNotification({
   let shouldEnqueue = false;
   let workflowAgent = false;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
-    if (task.notified) {
+    if (task.notified || task.toolUseId !== toolUseId) {
       return task;
     }
     shouldEnqueue = true;
@@ -486,6 +488,7 @@ export function registerAsyncAgent({
   parentAbortController,
   toolUseId,
   model,
+  modelSelection,
   workflowName,
   workflowRootAgentId
 }: {
@@ -499,6 +502,7 @@ export function registerAsyncAgent({
   /** Resolved model id (getAgentModel) — shown in the CoordinatorTaskPanel
    *  row label (`sub-agent-<model>-<task>`). Undefined = inherit display. */
   model?: string;
+  modelSelection?: AgentModelSelection;
   workflowName?: string;
   workflowRootAgentId?: string;
 }): LocalAgentTaskState {
@@ -515,6 +519,7 @@ export function registerAsyncAgent({
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
     model,
+    modelSelection,
     workflowName,
     workflowRootAgentId: workflowRootAgentId ?? (workflowName ? agentId : undefined),
     abortController,
@@ -557,6 +562,7 @@ export function registerAgentForeground({
   autoBackgroundMs,
   toolUseId,
   model,
+  modelSelection,
   workflowName,
   workflowRootAgentId,
   parentAbortController
@@ -571,6 +577,7 @@ export function registerAgentForeground({
   /** Resolved model id (getAgentModel) — shown in the CoordinatorTaskPanel
    *  row label (`sub-agent-<model>-<task>`). Undefined = inherit display. */
   model?: string;
+  modelSelection?: AgentModelSelection;
   workflowName?: string;
   workflowRootAgentId?: string;
   parentAbortController?: AbortController;
@@ -594,6 +601,7 @@ export function registerAgentForeground({
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
     model,
+    modelSelection,
     abortController,
     workflowName,
     workflowRootAgentId,

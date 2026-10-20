@@ -4,9 +4,9 @@ import { getGlobalConfig } from '../config.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { OAuthTokens } from '../../services/oauth/types.js'
-import { readMergedCustomApiStorage, type CustomApiStorageData } from '../customApiStorage.js'
+import { readMergedCustomApiStorage, modelProfileEnvPatch, type CustomApiStorageData } from '../customApiStorage.js'
 import { getOAuthTokenFromFileDescriptor } from '../authFileDescriptor.js'
-import { isBareMode } from '../envUtils.js'
+import { isBareMode, isEnvTruthy } from '../envUtils.js'
 import { getSecureStorage } from '../secureStorage/index.js'
 import { matchModelProfile, resolveProfileReference } from './profileIdentity.js'
 
@@ -98,7 +98,7 @@ export async function readUpdatedModelOAuthTokens(): Promise<OAuthTokens | null 
 /** Resolve protocol, endpoint and authentication together, including explicit anthropic. */
 export function getModelConnection() {
   const env = getModelEnvironment()
-  const stored = readModelApiStorage()
+  const stored: CustomApiStorageData = isEnvTruthy(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST) ? {} : readModelApiStorage()
   const profiles = stored.modelProfiles ?? []
   const profile = (env.DOGE_ACTIVE_MODEL_PROFILE ? resolveProfileReference(profiles, env.DOGE_ACTIVE_MODEL_PROFILE) : undefined)
     ?? (env.ANTHROPIC_MODEL ? matchModelProfile(profiles, env.ANTHROPIC_MODEL, env) : undefined)
@@ -149,4 +149,44 @@ export function iterateWithModelEnvironment<T, R = void, N = unknown>(
     throw: error => runWithModelEnvironment(snapshot, () => getIterator().throw(error)),
     [Symbol.asyncIterator]() { return this },
   }
+}
+
+
+/** Kept only in process memory: sidecar metadata must never contain credentials. */
+const agentEnvironments = new Map<string, ModelEnvironment>()
+export type ModelConnectionIdentity = { profileId?: string; provider: string; baseURL: string }
+export function rememberAgentModelEnvironment(agentId: string, snapshot: ModelEnvironment): void {
+  agentEnvironments.set(agentId, snapshot)
+}
+export function getModelConnectionIdentity(): ModelConnectionIdentity {
+  const { provider, baseURL } = getModelConnection()
+  return { provider, baseURL, profileId: getModelEnvironment().DOGE_ACTIVE_MODEL_PROFILE || undefined }
+}
+export function restoreAgentModelEnvironment(
+  agentId: string, identity: ModelConnectionIdentity | undefined, fallback: ModelEnvironment,
+): ModelEnvironment {
+  const existing = agentEnvironments.get(agentId)
+  if (existing) return existing
+  if (!identity) return fallback // Legacy transcripts have no connection identity.
+  return runWithModelEnvironment(fallback, () => {
+    if (!identity.profileId) {
+      const current = getModelConnection()
+      if (current.provider !== identity.provider || current.baseURL !== identity.baseURL) {
+        throw new Error('无法恢复代理的原始模型连接，请选择原连接后重试或新建代理')
+      }
+      return fallback
+    }
+    const profile = resolveProfileReference(fallback.stored.modelProfiles ?? [], identity.profileId)
+    if (!profile) throw new Error('代理原模型配置已不存在，请恢复配置后重试或新建代理')
+    const normalizeURL = (url: string): string => new URL(url).href.replace(/\/+$/, '')
+    if ((profile.provider ?? 'anthropic') !== identity.provider ||
+      normalizeURL(profile.baseURL || 'https://api.anthropic.com') !== normalizeURL(identity.baseURL)) {
+      throw new Error('代理原始模型连接已变更，请恢复原配置后重试或新建代理')
+    }
+    const env = { ...fallback.env, ...modelProfileEnvPatch(profile), CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' }
+    const captured = captureModelEnvironment(env)
+    const restored = Object.freeze({ ...captured, mainLoopModelOverride: profile.model, settingsModel: profile.model })
+    registerOAuthSession(restored)
+    return restored
+  })
 }
