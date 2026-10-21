@@ -8,6 +8,7 @@ import { ModelPicker } from '../../components/ModelPicker.js';
 import { COMMON_HELP_ARGS, COMMON_INFO_ARGS } from '../../constants/xml.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { useAppState, useSetAppState } from '../../state/AppState.js';
+import { useMainLoopModel } from '../../hooks/useMainLoopModel.js';
 import type { LocalJSXCommandCall } from '../../types/command.js';
 import type { EffortLevel } from '../../utils/effort.js';
 import { rememberEffortForModel } from '../../utils/effortMemory.js';
@@ -31,20 +32,21 @@ function ModelPickerWrapper(t0) {
   } = t0;
   const mainLoopModel = useAppState(_temp);
   const mainLoopModelForSession = useAppState(_temp2);
+  const effectiveModel = useMainLoopModel();
   const isFastMode = useAppState(_temp3);
   const setAppState = useSetAppState();
   let t1;
-  if ($[0] !== mainLoopModel || $[1] !== onDone) {
+  if ($[0] !== effectiveModel || $[1] !== onDone) {
     t1 = function handleCancel() {
       logEvent("tengu_model_command_menu", {
         action: "cancel" as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
       });
-      const displayModel = renderModelLabel(mainLoopModel);
+      const displayModel = renderModelLabel(effectiveModel);
       onDone(`Kept model as ${chalk.bold(displayModel)}`, {
         display: "system"
       });
     };
-    $[0] = mainLoopModel;
+    $[0] = effectiveModel;
     $[1] = onDone;
     $[2] = t1;
   } else {

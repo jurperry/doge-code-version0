@@ -45,7 +45,7 @@ import { useMainLoopModel } from '../../hooks/useMainLoopModel.js';
 import { renderModelSetting } from '../../utils/model/model.js';
 const LEFT_PANEL_MAX_WIDTH = 50;
 export function LogoV2() {
-  const $ = _c(94);
+  const $ = _c(95);
   const activities = getRecentActivitySync();
   const username = getGlobalConfig().oauthAccount?.displayName ?? "";
   const {
@@ -326,7 +326,7 @@ export function LogoV2() {
       t18 = $[42];
       t19 = $[43];
     }
-    return <><OffscreenFreeze><Box flexDirection="column" borderStyle="round" borderColor="claude" borderText={t11} paddingX={1} paddingY={1} alignItems="center" width={columns}><Text bold={true}>{welcomeMessage}</Text>{t12}{t13}<Text dimColor={true}>{billingType}</Text><Text dimColor={true}>{agentName ? `@${agentName} · ${truncatedCwd}` : truncatedCwd}</Text></Box></OffscreenFreeze>{t14}{t15}{t16}{t17}{t18}{t19}</>;
+    return <><OffscreenFreeze key={t9}><Box flexDirection="column" borderStyle="round" borderColor="claude" borderText={t11} paddingX={1} paddingY={1} alignItems="center" width={columns}><Text bold={true}>{welcomeMessage}</Text>{t12}{t13}<Text dimColor={true}>{billingType}</Text><Text dimColor={true}>{agentName ? `@${agentName} · ${truncatedCwd}` : truncatedCwd}</Text></Box></OffscreenFreeze>{t14}{t15}{t16}{t17}{t18}{t19}</>;
   }
   const welcomeMessage_0 = formatWelcomeMessage(username);
   const modelLine = !process.env.IS_DEMO && config.oauthAccount?.organizationName ? `${modelDisplayName} · ${billingType} · ${config.oauthAccount.organizationName}` : `${modelDisplayName} · ${billingType}`;
@@ -442,11 +442,13 @@ export function LogoV2() {
     t27 = $[71];
   }
   let t28;
-  if ($[72] !== T0 || $[73] !== t27) {
-    t28 = <T0>{t27}</T0>;
+  // A model/effort selection must invalidate the scrollback snapshot once.
+  if ($[72] !== T0 || $[73] !== t27 || $[94] !== t9) {
+    t28 = <T0 key={t9}>{t27}</T0>;
     $[72] = T0;
     $[73] = t27;
     $[74] = t28;
+    $[94] = t9;
   } else {
     t28 = $[74];
   }

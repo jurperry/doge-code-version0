@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-21 /clear 配置语义与模型显示一致性（2.1.312 / App 0.2.166）
+
+1. 遇到问题：会话切到 DeepSeek 后 `/model` 取消提示仍读取 GLM 基线；屏幕外冻结的欢迎区可能保留旧模型，clear 的 conversationId 没有使 LogoHeader 重新创建。App 上一轮把 clear 错当全新对话重置，用户明确要求清上下文时保留已有配置。
+2. 解决方法：取消提示改用有效会话模型；完整、窄屏和简洁欢迎布局以模型和强度为 key 更新冻结快照，LogoHeader 按 conversationId 重建；CLI clear 原本保留配置的逻辑不改。App 区分 fresh/clear/reconnect，配置重放完成前不发送，并保留在途权限选择。真实组件用例复现旧回显和旧欢迎文本后通过；全量与安装证据见邻仓 docs/validation/2026-10-21-clear-session-config-validation.md。
+3. 代码位置：src/commands/model/{model.tsx,model-ui.test.ts}、src/components/LogoV2/{LogoV2,CondensedLogo,modelDisplay.test}.tsx、src/components/Messages.tsx；邻仓 tools/verify-cli-clear.mjs、verify-session-defaults.mjs、check-chat-pane-restore.mjs。
+
 ## 2026-10-21 Teams 续轮转录身份上报（2.1.311 / App 0.2.165）
 
 1. 遇到问题：进程内队友每次接收新任务均创建新的 roundAgentId，但 SDK 只报告不变的任务 ID，App 侧栏继续读取首轮 sidechain，显示停滞。
