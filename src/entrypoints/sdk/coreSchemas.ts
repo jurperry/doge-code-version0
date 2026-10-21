@@ -1775,6 +1775,7 @@ export const SDKTaskProgressMessageSchema = lazySchema(() =>
     type: z.literal('system'),
     subtype: z.literal('task_progress'),
     task_id: z.string(),
+    agent_id: z.string().optional(),
     tool_use_id: z.string().optional(),
     description: z.string(),
     usage: z.object({

@@ -22,6 +22,7 @@ type TaskProgressEvent = {
   type: 'system'
   subtype: 'task_progress'
   task_id: string
+  agent_id?: string
   tool_use_id?: string
   description: string
   usage: {

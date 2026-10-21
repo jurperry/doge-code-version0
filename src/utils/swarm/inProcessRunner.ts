@@ -1232,8 +1232,10 @@ export async function runInProcessTeammate(
           )
           // 开工标记（is_idle=false）：壳侧占用锁按「running 且非空闲」判定，
           // 队友空闲待命即解锁标签，干活时重新占住
+          const roundAgentId = createAgentId()
           emitTaskProgress({
             taskId,
+            agentId: roundAgentId,
             toolUseId: undefined,
             description,
             startTime: runnerStartTime,
@@ -1252,7 +1254,6 @@ export async function runInProcessTeammate(
           // 返回但末条 assistant 是 API 错误时剥掉错误尾巴、前置本轮 prompt 续跑
           // 同一对话——限额重置/网关抖动不整损队友整轮工作。roundAgentId 固定
           // 本轮，续跑追加同一 sidechain 文件（与 AgentTool 同步路径同款）。
-          const roundAgentId = createAgentId()
           const roundMessages: Message[] = []
           for (let resumeAttempt = 0; ; resumeAttempt++) {
             const attemptPromptMessages = resumeAttempt === 0

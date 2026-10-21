@@ -11,6 +11,8 @@ import { enqueueSdkEvent } from '../sdkEventQueue.js'
  */
 export function emitTaskProgress(params: {
   taskId: string
+  /** Actual sidechain file for this iteration of a long-lived teammate. */
+  agentId?: string
   toolUseId: string | undefined
   description: string
   startTime: number
@@ -27,6 +29,7 @@ export function emitTaskProgress(params: {
     type: 'system',
     subtype: 'task_progress',
     task_id: params.taskId,
+    agent_id: params.agentId,
     tool_use_id: params.toolUseId,
     description: params.description,
     usage: {

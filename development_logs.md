@@ -2,6 +2,13 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-21 Teams 续轮转录身份上报（2.1.311 / App 0.2.165）
+
+1. 遇到问题：进程内队友每次接收新任务均创建新的 roundAgentId，但 SDK 只报告不变的任务 ID，App 侧栏继续读取首轮 sidechain，显示停滞。
+2. 解决方法：每轮开工 task_progress 可选携带实际 agent_id，保持任务 ID、独立转录与重试语义；宿主按任务汇集历轮转录。新增 SDK 进度单测 RED→GREEN，配套真实 App 两轮调用与全量回归见邻仓 docs/validation/2026-10-21-agent-continuation-session-defaults-validation.md。
+3. 代码位置：src/utils/swarm/inProcessRunner.ts、src/utils/task/sdkProgress.ts、src/utils/sdkEventQueue.ts、src/entrypoints/sdk/coreSchemas.ts、tools/teammate-transcript-progress.test.ts。
+
+
 
 ## 2026-10-19 新会话空能力声明自动检测（2.1.310，APP 0.2.164）
 
