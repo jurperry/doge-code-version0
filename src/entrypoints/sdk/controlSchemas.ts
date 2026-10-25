@@ -586,9 +586,27 @@ export const SDKControlElicitationResponseSchema = lazySchema(() =>
 // Control Request/Response Wrappers
 // ============================================================================
 
+export const SDKControlGetUserMessageEditStateRequestSchema = lazySchema(() =>
+  z.object({ subtype: z.literal('get_user_message_edit_state'), text: z.string().optional(), has_images: z.boolean().optional() }),
+)
+
+export const SDKControlReplaceUserMessageRequestSchema = lazySchema(() =>
+  z.object({
+    subtype: z.literal('replace_user_message'),
+    user_message_id: z.string(),
+    replacement: z.object({
+      uuid: z.string().uuid(),
+      content: z.union([z.string(), z.array(z.object({ type: z.string() }).passthrough())]),
+      image_paths: z.array(z.string().nullable()).optional(),
+    }),
+  }),
+)
+
 export const SDKControlRequestInnerSchema = lazySchema(() =>
   z.union([
     SDKControlInterruptRequestSchema(),
+    SDKControlGetUserMessageEditStateRequestSchema(),
+    SDKControlReplaceUserMessageRequestSchema(),
     SDKControlPermissionRequestSchema(),
     SDKControlInitializeRequestSchema(),
     SDKControlSetPermissionModeRequestSchema(),

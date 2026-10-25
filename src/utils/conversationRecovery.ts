@@ -238,9 +238,9 @@ export function deserializeMessagesWithInterruptDetection(
       filteredMessages.splice(
         lastRelevantIdx + 1,
         0,
-        createAssistantMessage({
+        { ...createAssistantMessage({
           content: NO_RESPONSE_REQUESTED,
-        }) as NormalizedMessage,
+        }), isResumeSentinel: true } as NormalizedMessage,
       )
     }
 

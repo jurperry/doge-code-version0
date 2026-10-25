@@ -29,9 +29,9 @@
  */
 
 import { createChildAbortController } from '../../utils/abortController.js'
-import { dirname, basename, join } from 'node:path'
 import { getTranscriptPath } from '../../utils/sessionStorage.js'
-import { WorkflowCheckpointStore, type WorkflowCheckpoint } from './checkpoint.js'
+import type { WorkflowCheckpointStore, WorkflowCheckpoint } from './checkpoint.js'
+import { workflowCheckpointStoreForTranscript } from './workflowResumeInput.js'
 import { withScopedEffort } from '../../utils/effortContext.js'
 import { StepActivity } from './stepActivity.js'
 import { retryErrorClass, retryErrorKind } from '../../services/api/withRetry.js'
@@ -95,12 +95,11 @@ export async function waitForWorkflowRun(taskId: string): Promise<void> {
   await workflowRuns.get(taskId)
 }
 function checkpointStore(): WorkflowCheckpointStore {
-  const transcript = getTranscriptPath()
-  return new WorkflowCheckpointStore(join(dirname(transcript), basename(transcript, '.jsonl'), 'workflows'))
+  return workflowCheckpointStoreForTranscript(getTranscriptPath())
 }
 
 /** Common TUI/headless/remote input route calls this only for explicit user continue. */
-export async function resumeWorkflowTask(context: LocalJSXCommandContext): Promise<string | undefined> {
+export async function resumeWorkflowTask(context: LocalJSXCommandContext, allowResume = true): Promise<string | undefined> {
   const store = checkpointStore()
   let checkpoint = store.latest()
   if (!checkpoint) return undefined
@@ -108,6 +107,9 @@ export async function resumeWorkflowTask(context: LocalJSXCommandContext): Promi
   await workflowRuns.get(checkpoint.taskId)
   checkpoint = store.latest()
   if (!checkpoint || context.abortController.signal.aborted) return undefined
+  // Prompt replacement must reject before registering a task or consuming its
+  // checkpoint, including a checkpoint appearing after the host's preflight.
+  if (!allowResume) throw new Error('Workflow continuation must use the normal user input channel')
   startWorkflowTask({ spec: checkpoint.spec, argsString: checkpoint.argsString, argValues: checkpoint.argValues, context, resume: checkpoint })
   store.remove(checkpoint.taskId)
   return `▶ 工作流 "${checkpoint.spec.name}" 已继续，从步骤 ${checkpoint.spec.steps[checkpoint.nextStep]!.title} 恢复；已完成步骤的结果已保留。`

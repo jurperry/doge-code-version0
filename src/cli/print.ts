@@ -44,7 +44,7 @@ import {
 } from 'src/tools/AgentTool/loadAgentsDir.js'
 import type { Message, NormalizedUserMessage } from 'src/types/message.js'
 import type { QueuedCommand } from 'src/types/textInputTypes.js'
-import { mergeQueuedPastedContents } from 'src/types/textInputTypes.js'
+import { mergeQueuedPastedContents, isValidImagePaste } from 'src/types/textInputTypes.js'
 import {
   dequeue,
   dequeueAllMatching,
@@ -231,7 +231,14 @@ import {
   saveMode,
   saveAiGeneratedTitle,
   restoreSessionMetadata,
+  flushSessionStorage,
+  markUserMessageReplaceable,
+  replaceUserMessageTranscript,
+  getTranscriptPath,
 } from 'src/utils/sessionStorage.js'
+import { UserMessageEditTracker, commitUserMessageReplacement, latestEditableUser } from 'src/utils/userMessageEdit.js'
+import { SDKControlReplaceUserMessageRequestSchema } from 'src/entrypoints/sdk/controlSchemas.js'
+import { localInputText, workflowResumeRequiresNormalInput } from 'src/tools/WorkflowTool/workflowResumeInput.js'
 import { incrementPromptCount } from 'src/utils/commitAttribution.js'
 import {
   setupSdkMcpClients,
@@ -1056,8 +1063,19 @@ function runHeadlessStreaming(
   let heldBackResult: StdoutMessage | null = null
   let abortController: AbortController | undefined
   let userInterrupted = false
+  const userMessageEdit = new UserMessageEditTracker(initialMessages)
+  let runSettled: Promise<void> = Promise.resolve()
+  let resolveRunSettled: (() => void) | undefined
+  const replacementJobs = new Map<string, { target: string; committed: boolean; resolve: () => void; reject: (error: unknown) => void }>()
   // Same queue sendRequest() enqueues to — one FIFO for everything.
   const output = structuredIO.outbound
+  // Observe the actual protocol FIFO, including permission requests emitted by
+  // StructuredIO while ask() is suspended and SDK events drained after retries.
+  const enqueueOutput = output.enqueue.bind(output)
+  output.enqueue = message => {
+    userMessageEdit.observe(message)
+    enqueueOutput(message)
+  }
 
   // Ctrl+C in -p mode: abort the in-flight query, then shut down gracefully.
   // gracefulShutdown persists session state and flushes analytics, with a
@@ -1934,6 +1952,7 @@ function runHeadlessStreaming(
 
     const runStartedAt = Date.now()
     running = true
+    runSettled = new Promise(resolve => { resolveRunSettled = resolve })
     runPhase = undefined
     notifySessionStateChanged('running')
     idleTimeout.stop()
@@ -1999,6 +2018,9 @@ function runHeadlessStreaming(
       // into a single follow-up turn instead of N separate turns.
       const drainCommandQueue = async () => {
         while ((command = dequeue(isMainThread))) {
+          const replacementJob = command.uuid ? replacementJobs.get(command.uuid) : undefined
+          if (!replacementJob && command.mode === 'prompt' && !command.isMeta) userMessageEdit.receive(command.uuid)
+          else if (!replacementJob) userMessageEdit.markActivity()
           if (command.mode === 'prompt' && !command.isMeta) userInterrupted = false
           if (
             command.mode !== 'prompt' &&
@@ -2015,10 +2037,11 @@ function runHeadlessStreaming(
           // Prompt commands greedily collect followers with matching workload.
           const batch: QueuedCommand[] = [command]
           if (command.mode === 'prompt') {
-            while (canBatchWith(command, peek(isMainThread))) {
+            while (!replacementJob && !replacementJobs.has(peek(isMainThread)?.uuid ?? '') && canBatchWith(command, peek(isMainThread))) {
               batch.push(dequeue(isMainThread)!)
             }
             if (batch.length > 1) {
+              userMessageEdit.markActivity()
               command = {
                 ...command,
                 value: joinPromptValues(batch.map(c => c.value)),
@@ -2216,6 +2239,7 @@ function runHeadlessStreaming(
           // const-capture: TS loses `while ((command = dequeue()))` narrowing
           // inside the closure.
           const cmd = command
+          try {
           await runWithWorkload(cmd.workload ?? options.workload, async () => {
             for await (const message of ask({
               commands: uniqBy(
@@ -2234,7 +2258,10 @@ function runHeadlessStreaming(
               maxTurns: options.maxTurns,
               maxBudgetUsd: options.maxBudgetUsd,
               taskBudget: options.taskBudget,
-              canUseTool,
+              canUseTool: (...args) => {
+                userMessageEdit.markActivity()
+                return canUseTool(...args)
+              },
               userSpecifiedModel: activeUserSpecifiedModel,
               fallbackModel: options.fallbackModel,
               jsonSchema: getInitJsonSchema() ?? options.jsonSchema,
@@ -2260,8 +2287,9 @@ function runHeadlessStreaming(
               abortController,
               replayUserMessages: options.replayUserMessages,
               includePartialMessages: options.includePartialMessages,
-              handleElicitation: (serverName, params, elicitSignal) =>
-                structuredIO.handleElicitation(
+              handleElicitation: (serverName, params, elicitSignal) => {
+                userMessageEdit.markActivity()
+                return structuredIO.handleElicitation(
                   serverName,
                   params.message,
                   undefined,
@@ -2269,7 +2297,19 @@ function runHeadlessStreaming(
                   params.mode,
                   params.url,
                   'elicitationId' in params ? params.elicitationId : undefined,
-                ),
+                )
+              },
+              beforeSubmitMessages: replacementJob ? async prepared => {
+                if (!userMessageEdit.snapshot().can_replace || userMessageEdit.snapshot().user_message_id !== replacementJob.target || hasCommandsInQueue() || getRunningTasks(getAppState()).length || !prepared.some(message => message.uuid === cmd.uuid && message.type === 'user')) {
+                  throw new Error('User message edit target changed or session is busy')
+                }
+                await commitUserMessageReplacement(mutableMessages, replacementJob.target, [], () => replaceUserMessageTranscript(replacementJob.target, prepared))
+                replacementJob.committed = true
+                replacementJobs.delete(cmd.uuid!)
+                userMessageEdit.receive(cmd.uuid)
+                bridgeLastForwardedIndex = Math.min(bridgeLastForwardedIndex, mutableMessages.length)
+                replacementJob.resolve()
+              } : undefined,
               agents: currentAgents,
               orphanedPermission: cmd.orphanedPermission,
               setSDKStatus: status => {
@@ -2323,6 +2363,13 @@ function runHeadlessStreaming(
               }
             }
           }) // end runWithWorkload
+          } catch (error) {
+            if (!replacementJob || replacementJob.committed) throw error
+            replacementJobs.delete(cmd.uuid!)
+            replacementJob.reject(error)
+            for (const uuid of batchUuids) notifyCommandLifecycle(uuid, 'completed')
+            continue
+          }
 
           for (const uuid of batchUuids) {
             notifyCommandLifecycle(uuid, 'completed')
@@ -2596,7 +2643,23 @@ function runHeadlessStreaming(
           output.enqueue(event)
         }
       }
+      if (getRunningTasks(getAppState()).length || hasCommandsInQueue()) userMessageEdit.markActivity()
+      userMessageEdit.settle()
+      const editState = userMessageEdit.snapshot()
+      if (editState.can_replace && latestEditableUser(mutableMessages)?.uuid === editState.user_message_id) {
+        try {
+          await flushSessionStorage()
+          await markUserMessageReplaceable(editState.user_message_id!)
+          const target = mutableMessages.find(message => message.uuid === editState.user_message_id)
+          if (target) target.userMessageEditState = 'interrupted-thinking'
+        } catch (error) {
+          userMessageEdit.markActivity()
+          logError(toError(error))
+        }
+      }
       running = false
+      resolveRunSettled?.()
+      resolveRunSettled = undefined
       // Start idle timer when we finish processing and are waiting for input
       idleTimeout.start()
     }
@@ -2969,6 +3032,7 @@ function runHeadlessStreaming(
       : prev
   }
   const interruptSession = async () => {
+    userMessageEdit.interrupt()
     userInterrupted = true
     abortController?.abort()
     suggestionState.abortController?.abort()
@@ -3004,6 +3068,7 @@ function runHeadlessStreaming(
       // isReplay 与兄弟帧一致（非本地 stdin 输入的重放语义）；dogeRemote
       // 是本地超集键，schema 校验方（zod 默认忽略未知键）不受影响。
       const remotePromptUuid = randomUUID()
+      userMessageEdit.receive(remotePromptUuid)
       enqueue({
         value: prepareRemotePrompt(text),
         mode: 'prompt' as const,
@@ -3109,6 +3174,41 @@ function runHeadlessStreaming(
             }))
           }
           sendControlResponseSuccess(message)
+        } else if (message.request.subtype === 'get_user_message_edit_state') {
+          // The Stop ACK is intentionally quick. A thinking-only stopped run
+          // still needs its finally/persistence boundary before this can be
+          // used by a host to choose replacement versus ordinary append.
+          if (userInterrupted && running && !hasCommandsInQueue() && getRunningTasks(getAppState()).length === 0) await runSettled
+          const state = userMessageEdit.snapshot()
+          const resumesWorkflow = typeof message.request.text === 'string' && workflowResumeRequiresNormalInput(message.request.text, getTranscriptPath(), getAppState().tasks, message.request.has_images === true)
+          sendControlResponseSuccess(message, { ...state, can_replace: state.can_replace && !resumesWorkflow && !running && !hasCommandsInQueue() && getRunningTasks(getAppState()).length === 0 })
+        } else if (message.request.subtype === 'replace_user_message') {
+          try {
+            const request = SDKControlReplaceUserMessageRequestSchema().parse(message.request)
+            if (running && (!userInterrupted || hasCommandsInQueue() || getRunningTasks(getAppState()).length)) throw new Error('Session is busy')
+            // interrupt ACK can precede the main query's finally and transcript drain.
+            await runSettled
+            await flushSessionStorage()
+            const state = userMessageEdit.snapshot()
+            if (!state.can_replace || state.user_message_id !== request.user_message_id) throw new Error('User message is not replaceable or target is stale')
+            if (running || hasCommandsInQueue() || getRunningTasks(getAppState()).length || replacementJobs.size) throw new Error('Session is busy')
+            if (request.replacement.uuid === request.user_message_id || receivedMessageUuids.has(request.replacement.uuid as UUID) || await doesMessageExistInSession(getSessionId() as UUID, request.replacement.uuid as UUID)) throw new Error('Replacement UUID already exists')
+            const replacement = { type: 'user', uuid: request.replacement.uuid, message: { role: 'user', content: request.replacement.content }, image_paths: request.replacement.image_paths }
+            const intake = materializeStdinImageBlocks(replacement as SDKUserMessage, await resolveAndPrepend(replacement as SDKUserMessage, request.replacement.content as any))
+            // Match the actual final-block command parser after image intake;
+            // neither local slash commands nor implicit workflow resume may
+            // run before the durable replacement commit.
+            if (localInputText(intake.content)?.startsWith('/')) throw new Error('Slash commands must use the normal user input channel')
+            if (workflowResumeRequiresNormalInput(intake.content, getTranscriptPath(), getAppState().tasks, Object.values(intake.pastedContents ?? {}).some(isValidImagePaste))) throw new Error('Workflow continuation must use the normal user input channel')
+            const committed = new Promise<void>((resolve, reject) => replacementJobs.set(request.replacement.uuid, { target: request.user_message_id, committed: false, resolve, reject }))
+            enqueue({ mode: 'prompt', value: intake.content, pastedContents: intake.pastedContents, uuid: request.replacement.uuid })
+            void run()
+            await committed
+            trackReceivedMessageUuid(request.replacement.uuid as UUID)
+            sendControlResponseSuccess(message, { user_message_id: request.replacement.uuid })
+          } catch (error) {
+            sendControlResponseError(message, errorMessage(error))
+          }
         } else if (message.request.subtype === 'end_session') {
           await interruptSession()
           preserveWorktreeOnShutdown = message.request.reason === 'app_replace'
@@ -4447,6 +4547,7 @@ function runHeadlessStreaming(
       // otherwise a stdin image is base64-only pixels the model can see but
       // not locate or edit. image_paths (aligned by image-block order) lets
       // an embedding shell point at the original file instead.
+      userMessageEdit.receive(message.uuid)
       const intake = materializeStdinImageBlocks(
         message,
         await resolveAndPrepend(message, message.message.content),

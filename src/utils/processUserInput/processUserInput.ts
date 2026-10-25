@@ -64,7 +64,7 @@ import {
   replaceUltraplanKeyword,
 } from '../ultraplan/keyword.js'
 import { processTextPrompt } from './processTextPrompt.js'
-import { isWorkflowContinue } from '../../tools/WorkflowTool/checkpoint.js'
+import { isWorkflowResumeInput } from '../../tools/WorkflowTool/workflowResumeInput.js'
 import { hasPermissionsToUseTool } from '../permissions/permissions.js'
 export type ProcessUserInputContext = ToolUseContext & LocalJSXCommandContext
 
@@ -107,6 +107,7 @@ export async function processUserInput({
   bridgeOrigin,
   isMeta,
   skipAttachments,
+  allowLocalCommands,
 }: {
   input: string | Array<ContentBlockParam>
   /**
@@ -144,6 +145,8 @@ export async function processUserInput({
    */
   isMeta?: boolean
   skipAttachments?: boolean
+  /** A prompt replacement may prepare content, but cannot execute local commands before commit. */
+  allowLocalCommands?: boolean
 }): Promise<ProcessUserInputBaseResult> {
   const inputString = typeof input === 'string' ? input : null
   // Immediately show the user input prompt while we are still processing the input.
@@ -175,6 +178,7 @@ export async function processUserInput({
     isMeta,
     skipAttachments,
     preExpansionInput,
+    allowLocalCommands,
   )
   queryCheckpoint('query_process_user_input_base_end')
 
@@ -303,6 +307,7 @@ async function processUserInputBase(
   isMeta?: boolean,
   skipAttachments?: boolean,
   preExpansionInput?: string,
+  allowLocalCommands = true,
 ): Promise<ProcessUserInputBaseResult> {
   let inputString: string | null = null
   let precedingInputBlocks: ContentBlockParam[] = []
@@ -355,10 +360,9 @@ async function processUserInputBase(
     throw new Error(`Mode: ${mode} requires a string input.`)
   }
 
-  if (mode === 'prompt' && !isMeta && inputString !== null && precedingInputBlocks.length === 0 &&
-      !Object.values(pastedContents ?? {}).some(isValidImagePaste) && isWorkflowContinue(inputString)) {
+  if (mode === 'prompt' && !isMeta && inputString !== null && isWorkflowResumeInput(normalizedInput, Object.values(pastedContents ?? {}).some(isValidImagePaste))) {
     const { resumeWorkflowTask } = await import('../../tools/WorkflowTool/engine.js')
-    const value = await resumeWorkflowTask({ ...context, canUseTool: canUseTool ?? context.canUseTool ?? hasPermissionsToUseTool })
+    const value = await resumeWorkflowTask({ ...context, canUseTool: canUseTool ?? context.canUseTool ?? hasPermissionsToUseTool }, allowLocalCommands)
     if (value) return {
       messages: [createUserMessage({ content: inputString, uuid }), createCommandInputMessage(`<local-command-stdout>${value}</local-command-stdout>`)],
       shouldQuery: false, resultText: value,
@@ -586,6 +590,7 @@ async function processUserInputBase(
     !effectiveSkipSlash &&
     inputString.startsWith('/')
   ) {
+    if (!allowLocalCommands) throw new Error('Local commands must use the normal user input channel')
     const { processSlashCommand } = await import('./processSlashCommand.js')
     const slashResult = await processSlashCommand(
       inputString,

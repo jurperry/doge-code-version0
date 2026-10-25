@@ -13,6 +13,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  rename,
   stat,
   unlink,
   writeFile,
@@ -99,6 +100,7 @@ import type { ContentReplacementRecord } from './toolResultStorage.js'
 import { validateUuid } from './uuid.js'
 import { isApiRetryStatus, relinkDeferredApiRetries } from './apiRetryTranscript.js'
 import { enqueueSdkEvent } from './sdkEventQueue.js'
+import { rewriteUserMessageTranscript } from './userMessageEdit.js'
 
 // Cache MACRO.VERSION at module level to work around bun --define bug in async contexts
 // See: https://github.com/oven-sh/bun/issues/26168
@@ -940,6 +942,41 @@ class Project {
     })
   }
 
+  /** Local editing is a durable transaction, unlike best-effort retry tombstones. */
+  async editUserMessage(targetUuid: string, replacement?: Message[]): Promise<void> {
+    if (this.shouldSkipPersistence() || this.remoteIngressUrl || this.internalEventWriter) {
+      throw new Error('User message editing requires local session persistence')
+    }
+    if (this.sessionFile === null) {
+      // Headless --resume may not yet have submitted a new prompt, so its
+      // existing transcript pointer is still lazy. Do not create a new file.
+      await stat(getTranscriptPath())
+      await this.materializeSessionFile()
+    }
+    await this.flush()
+    const messageSet = await getSessionMessages(getSessionId() as UUID)
+    await this.mutateFile(async () => {
+      if (!this.sessionFile) throw new Error('Session transcript is unavailable')
+      const content = await readFile(this.sessionFile, 'utf8')
+      const rewritten = rewriteUserMessageTranscript(content, targetUuid, replacement)
+      const remaining = new Set(rewritten.split('\n').filter(line => line.trim()).map(line => jsonParse(line)).filter(isTranscriptMessage).map(entry => entry.uuid))
+      const text = replacement ? getFirstMeaningfulUserMessageTextContent(replacement) : undefined
+      const temporary = this.sessionFile + '.edit-' + randomUUID() + '.tmp'
+      try {
+        await writeFile(temporary, rewritten, { mode: 0o600, flag: 'wx' })
+        await rename(temporary, this.sessionFile)
+      } finally {
+        await unlink(temporary).catch(() => {})
+      }
+      // Keep dedup consistent with the committed file before the normal prompt writer runs.
+      if (replacement) {
+        for (const uuid of messageSet) if (!remaining.has(uuid)) messageSet.delete(uuid)
+        for (const message of replacement) messageSet.add(message.uuid as UUID)
+        if (text) this.currentSessionLastPrompt = text.replace(/\n/g, ' ').trim().slice(0, 200)
+      }
+    })
+  }
+
   /**
    * Remove a message from the transcript by UUID.
    * Used for tombstoning orphaned messages from failed streaming attempts.
@@ -1573,6 +1610,14 @@ export async function recordQueueOperation(queueOp: QueueOperationMessage) {
  */
 export async function removeTranscriptMessage(targetUuid: UUID, agentId?: string): Promise<void> {
   await getProject().removeMessageByUuid(targetUuid, agentId)
+}
+
+export async function markUserMessageReplaceable(targetUuid: string): Promise<void> {
+  await getProject().editUserMessage(targetUuid)
+}
+
+export async function replaceUserMessageTranscript(targetUuid: string, replacement: Message[]): Promise<void> {
+  await getProject().editUserMessage(targetUuid, cleanMessagesForLogging(replacement))
 }
 
 /** Billing fact or retained-attempt correction, outside the model transcript. */

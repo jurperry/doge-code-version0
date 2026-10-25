@@ -214,6 +214,7 @@ export class QueryEngine {
       uuid?: string
       isMeta?: boolean
       pastedContents?: Record<number, PastedContent>
+      beforeSubmitMessages?: (messages: Message[]) => Promise<void>
     },
   ): AsyncGenerator<SDKMessage, void, unknown> {
     const {
@@ -439,7 +440,12 @@ export class QueryEngine {
       isMeta: options?.isMeta,
       querySource: 'sdk',
       canUseTool: wrappedCanUseTool,
+      allowLocalCommands: !options?.beforeSubmitMessages,
     })
+
+    // Hosts may commit a stopped-prompt replacement after normal input/image
+    // preparation, but before either live context or API execution changes.
+    await options?.beforeSubmitMessages?.(messagesFromUserInput)
 
     // Push new messages, including user input and any attachments
     this.mutableMessages.push(...messagesFromUserInput)
@@ -1261,6 +1267,7 @@ export async function* ask({
   agents = [],
   setSDKStatus,
   orphanedPermission,
+  beforeSubmitMessages,
 }: {
   commands: Command[]
   prompt: string | Array<ContentBlockParam>
@@ -1293,6 +1300,7 @@ export async function* ask({
   agents?: AgentDefinition[]
   setSDKStatus?: (status: SDKStatus) => void
   orphanedPermission?: OrphanedPermission
+  beforeSubmitMessages?: (messages: Message[]) => Promise<void>
 }): AsyncGenerator<SDKMessage, void, unknown> {
   const engine = new QueryEngine({
     cwd,
@@ -1337,6 +1345,7 @@ export async function* ask({
       uuid: promptUuid,
       isMeta,
       pastedContents,
+      beforeSubmitMessages,
     })
   } finally {
     setReadFileCache(engine.getReadFileState())

@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-24 已停止用户提示的原位替换（2.1.313，App 消息编辑配套）
+
+1. 遇到问题：headless 仅有 interrupt，宿主无法可靠区分纯思考人工停止与已有正文/工具的轮次；Stop 应答早于主 run finally，外部改 JSONL 会使内存、磁盘及下一次模型上下文分裂。重连还会加入合成 assistant 哨兵，不能把它当真实输出。
+2. 解决方法：新增 get_user_message_edit_state / replace_user_message 控制，按真实 user UUID、人工停止与 sticky activity 保守授权；查询及替换等待停止收敛，队列/任务占用立即拒绝替换。正常提示/图片预处理后、模型执行前原子提交转录，再更新内存；失败不追加执行。显式标记中断与恢复哨兵，资格写在 user 上供重连恢复；原始历史行与空行逐字保留，费用转为独立 usage 事实，检查点/会话配置不清理。资格查询可携带 text/has_images，按真实检查点与现有恢复分类把隐式工作流继续沿普通输入追加；无检查点或带图片的普通继续不误降级。替换前置与实际执行点同时拦截恢复工作流/末内容块斜杠命令，避免预处理先启动任务、消费检查点或修改配置再报错。新增聚焦与相邻回归 11 文件 71 测试通过，真实 source stream-json + localhost API 黑盒 28 项通过（忙碌、图片、Stop 应答前替换、首字、过期目标、重连、检查点无副作用及普通工作流恢复）；独立 CLI 复审无剩余产品问题，版本冒烟 2.1.313。全量/编译安装由邻仓本轮统一完成；用户于 2026-10-25 授权提交、合并 main 与删除功能分支。
+3. 代码位置：src/utils/userMessageEdit{,.test}.ts、sessionStorage{,.userMessageEdit.test}.ts、messages.ts、conversationRecovery.ts、processUserInput/processUserInput.ts、src/tools/WorkflowTool/{engine,workflowResumeInput,workflowResumeInput.test}.ts、src/QueryEngine.ts、src/cli/print.ts、src/entrypoints/sdk/controlSchemas.ts；tools/e2e-user-message-edit.ts。全量 125 文件 948 pass / 0 fail；编入 App 0.2.168 静默安装，内置版本 2.1.313 与 build/bin 哈希一致，安装版全清单 67 个脚本最终通过。设计、全量和安装证据归邻仓 docs/specs/2026-10-24-edit-user-messages-{design,plan}.md 与对应 validation；实际 CLI commit 由邻仓 App 提交说明记录。
+
 ## 2026-10-21 /clear 配置语义与模型显示一致性（2.1.312 / App 0.2.166）
 
 1. 遇到问题：会话切到 DeepSeek 后 `/model` 取消提示仍读取 GLM 基线；屏幕外冻结的欢迎区可能保留旧模型，clear 的 conversationId 没有使 LogoHeader 重新创建。App 上一轮把 clear 错当全新对话重置，用户明确要求清上下文时保留已有配置。

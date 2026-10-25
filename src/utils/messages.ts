@@ -550,14 +550,14 @@ export function createUserInterruptionMessage({
 }): UserMessage {
   const content = toolUse ? INTERRUPT_MESSAGE_FOR_TOOL_USE : INTERRUPT_MESSAGE
 
-  return createUserMessage({
+  return { ...createUserMessage({
     content: [
       {
         type: 'text',
         text: content,
       },
     ],
-  })
+  }), isUserInterruption: true }
 }
 
 /**
