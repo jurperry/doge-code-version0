@@ -11,13 +11,13 @@ const slow = process.argv.includes('--timeout')
 const providers = slow ? ['anthropic'] : ['anthropic', 'openai', 'responses']
 const humanAnswers = { 'Implementation choice?': 'First', 'Verification choices?': 'First check' }
 
-async function run(provider: string, action: 'human' | 'timeout' | 'interrupt' | 'no-host') {
+async function run(provider: string, action: 'human' | 'timeout' | 'interrupt' | 'no-host' | 'auto-deny') {
   const root = join(output, `${provider}-${action}`)
   const cwd = join(root, 'project')
   const config = join(root, '.doge')
   const temp = join(root, 'tmp')
   for (const path of [cwd, config, temp]) mkdirSync(path, { recursive: true })
-  const fixture = await createQuestionServer(provider)
+  const fixture = await createQuestionServer(provider, fixtureQuestions, action !== 'auto-deny')
   writeFileSync(join(config, 'settings.json'), JSON.stringify({ model: 'auto-question-test', cleanupPeriodDays: 36500, claudeMdExcludes: ['**/AGENTS.md', '**/CLAUDE.md'] }))
   const env = { ...process.env }
   for (const key of Object.keys(env)) if (/^(ANTHROPIC_|DOGE_|CLAUDE_CODE_)/.test(key)) delete env[key]
@@ -67,13 +67,20 @@ async function run(provider: string, action: 'human' | 'timeout' | 'interrupt' |
         const stop = setInterval(() => {
           if (!stderr.includes('等待用户回答')) return
           clearInterval(stop)
-          assert.equal(fixture.requests.length, 1)
+          assert.equal(fixture.requests.length, 2)
           resolveResult({ interrupted: true })
         }, 100)
         child.once('exit', () => clearInterval(stop))
       }
     })
-    if (action === 'interrupt' || action === 'no-host') assert.equal(fixture.requests.length, 1, 'interruption cannot continue the model turn')
+    if (action === 'auto-deny') {
+      assert.equal(card, undefined, 'Auto execution must never ask its host')
+      assert.equal(result.is_error, false, result.result)
+      assert.match(result.result, /AUTO_QUESTION_DONE/)
+      const results = frames.flatMap(frame => frame.type === 'user' && Array.isArray(frame.message?.content) ? frame.message.content : [])
+      assert.ok(results.some(block => block.type === 'tool_result' && block.is_error && String(block.content).includes('Auto execution cannot ask')))
+      assert.ok(!frames.some(frame => frame.tool_use_result?.answers), 'a refused question cannot manufacture consent')
+    } else if (action === 'interrupt' || action === 'no-host') assert.equal(fixture.requests.length, 2, 'interruption cannot continue the model turn')
     else {
       assert.equal(result.is_error, false, result.result)
       assert.match(result.result, /AUTO_QUESTION_DONE/)
@@ -89,7 +96,7 @@ async function run(provider: string, action: 'human' | 'timeout' | 'interrupt' |
         // A late host response after cancellation cannot create another result.
         send({ type: 'control_response', response: { request_id: card.request_id, subtype: 'success', response: { behavior: 'allow', updatedInput: { ...fixtureQuestions, answers: humanAnswers } } } })
         await new Promise(resolve => setTimeout(resolve, 150))
-        assert.equal(fixture.requests.length, 2)
+        assert.equal(fixture.requests.length, 3)
       }
     }
     console.log(`PASS ${provider}/${action}: ${fixture.requests.length} API requests${action === 'timeout' ? `; real wait=${cancelledAt - askedAt}ms` : ''}`)
@@ -104,5 +111,8 @@ async function run(provider: string, action: 'human' | 'timeout' | 'interrupt' |
     rmSync(root, { recursive: true, force: true })
   }
 }
-for (const provider of providers) await run(provider, slow ? 'timeout' : 'human')
+for (const provider of providers) {
+  await run(provider, slow ? 'timeout' : 'human')
+  if (!slow) await run(provider, 'auto-deny')
+}
 if (!slow) { await run('anthropic', 'interrupt'); await run('anthropic', 'no-host') }

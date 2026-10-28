@@ -191,7 +191,8 @@ export function createInProcessCanUseTool(
         }
         // A headless runner without a permission host cannot expose a mailbox
         // dialog. It still owns the normal five-minute fallback and cancellation.
-        return waitForAutoQuestion({ input: result.updatedInput ?? input, deadlineMs, signal: abortController.signal })
+        return waitForAutoQuestion({ input: result.updatedInput ?? input, deadlineMs, signal: abortController.signal,
+          getPermissionContext: () => toolUseContext.getAppState().toolPermissionContext })
       }
     }
 

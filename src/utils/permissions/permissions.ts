@@ -25,7 +25,7 @@ import {
 import { plural } from '../stringUtils.js'
 import { isAutoBypassActive, isZeroAskAutoActive, isZeroAskPlanInterlude } from './autoBypass.js'
 import { isAutoPlanOperationAllowed } from './autoPlan.js'
-import { isAutoQuestionContext } from './autoQuestion.js'
+import { getAutoQuestionRejection, isAutoQuestionContext } from './autoQuestion.js'
 import { ASK_USER_QUESTION_TOOL_NAME } from '../../tools/AskUserQuestionTool/prompt.js'
 import { permissionModeTitle } from './PermissionMode.js'
 import type {
@@ -1254,11 +1254,14 @@ async function hasPermissionsToUseToolInner(
     return toolPermissionResult
   }
 
-  // Ask is the sole Auto interaction exception, after deny and before the
-  // automatic Plan read-only fast path. Other tools keep their existing rules.
-  if (tool.name === ASK_USER_QUESTION_TOOL_NAME &&
-      (zeroAskAuto || zeroAskPlanInterlude) && toolPermissionResult.behavior === 'ask') {
-    return toolPermissionResult
+  // Auto execution cannot open a question channel or manufacture consent.
+  // Only its Plan interlude may ask; deny rules above remain authoritative.
+  if (tool.name === ASK_USER_QUESTION_TOOL_NAME) {
+    const rejection = getAutoQuestionRejection(appState.toolPermissionContext)
+    if (rejection) return rejection
+    if (zeroAskPlanInterlude && toolPermissionResult.behavior === 'ask') {
+      return toolPermissionResult
+    }
   }
 
   // doge fork: Auto plan interlude — ExitPlanMode is auto-approved so the
@@ -1295,7 +1298,7 @@ async function hasPermissionsToUseToolInner(
       return toolPermissionResult
     }
     // Zero-ask Auto: fall through to 2a — the bypass allow carries the
-    // tool's updatedInput (e.g. AskUserQuestion's auto-filled answers).
+    // tool's updatedInput. Questions were handled before this bypass.
   }
 
   // 1f. Content-specific ask rules from tool.checkPermissions take precedence

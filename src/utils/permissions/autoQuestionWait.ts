@@ -1,7 +1,9 @@
-import { buildAutoQuestionDecision } from './autoQuestion.js'
+import { buildAutoQuestionDecision, getAutoQuestionRejection } from './autoQuestion.js'
 import type { PermissionDecision } from './PermissionResult.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import { ASK_USER_QUESTION_TOOL_NAME } from '../../tools/AskUserQuestionTool/prompt.js'
+import type { ToolPermissionContext } from '../../Tool.js'
+import { subscribeToPermissionModeChanges } from './currentPermissionMode.js'
 
 type Scheduler = {
   now(): number
@@ -47,10 +49,13 @@ export async function waitForAutoQuestion(options: {
   signal: AbortSignal
   decision?: Promise<PermissionDecision | undefined>
   onTimeout?(): void
+  getPermissionContext?(): Pick<ToolPermissionContext, 'mode'>
+  onPolicyRejection?(): void
   scheduler?: Scheduler
 }): Promise<PermissionDecision> {
   let wait: { dispose(): void } | undefined
   let onAbort: () => void = () => {}
+  let unsubscribeMode: (() => void) | undefined
   try {
     return await new Promise<PermissionDecision>((resolve, reject) => {
       let settled = false
@@ -61,9 +66,27 @@ export async function waitForAutoQuestion(options: {
         resolve(decision)
         return true
       }
+      // The channel is already running. Always consume its failure, including
+      // synchronous abort/policy winners that return before installing a timer.
+      options.decision?.then(decision => {
+        if (decision) finish(decision)
+      }, error => {
+        if (settled) return
+        settled = true
+        reject(error)
+      })
       onAbort = () => finish({ behavior: 'deny', message: 'Question request was aborted.' })
       if (options.signal.aborted) { onAbort(); return }
       options.signal.addEventListener('abort', onAbort, { once: true })
+      if (options.getPermissionContext) {
+        const checkPolicy = () => {
+          const rejection = getAutoQuestionRejection(options.getPermissionContext!())
+          if (rejection && finish(rejection)) options.onPolicyRejection?.()
+        }
+        unsubscribeMode = subscribeToPermissionModeChanges(checkPolicy)
+        checkPolicy()
+        if (settled) return
+      }
       if (options.deadlineMs !== undefined) {
         wait = createAutoQuestionWait({
           deadlineMs: options.deadlineMs,
@@ -74,16 +97,10 @@ export async function waitForAutoQuestion(options: {
           },
         })
       }
-      options.decision?.then(decision => {
-        if (decision) finish(decision)
-      }, error => {
-        if (settled) return
-        settled = true
-        reject(error)
-      })
     })
   } finally {
     wait?.dispose()
+    unsubscribeMode?.()
     options.signal.removeEventListener('abort', onAbort)
   }
 }
@@ -94,9 +111,16 @@ export function serializeQuestionPermissions(canUseTool: CanUseToolFn): CanUseTo
   return (...args) => {
     if (args[0].name !== ASK_USER_QUESTION_TOOL_NAME) return canUseTool(...args)
     const signal = args[2].abortController.signal
-    const decision = tail.then(() => signal.aborted
-      ? { behavior: 'deny' as const, message: 'Question request was aborted.' }
-      : canUseTool(...args))
+    const decision = tail.then(() => {
+      if (signal.aborted) return { behavior: 'deny' as const, message: 'Question request was aborted.' }
+      // A teammate can pass a Plan-era forceDecision while another question
+      // owns the host. Recheck current Auto policy when this slot actually runs.
+      if (args[5]?.behavior !== 'deny') {
+        const rejection = getAutoQuestionRejection(args[2].getAppState().toolPermissionContext)
+        if (rejection) return rejection
+      }
+      return canUseTool(...args)
+    })
     tail = decision.catch(() => {})
     // A queued question can abort immediately; its queue slot is skipped when
     // the preceding interaction settles, without letting later slots overtake.

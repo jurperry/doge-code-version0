@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-27 Auto 仅在 Plan 中提问（2.1.314 / App 0.2.172）
+
+1. 遇到问题：Auto 执行和收尾阶段允许 AskUserQuestion 五分钟交互，动态提示鼓励继续提问，而自动 EnterPlanMode 的结果仍禁止讨论；排队队友问题沿用旧 forceDecision，活动问题切 Auto 后也未撤销。
+2. 解决方法：执行阶段统一返回带自主推进指导的拒绝，不伪造用户答案；自动 Plan 保留讨论和300000ms期限，ExitPlanMode 仍直接恢复 Auto，其他模式保留原交互。问题出队、TUI激活和活动通道使用当前 context 校验；共享权限模式订阅取消 stdio/MCP/无宿主问题，计时与监听随一次性决胜释放，不终止模型回合。独立审查实际复现并复验三处竞态，包括同步拒绝时必须消费已启动子请求的取消失败；最终隔离全量125文件954测试通过，三协议source/compiled/installed e2e通过，CLI 2.1.314编入App 0.2.172，67脚本最终证据与恢复限制记邻仓validation。
+3. 代码位置：src/utils/permissions/{autoBypass,autoQuestion,autoQuestionWait,currentPermissionMode,permissions}.ts、src/constants/prompts.ts、src/tools/EnterPlanModeTool/EnterPlanModeTool.ts、src/hooks/toolPermission/handlers/interactiveHandler.ts、src/cli/{print,structuredIO}.ts、src/utils/swarm/inProcessRunner.ts；tools/auto-{plan,question,question-channels,question-lifecycle}.test.ts、auto-question-fixture.ts、e2e-auto-question.ts。App 补自由文本答案，完整设计/验收见 E:/ClaudeCode/doge-code-app/docs/{specs/2026-10-27-auto-plan-questions-design,validation/2026-10-27-auto-plan-questions-validation}.md；用户于2026-10-28授权两仓提交、合并main和删除本轮功能分支，实际整合以Git历史和邻仓验收记录为准。
+
 ## 2026-10-24 已停止用户提示的原位替换（2.1.313，App 消息编辑配套）
 
 1. 遇到问题：headless 仅有 interrupt，宿主无法可靠区分纯思考人工停止与已有正文/工具的轮次；Stop 应答早于主 run finally，外部改 JSONL 会使内存、磁盘及下一次模型上下文分裂。重连还会加入合成 assistant 哨兵，不能把它当真实输出。

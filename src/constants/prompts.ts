@@ -448,8 +448,8 @@ function getSimpleToneAndStyleSection(): string {
 }
 
 // doge fork: Auto (bypassPermissions) zero-ask guidance. The user is never
-// prompted in Auto — tool calls are auto-approved and AskUserQuestion is
-// answered automatically — so the model must not try to consult the user,
+// prompted in Auto execution — tool calls are auto-approved and AskUserQuestion is
+// denied — so the model must not try to consult the user,
 // and should route planning through the auto-approved plan interlude.
 // Mode reads go through the live mirror (currentPermissionMode.ts); the
 // section is registered uncached so it flips with Shift+Tab /auto /plan.
@@ -459,7 +459,7 @@ function getZeroAskAutoSection(): string | null {
   }
   if (getCurrentPermissionMode() !== 'bypassPermissions') return null
   return `# Auto mode
-Auto mode is active: tools are auto-approved, except ${ASK_USER_QUESTION_TOOL_NAME} which can ask for useful clarification. The user has five minutes to submit answers; after that the recommended choices are adopted automatically. Mark recommended options clearly with (Recommended), and continue with automatically adopted decisions rather than repeating the same questions. If the task needs planning, call EnterPlanMode to draft a plan, then ExitPlanMode when ready — approval is automatic and execution resumes in Auto mode.`
+Auto execution is active: tools are auto-approved, while ${ASK_USER_QUESTION_TOOL_NAME} is unavailable. Do not ask the user questions through tools or plain text during execution or completion, including questions about committing, merging, deleting branches, or choosing a permission mode. Continue autonomously using the existing request and authorization. Do not invent user consent: when an action lacks authorization, finish the authorized work and state what remains without asking a question. If the task genuinely needs planning, call EnterPlanMode automatically; clarification and discussion are allowed only inside Plan. Do not re-enter Plan merely to request completion or git approval. When the plan is ready, call ExitPlanMode — approval is automatic and execution resumes in Auto without asking which permission mode to use.`
 }
 
 export async function getSystemPrompt(

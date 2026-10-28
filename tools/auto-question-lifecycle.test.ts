@@ -71,3 +71,12 @@ test('hook pass-through is not a submitted answer and abort still resolves', asy
   await Promise.resolve(); expect(c.active()).toBe(true)
   controller.abort(); expect((await result).behavior).toBe('deny'); expect(c.active()).toBe(false)
 })
+
+test('an immediate Auto rejection still consumes cancellation failure from the started channel', async () => {
+  let rejectDecision!: (error: Error) => void
+  const decision = new Promise<any>((_resolve, reject) => { rejectDecision = reject })
+  const result = await waitForAutoQuestion({ input, deadlineMs: undefined, signal: new AbortController().signal, decision,
+    getPermissionContext: () => ({ mode: 'bypassPermissions' }), onPolicyRejection: () => rejectDecision(new Error('cancelled child request')) })
+  expect(result.behavior).toBe('deny')
+  await new Promise(resolve => setTimeout(resolve, 10))
+})

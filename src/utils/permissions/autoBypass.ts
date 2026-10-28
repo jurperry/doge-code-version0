@@ -17,10 +17,10 @@ export function isAutoBypassActive(
 }
 
 /**
- * doge fork: Auto releases ordinary tool prompts. AskUserQuestion has its
- * own interactive five-minute answering window. While active, the pipeline releases other
- * prompt-shaped decision (tool ask rules 1b, requiresUserInteraction tools
- * 1e except AskUserQuestion, content ask rules 1f, safety checks 1g) to the 2a bypass allow;
+ * doge fork: Auto releases ordinary tool prompts and denies AskUserQuestion.
+ * Questions are interactive only after entering Plan. While active, the pipeline
+ * releases other prompt-shaped decisions (tool ask rules 1b, interaction tools
+ * 1e, content ask rules 1f, safety checks 1g) to the 2a bypass allow;
  * explicit deny rules (1a/1d) still win. The killswitch
  * (settings/GrowthBook) turns the whole behavior off.
  */

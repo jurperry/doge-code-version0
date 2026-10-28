@@ -30,9 +30,10 @@ import type { PermissionUpdate } from '../../../utils/permissions/PermissionUpda
 import { hasPermissionsToUseTool } from '../../../utils/permissions/permissions.js'
 import type { PermissionContext } from '../PermissionContext.js'
 import { createResolveOnce } from '../PermissionContext.js'
-import { AUTO_QUESTION_TIMEOUT_MS, buildAutoQuestionDecision, getAutoQuestionDeadline } from '../../../utils/permissions/autoQuestion.js'
+import { buildAutoQuestionDecision, getAutoQuestionDeadline, getAutoQuestionRejection } from '../../../utils/permissions/autoQuestion.js'
 import { createAutoQuestionWait } from '../../../utils/permissions/autoQuestionWait.js'
 import { ASK_USER_QUESTION_TOOL_NAME } from '../../../tools/AskUserQuestionTool/prompt.js'
+import { subscribeToPermissionModeChanges } from '../../../utils/permissions/currentPermissionMode.js'
 import type { ToolUseConfirm } from '../../../components/permissions/PermissionRequest.js'
 
 type InteractivePermissionParams = {
@@ -80,12 +81,14 @@ function handleInteractivePermission(
   const signal = ctx.toolUseContext.abortController.signal
   let bridgeUnsubscribe: (() => void) | undefined
   let imUnsubscribe: (() => void) | undefined
+  let modeUnsubscribe: (() => void) | undefined
   const claim = () => {
     if (!claimOnce()) return false
     questionWait?.dispose()
     signal.removeEventListener('abort', abortPermission)
     bridgeUnsubscribe?.()
     imUnsubscribe?.()
+    modeUnsubscribe?.()
     return true
   }
   let userInteracted = false
@@ -129,6 +132,22 @@ function handleInteractivePermission(
     resolveOnce(ctx.cancelAndAbort(undefined, true))
   }
 
+  function rejectAutoExecutionQuestion(): boolean {
+    if (ctx.tool.name !== ASK_USER_QUESTION_TOOL_NAME) return false
+    const rejection = getAutoQuestionRejection(ctx.toolUseContext.getAppState().toolPermissionContext)
+    if (!rejection) return false
+    if (claim()) {
+      if (bridgeCallbacks && bridgeRequestId) bridgeCallbacks.cancelRequest(bridgeRequestId)
+      if (imRemoteCallbacks && imRemoteRequestId) imRemoteCallbacks.cancelRequest(imRemoteRequestId)
+      channelUnsubscribe?.()
+      ctx.removeFromQueue()
+      resolveOnce(rejection)
+    }
+    return true
+  }
+  if (rejectAutoExecutionQuestion()) return
+  if (ctx.tool.name === ASK_USER_QUESTION_TOOL_NAME) modeUnsubscribe = subscribeToPermissionModeChanges(rejectAutoExecutionQuestion)
+
   ctx.pushToQueue({
     assistantMessage: ctx.assistantMessage,
     tool: ctx.tool,
@@ -141,7 +160,9 @@ function handleInteractivePermission(
     permissionPromptStartTimeMs,
     // Only the displayed queue head owns a five-minute answering window.
     // This also covers independent agent executors sharing the same TUI queue.
-    onBecomeActive: deadlineMs === undefined ? undefined : startQuestionWait,
+    onBecomeActive: ctx.tool.name !== ASK_USER_QUESTION_TOOL_NAME ? undefined : () => {
+      if (!rejectAutoExecutionQuestion()) startQuestionWait()
+    },
     ...(feature('BASH_CLASSIFIER')
       ? {
           classifierCheckInProgress:
@@ -237,6 +258,7 @@ function handleInteractivePermission(
     },
     async recheckPermission() {
       if (isResolved()) return
+      if (rejectAutoExecutionQuestion()) return
       const freshResult = await hasPermissionsToUseTool(
         ctx.tool,
         ctx.input,
@@ -275,7 +297,8 @@ function handleInteractivePermission(
 
   function startQuestionWait(): void {
     if (questionWait || isResolved()) return
-    const activeDeadline = Date.now() + AUTO_QUESTION_TIMEOUT_MS
+    const activeDeadline = getAutoQuestionDeadline(ctx.toolUseContext.getAppState().toolPermissionContext)
+    if (activeDeadline === undefined) return
     ctx.updateQueueItem({ autoQuestionDeadlineMs: activeDeadline })
     questionWait = createAutoQuestionWait({
       deadlineMs: activeDeadline,

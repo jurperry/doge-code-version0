@@ -2,7 +2,7 @@ import { afterAll, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const sandbox = join(import.meta.dir, 'auto-plan-sandbox')
+const sandbox = join(import.meta.dir, '..', 'test', 'auto-plan-unit')
 mkdirSync(sandbox, { recursive: true })
 const originalConfig = process.env.CLAUDE_CONFIG_DIR
 const originalApiKey = process.env.DOGE_API_KEY
@@ -22,6 +22,10 @@ const { FileWriteTool } = await import('../src/tools/FileWriteTool/FileWriteTool
 const { getPlanFilePath } = await import('../src/utils/plans.js')
 const { normalizeAttachmentForAPI } = await import('../src/utils/messages.js')
 const { setCurrentPermissionMode } = await import('../src/utils/permissions/currentPermissionMode.js')
+const { EnterPlanModeTool } = await import('../src/tools/EnterPlanModeTool/EnterPlanModeTool.js')
+const { getSystemPrompt } = await import('../src/constants/prompts.js')
+const { ensureBootstrapMacro } = await import('../src/bootstrapMacro.js')
+ensureBootstrapMacro()
 
 const automaticPlan = { mode: 'plan', prePlanMode: 'bypassPermissions', autoPlan: true, isBypassPermissionsModeAvailable: true }
 const questions = { questions: [{ question: 'Choose an approach?', header: 'Design', options: [{ label: 'Recommended', description: 'A' }, { label: 'Alternative', description: 'B' }], multiSelect: false }] }
@@ -55,6 +59,20 @@ test('automatic plan reminders retain their origin after returning to Auto', () 
   expect(automatic).not.toContain('Do not ask the user questions')
   setCurrentPermissionMode('plan', true)
   expect(JSON.stringify(normalizeAttachmentForAPI(attachment))).toContain('feel free to ask the user questions')
+  setCurrentPermissionMode('default')
+})
+
+test('Auto guidance forbids execution questions while Plan explicitly permits clarification', async () => {
+  setCurrentPermissionMode('bypassPermissions')
+  const execution = (await getSystemPrompt([AskUserQuestionTool], 'auto-plan-test')).join('\n')
+  expect(execution).toContain('Do not ask the user questions')
+  expect(execution).toContain('commit')
+  expect(execution).not.toContain('except AskUserQuestion which can ask')
+  setCurrentPermissionMode('plan', true)
+  const entered = EnterPlanModeTool.mapToolResultToToolResultBlockParam({ message: 'Entered Plan' }, 'enter')
+  expect(entered.content).toContain('AskUserQuestion')
+  expect(entered.content).not.toContain('do not ask the user questions')
+  expect(entered.content).toContain('ExitPlanMode')
   setCurrentPermissionMode('default')
 })
 

@@ -4653,7 +4653,12 @@ export function createCanUseToolWithPermissionPrompt(
         return { ...response, decisionReason: { type: 'permissionPromptTool' as const, permissionPromptToolName: tool.name, toolResult: response } }
       })
       const winner = await waitForAutoQuestion({ input: displayInput, deadlineMs, signal: parentSignal,
-        decision: decisionPromise, onTimeout: () => requestController.abort() })
+        decision: decisionPromise, onTimeout: () => requestController.abort(),
+        ...(tool.name === ASK_USER_QUESTION_TOOL_NAME ? {
+          getPermissionContext: () => toolUseContext.getAppState().toolPermissionContext,
+          onPolicyRejection: () => requestController.abort(),
+        } : {}),
+      })
       return winner.decisionReason?.type === 'permissionPromptTool'
         ? permissionPromptToolResultToPermissionDecision(winner.decisionReason.toolResult as any, permissionPromptTool, displayInput, toolUseContext)
         : winner
@@ -4696,7 +4701,8 @@ export function getCanUseToolFn(
         ? getAutoQuestionDeadline(toolUseContext.getAppState().toolPermissionContext) : undefined
       if (deadlineMs === undefined) return result
       process.stderr.write('等待用户回答：五分钟未提交将采用推荐方案。\n')
-      return waitForAutoQuestion({ input: result.updatedInput ?? input, deadlineMs, signal: toolUseContext.abortController.signal })
+      return waitForAutoQuestion({ input: result.updatedInput ?? input, deadlineMs, signal: toolUseContext.abortController.signal,
+        getPermissionContext: () => toolUseContext.getAppState().toolPermissionContext })
     })
   }
   // Lazy lookup: MCP connects are per-server incremental in print mode, so

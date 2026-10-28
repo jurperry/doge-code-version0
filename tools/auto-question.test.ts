@@ -9,6 +9,7 @@ process.env.CLAUDE_CONFIG_DIR = sandbox
 const { resetSettingsCache } = await import('../src/utils/settings/settingsCache.js')
 const { AskUserQuestionTool, buildAutoAnswers } = await import('../src/tools/AskUserQuestionTool/AskUserQuestionTool.js')
 const { hasPermissionsToUseTool } = await import('../src/utils/permissions/permissions.js')
+const { getAutoQuestionDeadline } = await import('../src/utils/permissions/autoQuestion.js')
 const automaticPlan = { mode: 'plan', prePlanMode: 'bypassPermissions', autoPlan: true }
 const context = (mode: any): any => ({
   abortController: new AbortController(),
@@ -47,7 +48,20 @@ test('invalid questions fail rather than inventing an answer', () => {
     expect(buildAutoAnswers({ questions })).toBeNull()
   }
 })
-for (const mode of [{ mode: 'bypassPermissions' }, automaticPlan, { mode: 'default' }, { mode: 'acceptEdits' }, { mode: 'plan', prePlanMode: 'bypassPermissions' }]) {
+test('Auto execution refuses questions without manufacturing a user answer or a timer', async () => {
+  const mode = { mode: 'bypassPermissions' }
+  const input = { questions: [question(['Commit (推荐)', 'Merge'])], answers: { 'Choose?': 'Commit (推荐)' } }
+  for (const rules of [{}, { alwaysAllowRules: { userSettings: ['AskUserQuestion'] } }, { alwaysAskRules: { userSettings: ['AskUserQuestion'] } }]) {
+    const result = await hasPermissionsToUseTool(AskUserQuestionTool, input, context({ ...mode, ...rules }), {} as any, 'ask-auto')
+    expect(result.behavior).toBe('deny')
+    expect((result as any).message).toContain('Auto')
+    expect((result as any).message).toContain('Plan')
+    expect((result as any).updatedInput).toBeUndefined()
+  }
+  expect(getAutoQuestionDeadline(mode as any)).toBeUndefined()
+  expect(getAutoQuestionDeadline(automaticPlan as any, 100)).toBe(300100)
+})
+for (const mode of [automaticPlan, { mode: 'default' }, { mode: 'acceptEdits' }, { mode: 'plan', prePlanMode: 'bypassPermissions' }]) {
   test(`Ask remains interactive in ${JSON.stringify(mode)}`, async () => {
     const input = { questions: [question(['First', 'Second (推荐)'])], answers: { 'Choose?': 'prefilled' } }
     const result = await hasPermissionsToUseTool(AskUserQuestionTool, input, context(mode), {} as any, 'ask-test')

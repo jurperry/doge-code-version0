@@ -642,6 +642,10 @@ export class StructuredIO {
           signal: parentSignal,
           decision: Promise.race([hookPromise, sdkPromise]),
           onTimeout: () => hookAbortController.abort(),
+          ...(tool.name === ASK_USER_QUESTION_TOOL_NAME ? {
+            getPermissionContext: () => toolUseContext.getAppState().toolPermissionContext,
+            onPolicyRejection: () => hookAbortController.abort(),
+          } : {}),
         })
         if (winner.decisionReason?.type === 'permissionPromptTool') {
           return permissionPromptToolResultToPermissionDecision(winner.decisionReason.toolResult as PermissionToolOutput, tool, displayInput, toolUseContext)

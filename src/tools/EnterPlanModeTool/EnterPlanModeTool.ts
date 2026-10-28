@@ -104,7 +104,7 @@ export const EnterPlanModeTool: Tool<InputSchema, Output> = buildTool({
   },
   mapToolResultToToolResultBlockParam({ message }, toolUseID) {
     const instructions = isCurrentAutoPlan()
-      ? `${message}\nExplore with read-only tools and write the plan file (${getPlanFilePath()}). Make decisions autonomously; do not ask the user questions or request approval. Call ExitPlanMode when ready to resume execution automatically in Auto mode.`
+      ? `${message}\nExplore with read-only tools and write the plan file (${getPlanFilePath()}). You may use AskUserQuestion to clarify requirements and discuss approaches inside Plan. The user has five minutes to submit answers, then recommended choices are adopted automatically. Mark recommended options with (Recommended). Call ExitPlanMode when ready to resume execution automatically in Auto mode, without asking for approval or a permission mode.`
       : isPlanModeInterviewPhaseEnabled()
       ? `${message}
 

@@ -1,5 +1,6 @@
 import type { ToolPermissionContext } from '../../Tool.js'
 import { isZeroAskAutoActive, isZeroAskPlanInterlude } from './autoBypass.js'
+import type { PermissionDenyDecision } from './PermissionResult.js'
 
 export const AUTO_QUESTION_TIMEOUT_MS = 300_000
 
@@ -9,7 +10,17 @@ export type QuestionInput = {
 }
 
 export function isAutoQuestionContext(context: Pick<ToolPermissionContext, 'mode' | 'prePlanMode' | 'autoPlan'>): boolean {
-  return isZeroAskAutoActive(context) || isZeroAskPlanInterlude(context)
+  return isZeroAskPlanInterlude(context)
+}
+
+/** Recheck at the interaction boundary as a queued Plan request may be stale. */
+export function getAutoQuestionRejection(context: Pick<ToolPermissionContext, 'mode'>): PermissionDenyDecision | undefined {
+  if (!isZeroAskAutoActive(context)) return undefined
+  return {
+    behavior: 'deny',
+    decisionReason: { type: 'mode', mode: 'bypassPermissions' },
+    message: 'Auto execution cannot ask the user questions. Continue autonomously using the existing request and authorization. Do not ask in plain text, repeat this question, or enter Plan merely to request commit, merge, or completion approval. If the task genuinely needs planning, use EnterPlanMode; clarification is allowed inside Plan.',
+  }
 }
 
 /** Match only an explicit trailing recommendation marker, never description text. */

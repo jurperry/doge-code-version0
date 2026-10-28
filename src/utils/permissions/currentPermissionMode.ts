@@ -8,6 +8,13 @@ import type { PermissionMode } from '../../types/permissions.js'
 // bridge) flows through.
 let currentPermissionMode: PermissionMode = 'default'
 let currentAutoPlan = false
+const permissionModeListeners = new Set<() => void>()
+
+/** Multiple pending interaction channels must observe the same mode transition. */
+export function subscribeToPermissionModeChanges(listener: () => void): () => void {
+  permissionModeListeners.add(listener)
+  return () => { permissionModeListeners.delete(listener) }
+}
 
 export function getCurrentPermissionMode(): PermissionMode {
   return currentPermissionMode
@@ -18,6 +25,8 @@ export function isCurrentAutoPlan(): boolean {
 }
 
 export function setCurrentPermissionMode(mode: PermissionMode, autoPlan = false): void {
+  const changed = currentPermissionMode !== mode || currentAutoPlan !== autoPlan
   currentPermissionMode = mode
   currentAutoPlan = autoPlan
+  if (changed) for (const listener of permissionModeListeners) listener()
 }
