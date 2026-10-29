@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-29 Windows 终端右键复制 TUI 选择文本乱码
+
+1. 遇到问题：Windows 中文系统控制台代码页为 936 时，全屏 TUI 的选择文本经 `clip.exe` 写入剪贴板；`clip.exe` 按控制台代码页解码 UTF-8 标准输入，中文/表情变成乱码，右键粘贴即出现整段乱码。`getClipboardPath` 未把 Windows 计入 native，toast 误称仅 OSC 52。
+2. 解决方法：Windows 原生剪贴板改为 `powershell.exe -NoProfile -NonInteractive -Command`，以 `StreamReader` 按 UTF-8 显式读取 stdin 后交给 `Set-Clipboard`，不再依赖控制台代码页；Windows 写入串行化并跳过被新选择覆盖的排队项，Set-Clipboard 以 -ErrorAction Stop 暴露失败、写入 debug 日志，超时 10s；`getClipboardPath` 将本地 Windows 归为 native。新增 2 项单测与 `tools/verify-windows-clipboard.ts`；实测 CP936 下 unicode/多行 31 字符、5.6 万字符及连续 3 次写入顺序稳定，v2.1.314 冒烟通过。逐文件隔离全量 131 文件全绿；裸跑 `bun test` 仍有 13 项既有跨文件顺序失败（基线 main 同样 13 项，均单文件通过）。
+3. 位置：`src/ink/termio/osc.ts`（`copyNative`/`getClipboardPathFor`/`getWindowsClipboardCommand`）、`src/ink/termio/osc.test.ts`（新）、`tools/verify-windows-clipboard.ts`（新）。
+
 ## 2026-10-29 TUI 三区固定布局与可拖动历史滚动
 
 1. 遇到问题：欢迎导航、消息/工具调用和底部输入共用同一条 Ink 渲染流，多步工具调用后只能依赖终端原生 scrollback 回看，容易出现渲染错位；外部用户默认不进入可裁剪的全屏消息视口，也没有可见、可拖拽的滚动条。

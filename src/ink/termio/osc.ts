@@ -4,6 +4,7 @@
 
 import { Buffer } from 'buffer'
 import { env } from '../../utils/env.js'
+import { logForDebugging } from '../../utils/debug.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
 import { BEL, ESC, ESC_TYPE, SEP } from './ansi.js'
 import type { Action, Color, TabStatusAction } from './types.js'
@@ -47,25 +48,37 @@ export function wrapForMultiplexer(sequence: string): string {
  * Which path setClipboard() will take, based on env state. Synchronous so
  * callers can show an honest toast without awaiting the copy itself.
  *
- * - 'native': pbcopy (or equivalent) will run — high-confidence system
- *   clipboard write. tmux buffer may also be loaded as a bonus.
+ * - 'native': pbcopy / PowerShell Set-Clipboard will run — high-confidence
+ *   system clipboard write. tmux buffer may also be loaded as a bonus.
  * - 'tmux-buffer': tmux load-buffer will run, but no native tool — paste
  *   with prefix+] works. System clipboard depends on tmux's set-clipboard
  *   option + outer terminal OSC 52 support; can't know from here.
  * - 'osc52': only the raw OSC 52 sequence will be written to stdout.
  *   Best-effort; iTerm2 disables OSC 52 by default.
  *
- * pbcopy gating uses SSH_CONNECTION specifically, not SSH_TTY — tmux panes
+ * Native gating uses SSH_CONNECTION specifically, not SSH_TTY — tmux panes
  * inherit SSH_TTY forever even after local reattach, but SSH_CONNECTION is
  * in tmux's default update-environment set and gets cleared.
  */
 export type ClipboardPath = 'native' | 'tmux-buffer' | 'osc52'
 
 export function getClipboardPath(): ClipboardPath {
-  const nativeAvailable =
-    process.platform === 'darwin' && !process.env['SSH_CONNECTION']
+  return getClipboardPathFor(
+    process.platform,
+    !!process.env['SSH_CONNECTION'],
+    !!process.env['TMUX'],
+  )
+}
+
+/** @internal exported for tests */
+export function getClipboardPathFor(
+  platform: NodeJS.Platform,
+  ssh: boolean,
+  tmux: boolean,
+): ClipboardPath {
+  const nativeAvailable = (platform === 'darwin' || platform === 'win32') && !ssh
   if (nativeAvailable) return 'native'
-  if (process.env['TMUX']) return 'tmux-buffer'
+  if (tmux) return 'tmux-buffer'
   return 'osc52'
 }
 
@@ -129,7 +142,8 @@ export async function tmuxLoadBuffer(text: string): Promise<boolean> {
  * Local (no SSH_CONNECTION): also shell out to a native clipboard utility.
  * OSC 52 and tmux -w both depend on terminal settings — iTerm2 disables
  * OSC 52 by default, VS Code shows a permission prompt on first use. Native
- * utilities (pbcopy/wl-copy/xclip/xsel/clip.exe) always work locally. Over
+ * utilities (pbcopy / PowerShell Set-Clipboard / wl-copy / xclip / xsel)
+ * always work locally. Over
  * SSH these would write to the remote clipboard — OSC 52 is the right path there.
  *
  * Returns the sequence for the caller to write to stdout (raw OSC 52
@@ -162,11 +176,38 @@ export async function setClipboard(text: string): Promise<string> {
 // Cached after first attempt so repeated mouse-ups skip the probe chain.
 let linuxCopy: 'wl-copy' | 'xclip' | 'xsel' | null | undefined
 
+// Windows native writes run in a short PowerShell process. Chain them so
+// overlapping selections finish in copy order (newest write last).
+let windowsClipboardWrite: Promise<void> = Promise.resolve()
+let windowsClipboardGeneration = 0
+
+/**
+ * clip.exe decodes redirected stdin using the console's active code page
+ * (CP936 on zh-CN), which turns UTF-8 text from the TUI into mojibake.
+ * Read the pipe through an explicit UTF-8 StreamReader instead; Set-Clipboard
+ * stores the decoded string as Unicode without touching the console code page.
+ */
+const WINDOWS_SET_CLIPBOARD =
+  '[System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.UTF8Encoding]::new($false)).ReadToEnd() | Set-Clipboard -ErrorAction Stop'
+
+/** @internal exported for tests */
+export function getWindowsClipboardCommand(): {
+  file: string
+  args: string[]
+  timeout: number
+} {
+  return {
+    file: 'powershell.exe',
+    args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SET_CLIPBOARD],
+    timeout: 10_000,
+  }
+}
+
 /**
  * Shell out to a native clipboard utility as a safety net for OSC 52.
  * Only called when not in an SSH session (over SSH, these would write to
  * the remote machine's clipboard — OSC 52 is the right path there).
- * Fire-and-forget: failures are silent since OSC 52 may have succeeded.
+ * Fire-and-forget: failures are logged; OSC 52 may have succeeded.
  */
 function copyNative(text: string): void {
   const opts = { input: text, useCwd: false, timeout: 2000 }
@@ -210,11 +251,36 @@ function copyNative(text: string): void {
       })
       return
     }
-    case 'win32':
-      // clip.exe is always available on Windows. Unicode handling is
-      // imperfect (system locale encoding) but good enough for a fallback.
-      void execFileNoThrow('clip', [], opts)
+    case 'win32': {
+      // clip.exe reads redirected stdin in the console code page (CP936
+      // on zh-CN), which mangles UTF-8. The PowerShell command decodes the
+      // pipe explicitly as UTF-8; serialize writes so an older selection
+      // cannot overwrite a newer one if PowerShell startup times overlap.
+      const { file, args, timeout } = getWindowsClipboardCommand()
+      const generation = ++windowsClipboardGeneration
+      windowsClipboardWrite = windowsClipboardWrite
+        .then(async () => {
+          // A newer copy superseded this queued write while PowerShell was
+          // still starting; skip it so only the latest selection lands last.
+          if (generation !== windowsClipboardGeneration) return
+          const result = await execFileNoThrow(file, args, { ...opts, timeout })
+          if (result.code !== 0) {
+            const detail =
+              (result.error || result.stderr.trim()).slice(0, 500) ||
+              'unknown error'
+            logForDebugging(
+              `[clipboard] Windows Set-Clipboard failed (${result.code}): ${detail}`,
+              { level: 'warn' },
+            )
+          }
+        })
+        .catch(error => {
+          logForDebugging(`[clipboard] Windows Set-Clipboard threw: ${error}`, {
+            level: 'warn',
+          })
+        })
       return
+    }
   }
 }
 
