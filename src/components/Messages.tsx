@@ -1,4 +1,3 @@
-import { c as _c } from "react/compiler-runtime";
 import { feature } from 'bun:bundle';
 import chalk from 'chalk';
 import type { UUID } from 'crypto';
@@ -33,47 +32,14 @@ import { plural } from '../utils/stringUtils.js';
 import { renderableSearchText } from '../utils/transcriptSearch.js';
 import { Divider } from './design-system/Divider.js';
 import type { UnseenDivider } from './FullscreenLayout.js';
-import { LogoV2 } from './LogoV2/LogoV2.js';
+import { LogoHeader } from './LogoHeader.js';
 import { StreamingMarkdown } from './Markdown.js';
 import { hasContentAfterIndex, MessageRow } from './MessageRow.js';
 import { InVirtualListContext, type MessageActionsNav, MessageActionsSelectedContext, type MessageActionsState } from './messageActions.js';
 import { AssistantThinkingMessage } from './messages/AssistantThinkingMessage.js';
 import { isNullRenderingAttachment } from './messages/nullRenderingAttachments.js';
-import { OffscreenFreeze } from './OffscreenFreeze.js';
 import type { ToolUseConfirm } from './permissions/PermissionRequest.js';
-import { StatusNotices } from './StatusNotices.js';
 import type { JumpHandle } from './VirtualMessageList.js';
-
-// Memoed logo header: this box is the FIRST sibling before all MessageRows
-// in main-screen mode. If it becomes dirty on every Messages re-render,
-// renderChildren's seenDirtyChild cascade disables prevScreen (blit) for
-// ALL subsequent siblings — every MessageRow re-writes from scratch instead
-// of blitting. In long sessions (~2800 messages) this is 150K+ writes/frame
-// and pegs CPU at 100%. Memo on agentDefinitions so a new messages array
-// doesn't invalidate the logo subtree. LogoV2/StatusNotices internally
-// subscribe to useAppState/useSettings for their own updates.
-const LogoHeader = React.memo(function LogoHeader(t0) {
-  const $ = _c(3);
-  const {
-    agentDefinitions
-  } = t0;
-  let t1;
-  if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
-    t1 = <LogoV2 />;
-    $[0] = t1;
-  } else {
-    t1 = $[0];
-  }
-  let t2;
-  if ($[1] !== agentDefinitions) {
-    t2 = <OffscreenFreeze><Box flexDirection="column" gap={1}>{t1}<React.Suspense fallback={null}><StatusNotices agentDefinitions={agentDefinitions} /></React.Suspense></Box></OffscreenFreeze>;
-    $[1] = agentDefinitions;
-    $[2] = t2;
-  } else {
-    t2 = $[2];
-  }
-  return t2;
-});
 
 // Dead code elimination: conditional import for proactive mode
 /* eslint-disable @typescript-eslint/no-require-imports */

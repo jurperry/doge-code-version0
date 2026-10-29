@@ -53,6 +53,10 @@ type Props = {
   // No-op (returns false) outside fullscreen mode (Ink.dispatchClick
   // gates on altScreenActive).
   readonly onClickAt: (col: number, row: number) => boolean;
+  readonly onMouseDownAt: (col: number, row: number, button: number) => boolean;
+  readonly onMouseMoveAt: (col: number, row: number, button: number) => boolean;
+  readonly onMouseUpAt: (col: number, row: number, button: number) => boolean;
+  readonly onMouseCancel: () => void;
   // Dispatch hover (onMouseEnter/onMouseLeave) as the pointer moves over
   // DOM elements. Called for mode-1003 motion events with no button held.
   // No-op outside fullscreen (Ink.dispatchHover gates on altScreenActive).
@@ -191,6 +195,7 @@ export default class App extends PureComponent<Props, State> {
     this.setStdinKeepAlive(true);
   }
   override componentWillUnmount() {
+    this.props.onMouseCancel();
     this.setStdinKeepAlive(false);
     if (this.props.stdout.isTTY) {
       this.props.stdout.write(SHOW_CURSOR);
@@ -504,6 +509,7 @@ function processKeysInBatch(app: App, items: ParsedInput[], _unused1: undefined,
     }
     if (sequence === FOCUS_OUT) {
       app.handleTerminalFocus(false);
+      app.props.onMouseCancel();
       // Defensive: if we lost the release event (mouse released outside
       // terminal window — some emulators drop it rather than capturing the
       // pointer), focus-out is the next observable signal that the drag is
@@ -550,6 +556,7 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
   const baseButton = m.button & 0x03;
   if (m.action === 'press') {
     if ((m.button & 0x20) !== 0 && baseButton === 3) {
+      app.props.onMouseCancel();
       // Mode-1003 motion with no button held. Dispatch hover; skip the
       // rest of this handler (no selection, no click-count side effects).
       // Lost-release recovery: no-button motion while isDragging=true means
@@ -575,6 +582,7 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
       return;
     }
     if ((m.button & 0x20) !== 0) {
+      if (app.props.onMouseMoveAt(col, row, m.button)) return;
       // Drag motion: mode-aware extension (char/word/line). onSelectionDrag
       // calls notifySelectionChange internally — no extra onSelectionChange.
       app.props.onSelectionDrag(col, row);
@@ -588,6 +596,17 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
     if (sel.isDragging) {
       finishSelection(sel);
       app.props.onSelectionChange();
+    }
+    if (app.props.onMouseDownAt(col, row, m.button)) {
+      // A captured control (scrollbar/overlay) separates click gestures.
+      // Clear the prior chain so a later transcript click cannot resolve as
+      // a double-click, and cancel any deferred hyperlink open.
+      app.clickCount = 0;
+      if (app.pendingHyperlinkTimer) {
+        clearTimeout(app.pendingHyperlinkTimer);
+        app.pendingHyperlinkTimer = null;
+      }
+      return;
     }
     // Fresh left press. Detect multi-click HERE (not on release) so the
     // word/line highlight appears immediately and a subsequent drag can
@@ -621,6 +640,8 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
     app.props.onSelectionChange();
     return;
   }
+
+  if (app.props.onMouseUpAt(col, row, m.button)) return;
 
   // Release: end the drag even for non-zero button codes. Some terminals
   // encode release with the motion bit or button=3 "no button" (carried

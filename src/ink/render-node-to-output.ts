@@ -715,6 +715,10 @@ function renderNodeToOutput(
         // follow check compares against last frame's max.
         const prevScrollHeight = node.scrollHeight ?? scrollHeight
         const prevInnerHeight = node.scrollViewportHeight ?? innerHeight
+        const prevScrollTop = node.scrollTop ?? 0
+        const prevPendingDelta = node.pendingScrollDelta ?? 0
+        const prevViewportTop = node.scrollViewportTop
+        const prevSticky = node.stickyScroll ?? Boolean(node.attributes['stickyScroll'])
         node.scrollHeight = scrollHeight
         node.scrollViewportHeight = innerHeight
         // Absolute screen-buffer row where the scrollable area (inside
@@ -848,6 +852,16 @@ function renderNodeToOutput(
         if (scrollTop !== cur) node.pendingScrollDelta = undefined
         if (node.pendingScrollDelta !== undefined) scrollDrainNode = node
         scrollTop = clamped
+
+        const nextSticky = node.stickyScroll ?? Boolean(node.attributes['stickyScroll'])
+        if (prevScrollTop !== (node.scrollTop ?? 0) ||
+          prevPendingDelta !== (node.pendingScrollDelta ?? 0) ||
+          prevScrollHeight !== scrollHeight ||
+          prevInnerHeight !== innerHeight ||
+          prevViewportTop !== node.scrollViewportTop ||
+          prevSticky !== nextSticky) {
+          node.onScrollMetricsChange?.()
+        }
 
         if (content && contentYoga) {
           // Compute content wrapper's absolute render position with scroll

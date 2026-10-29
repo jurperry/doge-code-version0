@@ -6,6 +6,7 @@ import type { DOMElement } from '../dom.js';
 import type { ClickEvent } from '../events/click-event.js';
 import type { FocusEvent } from '../events/focus-event.js';
 import type { KeyboardEvent } from '../events/keyboard-event.js';
+import type { MouseEvent } from '../events/mouse-event.js';
 import type { Styles } from '../styles.js';
 import * as warn from '../warn.js';
 export type Props = Except<Styles, 'textWrap'> & {
@@ -28,6 +29,10 @@ export type Props = Except<Styles, 'textWrap'> & {
    * ancestors; call `event.stopImmediatePropagation()` to stop bubbling.
    */
   onClick?: (event: ClickEvent) => void;
+  onMouseDown?: (event: MouseEvent) => void;
+  onMouseMove?: (event: MouseEvent) => void;
+  onMouseUp?: (event: MouseEvent) => void;
+  onMouseCancel?: (event: MouseEvent) => void;
   onFocus?: (event: FocusEvent) => void;
   onFocusCapture?: (event: FocusEvent) => void;
   onBlur?: (event: FocusEvent) => void;
@@ -49,7 +54,7 @@ export type Props = Except<Styles, 'textWrap'> & {
  * `<Box>` is an essential Ink component to build your layout. It's like `<div style="display: flex">` in the browser.
  */
 function Box(t0) {
-  const $ = _c(42);
+  const $ = _c(46);
   let autoFocus;
   let children;
   let flexDirection;
@@ -188,8 +193,8 @@ function Box(t0) {
     t3 = $[26];
   }
   let t4;
-  if ($[27] !== autoFocus || $[28] !== children || $[29] !== onBlur || $[30] !== onBlurCapture || $[31] !== onClick || $[32] !== onFocus || $[33] !== onFocusCapture || $[34] !== onKeyDown || $[35] !== onKeyDownCapture || $[36] !== onMouseEnter || $[37] !== onMouseLeave || $[38] !== ref || $[39] !== t3 || $[40] !== tabIndex) {
-    t4 = <ink-box ref={ref} tabIndex={tabIndex} autoFocus={autoFocus} onClick={onClick} onFocus={onFocus} onFocusCapture={onFocusCapture} onBlur={onBlur} onBlurCapture={onBlurCapture} onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onKeyDown={onKeyDown} onKeyDownCapture={onKeyDownCapture} style={t3}>{children}</ink-box>;
+  if ($[27] !== autoFocus || $[28] !== children || $[29] !== onBlur || $[30] !== onBlurCapture || $[31] !== onClick || $[32] !== onFocus || $[33] !== onFocusCapture || $[34] !== onKeyDown || $[35] !== onKeyDownCapture || $[36] !== onMouseEnter || $[37] !== onMouseLeave || $[38] !== ref || $[39] !== t3 || $[40] !== tabIndex || $[42] !== t0.onMouseDown || $[43] !== t0.onMouseMove || $[44] !== t0.onMouseUp || $[45] !== t0.onMouseCancel) {
+    t4 = <ink-box ref={ref} tabIndex={tabIndex} autoFocus={autoFocus} onClick={onClick} onMouseDown={t0.onMouseDown} onMouseMove={t0.onMouseMove} onMouseUp={t0.onMouseUp} onMouseCancel={t0.onMouseCancel} onFocus={onFocus} onFocusCapture={onFocusCapture} onBlur={onBlur} onBlurCapture={onBlurCapture} onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onKeyDown={onKeyDown} onKeyDownCapture={onKeyDownCapture} style={t3}>{children}</ink-box>;
     $[27] = autoFocus;
     $[28] = children;
     $[29] = onBlur;
@@ -205,6 +210,10 @@ function Box(t0) {
     $[39] = t3;
     $[40] = tabIndex;
     $[41] = t4;
+    $[42] = t0.onMouseDown;
+    $[43] = t0.onMouseMove;
+    $[44] = t0.onMouseUp;
+    $[45] = t0.onMouseCancel;
   } else {
     t4 = $[41];
   }

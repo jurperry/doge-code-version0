@@ -124,6 +124,9 @@ function getEventPriority(eventType: string): number {
     case 'keydown':
     case 'keyup':
     case 'click':
+    case 'mousedown':
+    case 'mouseup':
+    case 'mousecancel':
     case 'focus':
     case 'blur':
     case 'paste':

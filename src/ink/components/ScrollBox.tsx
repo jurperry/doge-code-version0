@@ -51,6 +51,12 @@ export type ScrollBoxHandle = {
    */
   subscribe: (listener: () => void) => () => void;
   /**
+   * Subscribe to all public scroll-metric changes, including renderer-driven
+   * sticky follow, pending-delta drains, content growth, and viewport resize.
+   * Intended for lightweight scroll chrome; does not replace subscribe().
+   */
+  subscribeToMetrics: (listener: () => void) => () => void;
+  /**
    * Set the render-time scrollTop clamp to the currently-mounted children's
    * coverage span. Called by useVirtualScroll after computing its range;
    * render-node-to-output clamps scrollTop to [min, max] so burst scrollTo
@@ -96,9 +102,13 @@ function ScrollBox({
   // forces a React render: sticky is attribute-observed, no DOM-only path.
   const [, forceRender] = useState(0);
   const listenersRef = useRef(new Set<() => void>());
+  const metricsListenersRef = useRef(new Set<() => void>());
   const renderQueuedRef = useRef(false);
   const notify = () => {
     for (const l of listenersRef.current) l();
+  };
+  const notifyMetrics = () => {
+    for (const l of metricsListenersRef.current) l();
   };
   function scrollMutated(el: DOMElement): void {
     // Signal background intervals (IDE poll, LSP poll, GCS fetch, orphan
@@ -108,6 +118,7 @@ function ScrollBox({
     markDirty(el);
     markCommitStart();
     notify();
+    notifyMetrics();
     if (renderQueuedRef.current) return;
     renderQueuedRef.current = true;
     queueMicrotask(() => {
@@ -157,6 +168,7 @@ function ScrollBox({
       el.stickyScroll = true;
       markDirty(el);
       notify();
+      notifyMetrics();
       forceRender(n => n + 1);
     },
     getScrollTop() {
@@ -190,6 +202,10 @@ function ScrollBox({
       listenersRef.current.add(listener);
       return () => listenersRef.current.delete(listener);
     },
+    subscribeToMetrics(listener: () => void) {
+      metricsListenersRef.current.add(listener);
+      return () => metricsListenersRef.current.delete(listener);
+    },
     setClampBounds(min, max) {
       const el = domRef.current;
       if (!el) return;
@@ -215,8 +231,14 @@ function ScrollBox({
   // available on the first render — ref callbacks fire after the initial
   // commit, which is too late for the first frame.
   return <ink-box ref={el => {
+    if (domRef.current && domRef.current !== el) {
+      domRef.current.onScrollMetricsChange = undefined;
+    }
     domRef.current = el;
-    if (el) el.scrollTop ??= 0;
+    if (el) {
+      el.scrollTop ??= 0;
+      el.onScrollMetricsChange = notifyMetrics;
+    }
   }} style={{
     flexWrap: 'nowrap',
     flexDirection: style.flexDirection ?? 'row',

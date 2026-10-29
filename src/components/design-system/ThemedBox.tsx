@@ -5,6 +5,7 @@ import type { DOMElement } from '../../ink/dom.js';
 import type { ClickEvent } from '../../ink/events/click-event.js';
 import type { FocusEvent } from '../../ink/events/focus-event.js';
 import type { KeyboardEvent } from '../../ink/events/keyboard-event.js';
+import type { MouseEvent } from '../../ink/events/mouse-event.js';
 import type { Color, Styles } from '../../ink/styles.js';
 import { getTheme, type Theme } from '../../utils/theme.js';
 import { useTheme } from './ThemeProvider.js';
@@ -26,6 +27,10 @@ export type Props = BaseStylesWithoutColors & ThemedColorProps & {
   tabIndex?: number;
   autoFocus?: boolean;
   onClick?: (event: ClickEvent) => void;
+  onMouseDown?: (event: MouseEvent) => void;
+  onMouseMove?: (event: MouseEvent) => void;
+  onMouseUp?: (event: MouseEvent) => void;
+  onMouseCancel?: (event: MouseEvent) => void;
   onFocus?: (event: FocusEvent) => void;
   onFocusCapture?: (event: FocusEvent) => void;
   onBlur?: (event: FocusEvent) => void;

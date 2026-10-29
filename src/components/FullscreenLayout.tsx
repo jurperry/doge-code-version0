@@ -6,6 +6,7 @@ import { ModalContext } from '../context/modalContext.js';
 import { PromptOverlayProvider, usePromptOverlay, usePromptOverlayDialog } from '../context/promptOverlayContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import ScrollBox, { type ScrollBoxHandle } from '../ink/components/ScrollBox.js';
+import { TerminalSizeContext } from '../ink/components/TerminalSizeContext.js';
 import instances from '../ink/instances.js';
 import { Box, Text } from '../ink.js';
 import type { Message } from '../types/message.js';
@@ -14,10 +15,14 @@ import { isFullscreenEnvEnabled } from '../utils/fullscreen.js';
 import { plural } from '../utils/stringUtils.js';
 import { isNullRenderingAttachment } from './messages/nullRenderingAttachments.js';
 import PromptInputFooterSuggestions from './PromptInput/PromptInputFooterSuggestions.js';
+import { ScrollBar } from './ScrollBar.js';
 import type { StickyPrompt } from './VirtualMessageList.js';
 
 /** Rows of transcript context kept visible above the modal pane's ▔ divider. */
 const MODAL_TRANSCRIPT_PEEK = 2;
+
+/** Below this height the optional header would crowd out the message viewport. */
+const MIN_ROWS_FOR_FIXED_HEADER = 24;
 
 /** Context for scroll-derived chrome (sticky header, pill). StickyTracker
  *  in VirtualMessageList writes via this instead of threading a callback
@@ -29,6 +34,8 @@ export const ScrollChromeContext = createContext<{
   setStickyPrompt: () => {}
 });
 type Props = {
+  /** Content pinned above the independent message viewport (welcome/navigation). */
+  header?: ReactNode;
   /** Content that scrolls (messages, tool output) */
   scrollable: ReactNode;
   /** Content pinned to the bottom (spinner, prompt, permissions) */
@@ -52,6 +59,8 @@ type Props = {
   /** Ref to the scroll box for keyboard scrolling. RefObject (not Ref) so
    *  pillVisible's useSyncExternalStore can subscribe to scroll changes. */
   scrollRef?: RefObject<ScrollBoxHandle | null>;
+  /** Called for scrollbar track clicks and thumb drags. */
+  onScroll?: (sticky: boolean, handle: ScrollBoxHandle) => void;
   /** Y-position (scrollHeight at snapshot) of the unseen-divider. Pill
    *  shows while viewport bottom hasn't reached this. Ref so REPL doesn't
    *  re-render on the one-shot snapshot write. */
@@ -261,15 +270,18 @@ export function computeUnseenDivider(messages: readonly Message[], dividerIndex:
  * Outside fullscreen mode, renders content sequentially so the existing
  * main-screen scrollback rendering works unchanged.
  *
- * Fullscreen mode defaults on for ants (CLAUDE_CODE_NO_FLICKER=0 to opt out)
- * and off for external users (CLAUDE_CODE_NO_FLICKER=1 to opt in).
+ * Fullscreen mode defaults on (CLAUDE_CODE_NO_FLICKER=0 to opt out).
+ * The optional header and bottom stay outside the independently scrollable
+ * message viewport; ScrollBar chrome only repaints its own component.
  * The <AlternateScreen> wrapper
  * (alt buffer + mouse tracking + height constraint) lives at REPL's root
  * so nothing can accidentally render outside it.
  */
 export function FullscreenLayout(t0) {
-  const $ = _c(47);
+  const $ = _c(52);
   const {
+    header,
+    onScroll,
     scrollable,
     bottom,
     overlay,
@@ -290,6 +302,11 @@ export function FullscreenLayout(t0) {
     rows: terminalRows,
     columns
   } = useTerminalSize();
+  const contentColumns = scrollRef ? Math.max(1, columns - 1) : columns;
+  const contentTerminalSize = useMemo(() => ({
+    columns: contentColumns,
+    rows: terminalRows
+  }), [contentColumns, terminalRows]);
   const [stickyPrompt, setStickyPrompt] = useState(null);
   let t4;
   if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
@@ -335,6 +352,11 @@ export function FullscreenLayout(t0) {
     t7 = $[6];
   }
   useLayoutEffect(_temp3, t7);
+  const onScrollRef = useRef(onScroll);
+  onScrollRef.current = onScroll;
+  const handleScroll = useCallback((sticky, handle) => {
+    onScrollRef.current?.(sticky, handle);
+  }, []);
   if (isFullscreenEnvEnabled()) {
     const sticky = hideSticky ? null : stickyPrompt;
     const headerPrompt = sticky != null && sticky !== "clicked" && overlay == null ? sticky : null;
@@ -388,13 +410,15 @@ export function FullscreenLayout(t0) {
       t13 = $[23];
     }
     let t14;
-    if ($[24] !== t11 || $[25] !== t12 || $[26] !== t13 || $[27] !== t8) {
-      t14 = <Box flexGrow={1} flexDirection="column" overflow="hidden">{t8}{t11}{t12}{t13}</Box>;
+    if ($[24] !== t11 || $[25] !== t12 || $[26] !== t13 || $[27] !== t8 || $[43] !== contentColumns || $[44] !== terminalRows) {
+      t14 = <Box flexGrow={1} flexDirection="column" overflow="hidden">{t8}<Box flexGrow={1} flexDirection="row" overflow="hidden"><TerminalSizeContext.Provider value={contentTerminalSize}>{t11}</TerminalSizeContext.Provider>{t12}{t13}{scrollRef && <ScrollBar scrollRef={scrollRef} paddingTop={t9} onScroll={handleScroll} />}</Box></Box>;
       $[24] = t11;
       $[25] = t12;
       $[26] = t13;
       $[27] = t8;
       $[28] = t14;
+      $[43] = contentColumns;
+      $[44] = terminalRows;
     } else {
       t14 = $[28];
     }
@@ -433,27 +457,29 @@ export function FullscreenLayout(t0) {
       t18 = $[37];
     }
     let t19;
-    if ($[38] !== t14 || $[39] !== t17 || $[40] !== t18) {
-      t19 = <PromptOverlayProvider>{t14}{t17}{t18}</PromptOverlayProvider>;
-      $[38] = t14;
-      $[39] = t17;
-      $[40] = t18;
-      $[41] = t19;
+    if ($[38] !== header || $[39] !== t14 || $[40] !== t17 || $[41] !== t18 || $[45] !== terminalRows) {
+      t19 = <PromptOverlayProvider>{header != null && terminalRows >= MIN_ROWS_FOR_FIXED_HEADER && <Box flexDirection="column" flexShrink={0} width="100%" maxHeight="30%" overflow="hidden">{header}</Box>}{t14}{t17}{t18}</PromptOverlayProvider>;
+      $[38] = header;
+      $[39] = t14;
+      $[40] = t17;
+      $[41] = t18;
+      $[42] = t19;
+      $[45] = terminalRows;
     } else {
-      t19 = $[41];
+      t19 = $[42];
     }
     return t19;
   }
   let t8;
-  if ($[42] !== bottom || $[43] !== modal || $[44] !== overlay || $[45] !== scrollable) {
+  if ($[46] !== bottom || $[47] !== modal || $[48] !== overlay || $[49] !== scrollable) {
     t8 = <>{scrollable}{bottom}{overlay}{modal}</>;
-    $[42] = bottom;
-    $[43] = modal;
-    $[44] = overlay;
-    $[45] = scrollable;
-    $[46] = t8;
+    $[46] = bottom;
+    $[47] = modal;
+    $[48] = overlay;
+    $[49] = scrollable;
+    $[50] = t8;
   } else {
-    t8 = $[46];
+    t8 = $[50];
   }
   return t8;
 }

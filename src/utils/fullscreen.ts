@@ -105,9 +105,13 @@ export function _resetTmuxControlModeProbeForTesting(): void {
 }
 
 /**
- * Runtime env-var check only. Ants default to on (CLAUDE_CODE_NO_FLICKER=0
- * to opt out); external users default to off (CLAUDE_CODE_NO_FLICKER=1 to
- * opt in).
+ * Fullscreen defaults on for interactive sessions. Headless/SDK paths stay
+ * in sequential mode so exports and static renders keep their history rules.
+ * Set CLAUDE_CODE_NO_FLICKER=0 for native terminal scrollback, or =1 to
+ * force fullscreen even where auto-detection would disable it.
+ *
+ * Interactive state is initialized by main.tsx before the REPL renders.
+ * Call this from render/handlers, not at module init.
  */
 export function isFullscreenEnvEnabled(): boolean {
   // Explicit user opt-out always wins.
@@ -125,7 +129,7 @@ export function isFullscreenEnvEnabled(): boolean {
     }
     return false
   }
-  return process.env.USER_TYPE === 'ant'
+  return getIsInteractive()
 }
 
 /**
@@ -142,9 +146,10 @@ export function isMouseTrackingEnabled(): boolean {
 }
 
 /**
- * Whether mouse click handling is disabled (clicks/drags ignored, wheel still
- * works). Set CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 to prevent accidental clicks
- * from triggering cursor positioning, text selection, or message expansion.
+ * Whether mouse click handling is disabled (clicks/drags, including scrollbar
+ * thumb dragging, are ignored; wheel still works). Set
+ * CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 to prevent accidental clicks from
+ * triggering cursor positioning, text selection, or message expansion.
  *
  * Fullscreen-specific — only reachable when CLAUDE_CODE_NO_FLICKER is active.
  */

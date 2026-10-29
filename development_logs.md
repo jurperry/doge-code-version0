@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-29 TUI 三区固定布局与可拖动历史滚动
+
+1. 遇到问题：欢迎导航、消息/工具调用和底部输入共用同一条 Ink 渲染流，多步工具调用后只能依赖终端原生 scrollback 回看，容易出现渲染错位；外部用户默认不进入可裁剪的全屏消息视口，也没有可见、可拖拽的滚动条。
+2. 解决方法：交互式会话默认启用 alternate-screen 三区布局（`CLAUDE_CODE_NO_FLICKER=0` 回退原生 scrollback，headless/SDK 仍默认顺序模式）；欢迎头抽为固定顶部，短终端使用 compact、极短终端隐藏头部。消息区保持独立 `ScrollBox + VirtualMessageList`，新增独占一列的滚动条、轨道点击与滑块拖拽，并复用 sticky/未读分隔回调。Ink 新增 mousedown/move/up/cancel 捕获分发，按下消费方后拖动不会误触文本选择、双击、点击或链接；renderer 同步滚动 metrics，滚动条只重渲染自身。专项 34 项覆盖固定头尾、滚轮、拖拽、满宽行、300 条虚拟历史、resize、短终端、旧模式与 headless 回归；独立审查两轮通过，逐文件隔离全量 130 文件 988 测试通过，CLI 冒烟与 `-p` worktree e2e 通过。
+3. 位置：src/components/{FullscreenLayout,Messages,LogoHeader,ScrollBar}.tsx、src/screens/REPL.tsx、src/utils/fullscreen.ts、src/ink/{ink.tsx,dom.ts,render-node-to-output.ts}、src/ink/components/{App,Box,ScrollBox}.tsx、src/ink/events/{mouse-event.ts,event-handlers.ts,dispatcher.ts}；测试 src/components/{FullscreenLayout.test.tsx,ScrollBar.test.ts}、src/ink/components/App.mouse.test.ts、src/ink/events/mouse-gesture.test.ts、src/utils/fullscreen.test.ts。用户于 2026-10-29 授权提交、合并 main 并删除本轮功能分支。
+
 ## 2026-10-27 Auto 仅在 Plan 中提问（2.1.314 / App 0.2.172）
 
 1. 遇到问题：Auto 执行和收尾阶段允许 AskUserQuestion 五分钟交互，动态提示鼓励继续提问，而自动 EnterPlanMode 的结果仍禁止讨论；排队队友问题沿用旧 forceDecision，活动问题切 Auto 后也未撤销。

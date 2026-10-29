@@ -73,6 +73,10 @@ export type DOMElement = {
   scrollViewportHeight?: number
   scrollViewportTop?: number
   stickyScroll?: boolean
+  // ScrollBox-owned metrics listeners. The renderer calls this after its
+  // layout, sticky-follow, and pending-delta updates change the public
+  // scroll metrics. Kept separate from React's imperative scroll listeners.
+  onScrollMetricsChange?: () => void
   // Set by ScrollBox.scrollToElement; render-node-to-output reads
   // el.yogaNode.getComputedTop() (FRESH — same Yoga pass as scrollHeight)
   // and sets scrollTop = top + offset, then clears this. Unlike an

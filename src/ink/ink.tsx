@@ -17,9 +17,10 @@ import type { CursorDeclaration, CursorDeclarationSetter } from './components/Cu
 import { FRAME_INTERVAL_MS } from './constants.js';
 import * as dom from './dom.js';
 import { KeyboardEvent } from './events/keyboard-event.js';
+import { MouseEvent } from './events/mouse-event.js';
 import { FocusManager } from './focus.js';
 import { emptyFrame, type Frame, type FrameEvent } from './frame.js';
-import { dispatchClick, dispatchHover } from './hit-test.js';
+import { dispatchClick, dispatchHover, hitTest } from './hit-test.js';
 import instances from './instances.js';
 import { LogUpdate } from './log-update.js';
 import { nodeCache } from './node-cache.js';
@@ -143,6 +144,12 @@ export default class Ink {
   // so App.tsx's handleMouseEvent is stateless — dispatchHover diffs
   // against this set and mutates it in place.
   private readonly hoveredNodes = new Set<dom.DOMElement>();
+  private mouseCapture: {
+    target: dom.DOMElement;
+    col: number;
+    row: number;
+    button: number;
+  } | null = null;
   // Set by <AlternateScreen> via setAltScreenActive(). Controls the
   // renderer's cursor.y clamping (keeps cursor in-viewport to avoid
   // LF-induced scroll when screen.height === terminalRows) and gates
@@ -859,6 +866,7 @@ export default class Ink {
    * a full redraw with no stale diff state.
    */
   setAltScreenActive(active: boolean, mouseTracking = false): void {
+    if (!active) this.cancelMouseCapture();
     if (this.altScreenActive === active) return;
     this.altScreenActive = active;
     this.altScreenMouseTracking = active && mouseTracking;
@@ -930,6 +938,7 @@ export default class Ink {
    * as restoring the saved cursor position — clobbering the resume hint.
    */
   detachForShutdown(): void {
+    this.cancelMouseCapture();
     this.isUnmounted = true;
     // Cancel any pending throttled render so it doesn't fire between
     // cleanupTerminalModes() and process.exit() and write to main screen.
@@ -1262,6 +1271,64 @@ export default class Ink {
     const blank = isEmptyCellAt(this.frontFrame.screen, col, row);
     return dispatchClick(this.rootNode, col, row, blank);
   }
+
+  // preventDefault on mousedown opts into capture. Subsequent move/up events
+  // are consumed regardless of their own defaultPrevented state.
+  dispatchMouseDown(col: number, row: number, button: number): boolean {
+    this.cancelMouseCapture();
+    if (!this.altScreenActive) return false;
+    const target = hitTest(this.rootNode, col, row);
+    if (!target) return false;
+    const event = new MouseEvent('mousedown', col, row, button);
+    if (dispatcher.dispatchDiscrete(target, event)) return false;
+    this.mouseCapture = { target, col, row, button };
+    return true;
+  }
+  dispatchMouseMove(col: number, row: number, button: number): boolean {
+    const capture = this.mouseCapture;
+    if (!capture || !this.altScreenActive) return false;
+    if (!this.isMouseCaptureAttached(capture.target)) {
+      this.mouseCapture = null;
+      return true;
+    }
+    capture.col = col;
+    capture.row = row;
+    capture.button = button;
+    dispatcher.dispatchContinuous(capture.target, new MouseEvent('mousemove', col, row, button));
+    return true;
+  }
+  dispatchMouseUp(col: number, row: number, button: number): boolean {
+    const capture = this.mouseCapture;
+    if (!capture) return false;
+    if (!this.isMouseCaptureAttached(capture.target)) {
+      this.mouseCapture = null;
+      return true;
+    }
+    capture.col = col;
+    capture.row = row;
+    capture.button = button;
+    try {
+      dispatcher.dispatchDiscrete(capture.target, new MouseEvent('mouseup', col, row, button));
+    } finally {
+      if (this.mouseCapture === capture) this.mouseCapture = null;
+    }
+    return true;
+  }
+  cancelMouseCapture(): void {
+    const capture = this.mouseCapture;
+    if (!capture) return;
+    this.mouseCapture = null;
+    if (!this.isMouseCaptureAttached(capture.target)) return;
+    dispatcher.dispatchDiscrete(capture.target, new MouseEvent('mousecancel', capture.col, capture.row, capture.button));
+  }
+  private isMouseCaptureAttached(target: dom.DOMElement): boolean {
+    let node: dom.DOMElement | undefined = target;
+    while (node) {
+      if (node === this.rootNode) return true;
+      node = node.parentNode;
+    }
+    return false;
+  }
   dispatchHover(col: number, row: number): void {
     if (!this.altScreenActive) return;
     dispatchHover(this.rootNode, col, row, this.hoveredNodes);
@@ -1441,7 +1508,7 @@ export default class Ink {
   };
   render(node: ReactNode): void {
     this.currentNode = node;
-    const tree = <App stdin={this.options.stdin} stdout={this.options.stdout} stderr={this.options.stderr} exitOnCtrlC={this.options.exitOnCtrlC} onExit={this.unmount} terminalColumns={this.terminalColumns} terminalRows={this.terminalRows} selection={this.selection} onSelectionChange={this.notifySelectionChange} onClickAt={this.dispatchClick} onHoverAt={this.dispatchHover} getHyperlinkAt={this.getHyperlinkAt} onOpenHyperlink={this.openHyperlink} onMultiClick={this.handleMultiClick} onSelectionDrag={this.handleSelectionDrag} onStdinResume={this.reassertTerminalModes} onCursorDeclaration={this.setCursorDeclaration} dispatchKeyboardEvent={this.dispatchKeyboardEvent}>
+    const tree = <App stdin={this.options.stdin} stdout={this.options.stdout} stderr={this.options.stderr} exitOnCtrlC={this.options.exitOnCtrlC} onExit={this.unmount} terminalColumns={this.terminalColumns} terminalRows={this.terminalRows} selection={this.selection} onSelectionChange={this.notifySelectionChange} onClickAt={this.dispatchClick} onMouseDownAt={this.dispatchMouseDown} onMouseMoveAt={this.dispatchMouseMove} onMouseUpAt={this.dispatchMouseUp} onMouseCancel={this.cancelMouseCapture} onHoverAt={this.dispatchHover} getHyperlinkAt={this.getHyperlinkAt} onOpenHyperlink={this.openHyperlink} onMultiClick={this.handleMultiClick} onSelectionDrag={this.handleSelectionDrag} onStdinResume={this.reassertTerminalModes} onCursorDeclaration={this.setCursorDeclaration} dispatchKeyboardEvent={this.dispatchKeyboardEvent}>
         <TerminalWriteProvider value={this.writeRaw}>
           {node}
         </TerminalWriteProvider>
@@ -1453,6 +1520,7 @@ export default class Ink {
     reconciler.flushSyncWork();
   }
   unmount(error?: Error | number | null): void {
+    this.cancelMouseCapture();
     if (this.isUnmounted) {
       return;
     }
