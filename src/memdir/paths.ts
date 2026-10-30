@@ -1,5 +1,4 @@
 import memoize from 'lodash-es/memoize.js'
-import { existsSync } from 'fs'
 import { homedir } from 'os'
 import { isAbsolute, join, normalize, sep } from 'path'
 import {
@@ -13,7 +12,7 @@ import {
   isEnvTruthy,
 } from '../utils/envUtils.js'
 import { findCanonicalGitRoot } from '../utils/git.js'
-import { legacySanitizePath, sanitizePath } from '../utils/path.js'
+import { sanitizePath } from '../utils/path.js'
 import {
   getInitialSettings,
   getSettingsForSource,
@@ -228,23 +227,8 @@ export const getAutoMemPath = memoize(
       return override
     }
     const projectsDir = join(getMemoryBaseDir(), 'projects')
-    const base = getAutoMemBase()
-    // Projects created before the 2026-09-06 directory-encoding switch keep
-    // their accumulated memory in the v1-named directory — prefer it when it
-    // exists so memory doesn't silently reset. New projects use v2.
-    const candidates =
-      legacySanitizePath(base) === sanitizePath(base)
-        ? [sanitizePath(base)]
-        : [sanitizePath(base), legacySanitizePath(base)]
-    for (const encoded of candidates) {
-      if (existsSync(join(projectsDir, encoded, AUTO_MEM_DIRNAME))) {
-        return (join(projectsDir, encoded, AUTO_MEM_DIRNAME) + sep).normalize(
-          'NFC',
-        )
-      }
-    }
     return (
-      join(projectsDir, sanitizePath(base), AUTO_MEM_DIRNAME) + sep
+      join(projectsDir, sanitizePath(getAutoMemBase()), AUTO_MEM_DIRNAME) + sep
     ).normalize('NFC')
   },
   () => getProjectRoot(),

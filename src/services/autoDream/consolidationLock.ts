@@ -119,8 +119,7 @@ export async function rollbackConsolidationLock(
 export async function listSessionsTouchedSince(
   sinceMs: number,
 ): Promise<string[]> {
-  // Read path: findProjectDir falls back to the v1 encoding for
-  // directories created before the 2026-09-06 switch.
+  // Read path: findProjectDir tolerates hash-suffix mismatches on long paths.
   const dir =
     (await findProjectDir(getOriginalCwd())) ?? getProjectDir(getOriginalCwd())
   const candidates = await listCandidates(dir, true)

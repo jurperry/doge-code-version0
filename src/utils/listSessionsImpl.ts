@@ -21,7 +21,7 @@ import {
   getProjectsDir,
   MAX_SANITIZED_LENGTH,
   readSessionLite,
-  sanitizePathCandidates,
+  sanitizePath,
   validateUuid,
 } from './sessionStoragePortable.js'
 
@@ -336,16 +336,15 @@ async function gatherProjectCandidates(
   const caseInsensitive = process.platform === 'win32'
 
   // Sort worktree paths by encoded prefix length (longest first) so
-  // more specific matches take priority over shorter ones. Both v2 (current)
-  // and v1 (legacy) encodings are matched so sessions recorded before the
-  // encoding switch are still discovered.
-  const indexed = worktreePaths.flatMap(wt =>
-    sanitizePathCandidates(wt).map(encoded => ({
+  // more specific matches take priority over shorter ones.
+  const indexed = worktreePaths.map(wt => {
+    const encoded = sanitizePath(wt)
+    return {
       path: wt,
       prefix: caseInsensitive ? encoded.toLowerCase() : encoded,
       truncated: encoded.length > MAX_SANITIZED_LENGTH,
-    })),
-  )
+    }
+  })
   indexed.sort((a, b) => b.prefix.length - a.prefix.length)
 
   let allDirents: Dirent[]

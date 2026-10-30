@@ -5,11 +5,7 @@ import { logForDebugging } from '../utils/debug.js'
 import { isENOENT } from '../utils/errors.js'
 import { getWorktreePathsPortable } from '../utils/getWorktreePathsPortable.js'
 import { lazySchema } from '../utils/lazySchema.js'
-import {
-  getProjectsDir,
-  sanitizePath,
-  sanitizePathCandidates,
-} from '../utils/sessionStoragePortable.js'
+import { getProjectsDir, sanitizePath } from '../utils/sessionStoragePortable.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 
 /**
@@ -55,16 +51,6 @@ export function getBridgePointerPath(dir: string): string {
 }
 
 /**
- * Pointer file candidates for a dir: the v2 encoding first, then v1 for
- * pointers written before the 2026-09-06 encoding switch.
- */
-function getBridgePointerPathCandidates(dir: string): string[] {
-  return sanitizePathCandidates(dir).map(encoded =>
-    join(getProjectsDir(), encoded, 'bridge-pointer.json'),
-  )
-}
-
-/**
  * Write the pointer. Also used to refresh mtime during long sessions —
  * calling with the same IDs is a cheap no-content-change write that bumps
  * the staleness clock. Best-effort — a crash-recovery file must never
@@ -94,11 +80,7 @@ export async function writeBridgePointer(
 export async function readBridgePointer(
   dir: string,
 ): Promise<(BridgePointer & { ageMs: number }) | null> {
-  for (const path of getBridgePointerPathCandidates(dir)) {
-    const pointer = await readBridgePointerFile(path)
-    if (pointer) return pointer
-  }
-  return null
+  return readBridgePointerFile(getBridgePointerPath(dir))
 }
 
 async function readBridgePointerFile(
@@ -167,14 +149,11 @@ export async function readBridgePointerAcrossWorktrees(
     return null
   }
 
-  // Dedupe against `dir` so we don't re-stat it. Encoding candidates
-  // normalize separators, so worktree-list output (forward slashes on
-  // Windows) matches our fast-path key regardless of which encoding
-  // variant either side resolves to.
-  const dirKeys = sanitizePathCandidates(dir)
-  const candidates = worktrees.filter(
-    wt => !sanitizePathCandidates(wt).some(k => dirKeys.includes(k)),
-  )
+  // Dedupe against `dir` so we don't re-stat it. sanitizePath normalizes
+  // separators, so worktree-list output (forward slashes on Windows)
+  // matches our fast-path key.
+  const dirKey = sanitizePath(dir)
+  const candidates = worktrees.filter(wt => sanitizePath(wt) !== dirKey)
 
   // Parallel stat+read. Each readBridgePointer is a stat() that ENOENTs
   // for worktrees with no pointer (cheap) plus a ~100-byte read for the
@@ -208,13 +187,10 @@ export async function readBridgePointerAcrossWorktrees(
 
 /**
  * Delete the pointer. Idempotent — ENOENT is expected when the process
- * shut down clean previously. Clears every encoding candidate so legacy
- * pointers disappear too.
+ * shut down clean previously.
  */
 export async function clearBridgePointer(dir: string): Promise<void> {
-  for (const path of getBridgePointerPathCandidates(dir)) {
-    await unlinkPointerFile(path)
-  }
+  await unlinkPointerFile(getBridgePointerPath(dir))
 }
 
 async function unlinkPointerFile(path: string): Promise<void> {

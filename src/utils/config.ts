@@ -1310,7 +1310,7 @@ function saveConfigWithLock<A extends object>(
 
     // Create timestamped backup of existing config before writing
     // We keep multiple backups to prevent data loss if a reset/corrupted config
-    // overwrites a good backup. Backups are stored in ~/.claude/backups/ to
+    // overwrites a good backup. Backups are stored in <config home>/backups/ to
     // keep the home directory clean.
     try {
       const fileBase = basename(file)
@@ -1427,16 +1427,15 @@ export function enableConfigs(): void {
 
 /**
  * Returns the directory where config backup files are stored.
- * Uses ~/.claude/backups/ to keep the home directory clean.
+ * Uses <config home>/backups/ to keep the home directory clean.
  */
 function getConfigBackupDir(): string {
   return join(getClaudeConfigHomeDir(), 'backups')
 }
 
 /**
- * Find the most recent backup file for a given config file.
- * Checks ~/.claude/backups/ first, then falls back to the legacy location
- * (next to the config file) for backwards compatibility.
+ * Find the most recent backup file for a given config file in the config
+ * backup directory (`<config home>/backups/`).
  * Returns the full path to the most recent backup, or null if none exist.
  */
 function findMostRecentBackup(file: string): string | null {
@@ -1444,7 +1443,6 @@ function findMostRecentBackup(file: string): string | null {
   const fileBase = basename(file)
   const backupDir = getConfigBackupDir()
 
-  // Check the new backup directory first
   try {
     const backups = fs
       .readdirStringSync(backupDir)
@@ -1457,32 +1455,6 @@ function findMostRecentBackup(file: string): string | null {
     }
   } catch {
     // Backup dir doesn't exist yet
-  }
-
-  // Fall back to legacy location (next to the config file)
-  const fileDir = dirname(file)
-
-  try {
-    const backups = fs
-      .readdirStringSync(fileDir)
-      .filter(f => f.startsWith(`${fileBase}.backup.`))
-      .sort()
-
-    const mostRecent = backups.at(-1) // Timestamps sort lexicographically
-    if (mostRecent) {
-      return join(fileDir, mostRecent)
-    }
-
-    // Check for legacy backup file (no timestamp)
-    const legacyBackup = `${file}.backup`
-    try {
-      fs.statSync(legacyBackup)
-      return legacyBackup
-    } catch {
-      // Legacy backup doesn't exist
-    }
-  } catch {
-    // Ignore errors reading directory
   }
 
   return null
@@ -1555,13 +1527,7 @@ function getConfig<A>(
           logError(error)
 
           // Log analytics event for config corruption
-          let hasBackup = false
-          try {
-            fs.statSync(`${file}.backup`)
-            hasBackup = true
-          } catch {
-            // No backup
-          }
+          const hasBackup = findMostRecentBackup(file) !== null
           logEvent('tengu_config_parse_error', {
             has_backup: hasBackup,
           })

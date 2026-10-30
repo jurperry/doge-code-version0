@@ -210,8 +210,7 @@ export function initAutoDream(): void {
 
     try {
       const memoryRoot = getAutoMemPath()
-      // Read path: findProjectDir falls back to the v1 encoding for
-      // directories created before the 2026-09-06 switch.
+      // Read path: findProjectDir tolerates hash-suffix mismatches on long paths.
       const transcriptDir =
         (await findProjectDir(getOriginalCwd())) ??
         getProjectDir(getOriginalCwd())

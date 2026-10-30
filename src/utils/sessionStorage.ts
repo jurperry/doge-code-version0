@@ -88,8 +88,8 @@ import {
   extractJsonStringField,
   extractLastJsonStringField,
   findProjectDir,
-  legacySanitizePath,
   LITE_READ_BUF_SIZE,
+  MAX_SANITIZED_LENGTH,
   readHeadAndTail,
   readTranscriptForLoad,
   SKIP_PRECOMPACT_THRESHOLD,
@@ -2722,8 +2722,7 @@ async function trackSessionBranchingAnalytics(
 
 export async function fetchLogs(limit?: number): Promise<LogOption[]> {
   const cwd = getOriginalCwd()
-  // Read path: fall back through findProjectDir so directories named with
-  // the v1 encoding (pre-2026-09-06) are still listed for resume.
+  // Read path: findProjectDir tolerates hash-suffix mismatches on long paths.
   const projectDir = (await findProjectDir(cwd)) ?? getProjectDir(cwd)
   const logs = await getSessionFilesLite(projectDir, limit, cwd)
 
@@ -4291,8 +4290,7 @@ async function getStatOnlyLogsForWorktrees(
 
   if (worktreePaths.length <= 1) {
     const cwd = getOriginalCwd()
-    // Read path: findProjectDir falls back to the v1 encoding for
-    // directories created before the 2026-09-06 switch.
+    // Read path: findProjectDir tolerates hash-suffix mismatches on long paths.
     const projectDir = (await findProjectDir(cwd)) ?? getProjectDir(cwd)
     return getSessionFilesLite(projectDir, undefined, cwd)
   }
@@ -4305,21 +4303,16 @@ async function getStatOnlyLogsForWorktrees(
   // Sort worktree paths by encoded prefix length (longest first) so
   // more specific matches take priority over shorter ones. Without this,
   // a short prefix like ~code~myrepo could match ~code~myrepo-worktree1
-  // before the longer, more specific prefix gets a chance. Both v2
-  // (current) and v1 (legacy) encodings are matched; subdirSuffix is the
-  // character a deeper path's encoding continues with ('~' for v2
-  // separators, '-' for v1's collapsed separators).
-  const indexed = worktreePaths.flatMap(wt => {
-    const v2 = sanitizePath(wt)
-    const variants = [{ encoded: v2, subdirSuffix: '~' }]
-    const v1 = legacySanitizePath(wt)
-    if (v1 !== v2) variants.push({ encoded: v1, subdirSuffix: '-' })
-    return variants.map(({ encoded, subdirSuffix }) => ({
+  // before the longer, more specific prefix gets a chance. `~` is the
+  // character a deeper path's encoding continues with.
+  const indexed = worktreePaths.map(wt => {
+    const encoded = sanitizePath(wt)
+    return {
       path: wt,
       prefix: caseInsensitive ? encoded.toLowerCase() : encoded,
       truncated: encoded.length > MAX_SANITIZED_LENGTH,
-      subdirSuffix,
-    }))
+      subdirSuffix: '~',
+    }
   })
   indexed.sort((a, b) => b.prefix.length - a.prefix.length)
 

@@ -289,15 +289,6 @@ async function main(): Promise<void> {
     startCapturingEarlyInput
   } = await import('../utils/earlyInput.js');
   startCapturingEarlyInput();
-  // Rename legacy v1-named session project dirs to the v2 encoding BEFORE
-  // any session path is resolved, so new sessions and resumed ones land in
-  // the same directory. Best-effort and idempotent: dirs locked by a live
-  // session (EPERM on Windows) or without a recoverable cwd are skipped and
-  // retried on the next startup.
-  const {
-    migrateLegacyProjectDirs
-  } = await import('../utils/sessionStoragePortable.js');
-  await migrateLegacyProjectDirs();
   // One-time repair of provider stores corrupted by the duplicate-provider
   // bug (same providerName on multiple modelProfiles entries): physically
   // dedupes secure storage AND the .claude.json mirror before anything reads

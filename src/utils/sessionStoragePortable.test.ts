@@ -1,15 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   decodeProjectDirName,
   findProjectDir,
   getProjectDir,
-  legacySanitizePath,
-  migrateLegacyProjectDirs,
   sanitizePath,
-  sanitizePathCandidates,
 } from './sessionStoragePortable.js'
 
 describe('sanitizePath (v2 encoding)', () => {
@@ -92,31 +89,7 @@ describe('decodeProjectDirName', () => {
   })
 })
 
-describe('legacySanitizePath (v1)', () => {
-  test('matches the pre-2026-09-06 behavior exactly', () => {
-    expect(legacySanitizePath('E:\\ClaudeCode\\doge-code')).toBe(
-      'E--ClaudeCode-doge-code',
-    )
-    expect(legacySanitizePath('/home/user/my-project')).toBe(
-      '-home-user-my-project',
-    )
-  })
-})
-
-describe('sanitizePathCandidates', () => {
-  test('lists v2 first, then v1, when they differ', () => {
-    const candidates = sanitizePathCandidates('E:\\ClaudeCode\\doge-code')
-    expect(candidates).toHaveLength(2)
-    expect(candidates[0]).toBe('E%3a~ClaudeCode~doge-code')
-    expect(candidates[1]).toBe('E--ClaudeCode-doge-code')
-  })
-
-  test('collapses to one entry when both variants coincide', () => {
-    expect(sanitizePathCandidates('a-b')).toEqual(['a-b'])
-  })
-})
-
-describe('findProjectDir (v2 + legacy fallback)', () => {
+describe('findProjectDir', () => {
   const root = join(tmpdir(), 'doge-ssportable-test')
   const cwd = 'E:\\hyphen-ated\\proj-ect'
 
@@ -130,115 +103,27 @@ describe('findProjectDir (v2 + legacy fallback)', () => {
     rmSync(root, { recursive: true, force: true })
   })
 
-  test('prefers the v2 directory when both exist', async () => {
+  test('resolves the v2 directory', async () => {
     mkdirSync(join(root, 'config', 'projects', sanitizePath(cwd)), {
-      recursive: true,
-    })
-    mkdirSync(join(root, 'config', 'projects', legacySanitizePath(cwd)), {
       recursive: true,
     })
     expect(await findProjectDir(cwd)).toBe(getProjectDir(cwd))
   })
 
-  test('falls back to a legacy v1 directory', async () => {
+  test('returns undefined when it does not exist', async () => {
     rmSync(join(root, 'config', 'projects', sanitizePath(cwd)), {
-      recursive: true,
-      force: true,
-    })
-    expect(await findProjectDir(cwd)).toBe(
-      join(root, 'config', 'projects', legacySanitizePath(cwd)),
-    )
-  })
-
-  test('returns undefined when neither exists', async () => {
-    rmSync(join(root, 'config', 'projects', legacySanitizePath(cwd)), {
       recursive: true,
       force: true,
     })
     expect(await findProjectDir(cwd)).toBeUndefined()
   })
-})
 
-describe('migrateLegacyProjectDirs', () => {
-  const root = join(tmpdir(), 'doge-ssportable-migrate')
-  const config = join(root, 'config')
-  const projects = join(config, 'projects')
-
-  // three different real cwds, all with hyphens in names
-  const CWD_A = 'E:\\work\\my-repo'
-  const CWD_B = 'E:\\work\\other.proj'
-  const CWD_C = 'E:\\work\\third_repo'
-  const sid = (n: string) => `${n}${'0'.repeat(8)}-0000-4000-8000-${'1'.repeat(12)}`
-
-  const writeSession = (dir: string, id: string, cwd: string): void => {
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(
-      join(dir, `${id}.jsonl`),
-      JSON.stringify({
-        type: 'user',
-        message: { role: 'user', content: `session ${id}` },
-        cwd,
-        sessionId: id,
-        timestamp: new Date().toISOString(),
-      }) + '\n',
-    )
-  }
-
-  beforeAll(() => {
-    rmSync(root, { recursive: true, force: true })
-    process.env.CLAUDE_CONFIG_DIR = config
-  })
-
-  afterAll(() => {
-    delete process.env.CLAUDE_CONFIG_DIR
-    rmSync(root, { recursive: true, force: true })
-  })
-
-  test('renames v1 dirs, merges into existing v2, skips cwd-less dirs, is idempotent', async () => {
-    // A: pure v1 dir → rename
-    writeSession(join(projects, legacySanitizePath(CWD_A)), sid('a1'), CWD_A)
-
-    // B: v1 dir + pre-existing v2 dir → merge (v1 side also has archived/ + memory/)
-    const v1b = join(projects, legacySanitizePath(CWD_B))
-    writeSession(v1b, sid('b1'), CWD_B)
-    mkdirSync(join(v1b, 'archived'), { recursive: true })
-    writeFileSync(join(v1b, 'archived', `${sid('b2')}.jsonl`), '{}\n')
-    mkdirSync(join(v1b, 'memory'), { recursive: true })
-    writeFileSync(join(v1b, 'memory', 'MEMORY.md'), '# legacy\n')
-    const v2b = join(projects, sanitizePath(CWD_B))
-    writeSession(v2b, sid('b3'), CWD_B)
-    mkdirSync(join(v2b, 'archived'), { recursive: true })
-    mkdirSync(join(v2b, 'memory'), { recursive: true })
-    writeFileSync(join(v2b, 'memory', 'MEMORY.md'), '# newer\n')
-
-    // C: v1 dir with no jsonl at all (only memory) → skipped, untouched
-    const v1c = join(projects, legacySanitizePath(CWD_C))
-    mkdirSync(join(v1c, 'memory'), { recursive: true })
-    writeFileSync(join(v1c, 'memory', 'MEMORY.md'), '# no sessions\n')
-
-    const r1 = await migrateLegacyProjectDirs()
-    expect(r1.renamed).toBe(1)
-    expect(r1.merged).toBe(1)
-    expect(r1.skipped).toBe(1)
-
-    // A renamed to v2, old name gone
-    expect(existsSync(join(projects, sanitizePath(CWD_A), `${sid('a1')}.jsonl`))).toBe(true)
-    expect(existsSync(join(projects, legacySanitizePath(CWD_A)))).toBe(false)
-
-    // B merged: both sessions at top level, archived merged, memory newest wins
-    expect(existsSync(join(v2b, `${sid('b1')}.jsonl`))).toBe(true)
-    expect(existsSync(join(v2b, `${sid('b3')}.jsonl`))).toBe(true)
-    expect(existsSync(join(v2b, 'archived', `${sid('b2')}.jsonl`))).toBe(true)
-    // both MEMORY.md were written in the same millisecond; the merge keeps
-    // dest when mtimes tie, so just assert one file remains and src is gone
-    expect(existsSync(join(v2b, 'memory', 'MEMORY.md'))).toBe(true)
-    expect(existsSync(v1b)).toBe(false)
-
-    // C untouched
-    expect(existsSync(v1c)).toBe(true)
-
-    // second run: nothing left to do
-    const r2 = await migrateLegacyProjectDirs()
-    expect(r2.renamed + r2.merged).toBe(0)
+  test('matches a long path by prefix when the hash suffix differs', async () => {
+    const longCwd = 'C:\\' + 'a'.repeat(300)
+    const prefix = sanitizePath(longCwd).slice(0, 200)
+    const otherRuntimeDir = join(root, 'config', 'projects', `${prefix}-otherhash`)
+    mkdirSync(otherRuntimeDir, { recursive: true })
+    expect(await findProjectDir(longCwd)).toBe(otherRuntimeDir)
+    rmSync(otherRuntimeDir, { recursive: true, force: true })
   })
 })
