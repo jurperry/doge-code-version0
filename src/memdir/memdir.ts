@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import { getFsImplementation } from '../utils/fsOperations.js'
 import { getAutoMemPath, isAutoMemoryEnabled } from './paths.js'
@@ -141,6 +142,24 @@ export async function ensureMemoryDirExists(memoryDir: string): Promise<void> {
         : undefined
     logForDebugging(
       `ensureMemoryDirExists failed for ${memoryDir}: ${code ?? String(e)}`,
+      { level: 'debug' },
+    )
+  }
+}
+
+/** 索引文件必须存在；wx 保证并发初始化和重复加载都不覆盖用户记忆。 */
+export async function ensureMemoryEntrypointExists(memoryDir: string): Promise<void> {
+  const entrypoint = join(memoryDir, ENTRYPOINT_NAME)
+  try {
+    await writeFile(entrypoint, '', { encoding: 'utf8', flag: 'wx' })
+  } catch (e) {
+    const code =
+      e instanceof Error && 'code' in e && typeof e.code === 'string'
+        ? e.code
+        : undefined
+    if (code === 'EEXIST') return
+    logForDebugging(
+      `ensureMemoryEntrypointExists failed for ${entrypoint}: ${code ?? String(e)}`,
       { level: 'debug' },
     )
   }
@@ -414,9 +433,13 @@ export function buildSearchingPastContextSection(autoMemDir: string): string[] {
  * Team memory requires auto memory (enforced by isTeamMemoryEnabled), so
  * there is no team-only branch.
  *
- * Returns null when auto memory is disabled.
+ * Returns null when auto memory is disabled. The MEMORY.md index is still
+ * initialized once without overwriting existing content.
  */
 export async function loadMemoryPrompt(): Promise<string | null> {
+  const autoDir = getAutoMemPath()
+  await ensureMemoryDirExists(autoDir)
+  await ensureMemoryEntrypointExists(autoDir)
   const autoEnabled = isAutoMemoryEnabled()
 
   const skipIndex = getFeatureValue_CACHED_MAY_BE_STALE(
@@ -430,7 +453,7 @@ export async function loadMemoryPrompt(): Promise<string | null> {
   // means the !autoEnabled case falls through to the tengu_memdir_disabled
   // telemetry block below, matching the non-KAIROS path.
   if (feature('KAIROS') && autoEnabled && getKairosActive()) {
-    logMemoryDirCounts(getAutoMemPath(), {
+    logMemoryDirCounts(autoDir, {
       memory_type:
         'auto' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     })
@@ -447,15 +470,7 @@ export async function loadMemoryPrompt(): Promise<string | null> {
 
   if (feature('TEAMMEM')) {
     if (teamMemPaths!.isTeamMemoryEnabled()) {
-      const autoDir = getAutoMemPath()
       const teamDir = teamMemPaths!.getTeamMemPath()
-      // Harness guarantees these directories exist so the model can write
-      // without checking. The prompt text reflects this ("already exists").
-      // Only creating teamDir is sufficient: getTeamMemPath() is defined as
-      // join(getAutoMemPath(), 'team'), so recursive mkdir of the team dir
-      // creates the auto dir as a side effect. If the team dir ever moves
-      // out from under the auto dir, add a second ensureMemoryDirExists call
-      // for autoDir here.
       await ensureMemoryDirExists(teamDir)
       logMemoryDirCounts(autoDir, {
         memory_type:
@@ -473,10 +488,6 @@ export async function loadMemoryPrompt(): Promise<string | null> {
   }
 
   if (autoEnabled) {
-    const autoDir = getAutoMemPath()
-    // Harness guarantees the directory exists so the model can write without
-    // checking. The prompt text reflects this ("already exists").
-    await ensureMemoryDirExists(autoDir)
     logMemoryDirCounts(autoDir, {
       memory_type:
         'auto' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,

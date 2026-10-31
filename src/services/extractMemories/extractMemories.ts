@@ -26,6 +26,7 @@ import {
   getAutoMemPath,
   isAutoMemoryEnabled,
   isAutoMemPath,
+  isExtractModeActive,
 } from '../../memdir/paths.js'
 import type { Tool } from '../../Tool.js'
 import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
@@ -418,6 +419,8 @@ export function initExtractMemories(): void {
         canUseTool,
         querySource: 'extract_memories',
         forkLabel: 'extract_memories',
+        // 主回合停止/会话替换只取消前台工作；已完成的对话仍需完成记忆落盘。
+        overrides: { abortController: createAbortController() },
         // The extractMemories subagent does not need to record to transcript.
         // Doing so can create race conditions with the main thread.
         skipTranscript: true,
@@ -533,7 +536,7 @@ export function initExtractMemories(): void {
       return
     }
 
-    if (!getFeatureValue_CACHED_MAY_BE_STALE('tengu_passport_quail', false)) {
+    if (!isExtractModeActive()) {
       if (process.env.USER_TYPE === 'ant' && !hasLoggedGateFailure) {
         hasLoggedGateFailure = true
         logEvent('tengu_extract_memories_gate_disabled', {})

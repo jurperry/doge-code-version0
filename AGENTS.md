@@ -52,6 +52,7 @@
 | `CLAUDE_CODE_DISABLE_COMMAND_INJECTION_CHECK` | 关闭 Bash 命令注入检测（安全相关，慎用） |
 | `DOGE_RIPGREP_PATH` | 覆盖内置 ripgrep 二进制路径 |
 | `DOGE_HEADLESS_BUILTIN_MCP` | headless 模式下启用内置 MCP（含 Playwright） |
+| `DOGE_HEADLESS_AUTO_MEMORY` | App 长驻 headless 会话显式启用回合末自动记忆提取；普通一次性 `-p` 仍走上游灰度门 |
 | `DOGE_PLAYWRIGHT_MCP` / `DOGE_PLAYWRIGHT_*` | 内置 Playwright MCP 开关与浏览器配置（`DOGE_PLAYWRIGHT_MCP=0` 关闭） |
 
 - **Auto 自动计划（2.1.314）**：`autoPlan` 只标记模型从 bypassPermissions 进入的 Plan，手动 Plan（含旗标启动会话）保留交互；只读工具和当前计划文件可执行，配置/hook allow 不可越过边界。ExitPlan 自动回 Auto，不询问权限模式；切到其他模式统一清 prePlanMode/autoPlan。远程接入/新 prompt 保留自动 Plan；`plan_mode` attachment（含 compact）记录来源，历史按 snapshot 渲染。Auto 执行/收尾阶段禁止 AskUserQuestion，动态提示同时约束普通文本提问，不伪造提交/合并同意；需要实际规划时模型自行 EnterPlanMode。只有自动 Plan 内保留 CLI 单一300000ms人工询问期限，未提交按label末尾推荐标记自动选择（无推荐首项、多选全部推荐），结果诚实标自动来源；TUI与mailbox队首展示才起钟，stdio/MCP/无宿主/队友共用一次性决胜，切回 Auto 撤销活动/排队问题并忽略迟到回复，取消不终止模型回合。MCP elicitation 表单/URL retry 仍走共享自动应答并过 ElicitationResult hooks 与 SDK schema 校验，不挂询问队列；显式 deny 与 killswitch 保留。测试：tools/auto-{plan,question,question-channels,question-lifecycle,elicitation}.test.ts，App tools/verify-auto-{plan,question}.mjs 与 verify-im-remote R18。

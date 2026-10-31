@@ -410,9 +410,7 @@ const cronJitterConfigModule = feature('AGENT_TRIGGERS')
 const cronGate = feature('AGENT_TRIGGERS')
   ? (require('../tools/ScheduleCronTool/prompt.js') as typeof import('../tools/ScheduleCronTool/prompt.js'))
   : null
-const extractMemoriesModule = feature('EXTRACT_MEMORIES')
-  ? (require('../services/extractMemories/extractMemories.js') as typeof import('../services/extractMemories/extractMemories.js'))
-  : null
+const extractMemoriesModule = require('../services/extractMemories/extractMemories.js') as typeof import('../services/extractMemories/extractMemories.js')
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 const SHUTDOWN_TEAM_PROMPT = `<system-reminder>
@@ -1007,8 +1005,8 @@ export async function runHeadless(
   // delays process exit so gracefulShutdownSync's 5s failsafe doesn't kill
   // the forked agent mid-flight. Gated by isExtractModeActive so the
   // tengu_slate_thimble flag controls non-interactive extraction end-to-end.
-  if (feature('EXTRACT_MEMORIES') && isExtractModeActive()) {
-    await extractMemoriesModule!.drainPendingExtraction()
+  if (isExtractModeActive()) {
+    await extractMemoriesModule.drainPendingExtraction()
   }
 
   gracefulShutdownSync(
@@ -1085,7 +1083,10 @@ function runHeadlessStreaming(
     if (abortController && !abortController.signal.aborted) {
       abortController.abort()
     }
-    void gracefulShutdown(0)
+    void (async () => {
+      if (isExtractModeActive()) await extractMemoriesModule.drainPendingExtraction()
+      await gracefulShutdown(0)
+    })()
   }
   process.on('SIGINT', sigintHandler)
 

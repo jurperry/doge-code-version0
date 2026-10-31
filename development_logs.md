@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-10-31 App 长驻会话跨会话记忆链路与退出回收（2.1.315）
+
+1. 遇到问题：外部 Bun 构建的 `feature('EXTRACT_MEMORIES')` 在编译期移除记忆提取模块，App 回合结束无法执行后台提取；上游两个灰度门默认关闭，目录初始化也不保证 `MEMORY.md`。审查发现主回合 abort 会联动取消已开始提取，`end_session`/SIGINT 与宿主硬杀可能丢失记忆。
+2. 解决方法：相关入口保留提取模块，`isExtractModeActive` 统一运行时门禁，App 以 `DOGE_HEADLESS_AUTO_MEMORY=1` 显式选择加入，普通一次性 `-p` 灰度行为不变。`loadMemoryPrompt` 在读取开关前以 `wx` 初始化索引，禁用时不注入记忆但仍保留文件。提取使用独立 AbortController，退出先 drain；邻仓 App 优雅硬杀宽限 65s。真实 mock 验证主模型不写时仍提取主题与索引、关闭/重开设置、提取中 `end_session` 后写完再退出；应用整体 `before-quit` 仍走既有立即强杀，不在 65s 保证范围。
+3. 位置：`src/cli/print.ts`、`src/query/stopHooks.ts`、`src/utils/backgroundHousekeeping.ts`、`src/memdir/{paths,memdir}.ts`、`src/services/extractMemories/extractMemories.ts`、`src/memdir/memoryLifecycle.test.ts`（新）、`AGENTS.md`；邻仓测试 `verify-{auto-memory,memory-shutdown}.mjs`。独立复审无剩余 Critical/Important；聚焦 4/4、冒烟 2.1.315 通过；逐文件全量 989 pass，唯一全屏滚轮失败在未修改基线同样复现。
+
 ## 2026-10-29 Windows 终端右键复制 TUI 选择文本乱码
 
 1. 遇到问题：Windows 中文系统控制台代码页为 936 时，全屏 TUI 的选择文本经 `clip.exe` 写入剪贴板；`clip.exe` 按控制台代码页解码 UTF-8 标准输入，中文/表情变成乱码，右键粘贴即出现整段乱码。`getClipboardPath` 未把 Windows 计入 native，toast 误称仅 OSC 52。

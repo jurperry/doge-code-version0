@@ -62,11 +62,13 @@ export function isAutoMemoryEnabled(): boolean {
  * skips that range (hasMemoryWritesSince in extractMemories.ts); when it
  * doesn't, the background agent catches anything missed.
  *
- * Callers must also gate on feature('EXTRACT_MEMORIES') — that check cannot
- * live inside this helper because feature() only tree-shakes when used
- * directly in an `if` condition.
+ * The module stays in external builds; this runtime gate is the single policy
+ * for interactive, one-shot headless and App-hosted long-lived sessions.
  */
 export function isExtractModeActive(): boolean {
+  // Doge Code App 的 stream-json 会话是长驻交互产品，不是一次性脚本。
+  // 由壳显式选择加入，避免上游两个灰度门把桌面回合后的提取永久关闭。
+  if (isEnvTruthy(process.env.DOGE_HEADLESS_AUTO_MEMORY)) return true
   if (!getFeatureValue_CACHED_MAY_BE_STALE('tengu_passport_quail', false)) {
     return false
   }
