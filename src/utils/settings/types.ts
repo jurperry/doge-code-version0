@@ -651,7 +651,7 @@ export const SettingsSchema = lazySchema(() =>
         .boolean()
         .optional()
         .describe(
-          'Skip the WebFetch blocklist check for enterprise environments with restrictive security policies',
+          'Skip the WebFetch Anthropic domain preflight; defaults to skipped for non-Anthropic protocols and custom endpoints',
         ),
       sandbox: SandboxSettingsSchema().optional(),
       feedbackSurveyRate: z

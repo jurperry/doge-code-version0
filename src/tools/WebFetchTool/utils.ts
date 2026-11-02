@@ -13,6 +13,8 @@ import {
   persistBinaryContent,
 } from '../../utils/mcpOutputStorage.js'
 import { getSettings_DEPRECATED } from '../../utils/settings/settings.js'
+import { getModelConnection } from '../../utils/model/runtimeModelContext.js'
+import { isFirstPartyAnthropicBaseUrl } from '../../utils/model/providers.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
 import { isPreapprovedHost } from './preapproved.js'
 import { makeSecondaryModelPrompt } from './prompt.js'
@@ -26,9 +28,14 @@ class DomainBlockedError extends Error {
 }
 
 class DomainCheckFailedError extends Error {
-  constructor(domain: string) {
+  constructor(domain: string, cause: unknown) {
+    const reason = axios.isAxiosError(cause) && cause.response
+      ? `HTTP ${cause.response.status}`
+      : cause instanceof Error
+        ? cause.message
+        : String(cause)
     super(
-      `Unable to verify if domain ${domain} is safe to fetch. This may be due to network restrictions or enterprise security policies blocking claude.ai.`,
+      `Unable to verify if domain ${domain} is safe to fetch: the Anthropic domain preflight request to api.anthropic.com failed (${reason}).`,
     )
     this.name = 'DomainCheckFailedError'
   }
@@ -166,6 +173,15 @@ export function validateURL(url: string): boolean {
   }
 
   return true
+}
+
+export function shouldRunWebFetchPreflight(
+  skipWebFetchPreflight: boolean | undefined,
+  provider = getModelConnection().provider,
+  firstPartyAnthropic = isFirstPartyAnthropicBaseUrl(),
+): boolean {
+  if (skipWebFetchPreflight !== undefined) return !skipWebFetchPreflight
+  return provider === 'anthropic' && firstPartyAnthropic
 }
 
 type DomainCheckResult =
@@ -380,11 +396,8 @@ export async function getURLMarkdownContent(
 
     const hostname = parsedUrl.hostname
 
-    // Check if the user has opted to skip the blocklist check
-    // This is for enterprise customers with restrictive security policies
-    // that prevent outbound connections to claude.ai
     const settings = getSettings_DEPRECATED()
-    if (!settings.skipWebFetchPreflight) {
+    if (shouldRunWebFetchPreflight(settings.skipWebFetchPreflight)) {
       const checkResult = await checkDomainBlocklist(hostname)
       switch (checkResult.status) {
         case 'allowed':
@@ -393,7 +406,7 @@ export async function getURLMarkdownContent(
         case 'blocked':
           throw new DomainBlockedError(hostname)
         case 'check_failed':
-          throw new DomainCheckFailedError(hostname)
+          throw new DomainCheckFailedError(hostname, checkResult.error)
       }
     }
 

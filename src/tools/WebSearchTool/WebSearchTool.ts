@@ -150,6 +150,47 @@ function makeOutputFromSearchResponse(
   }
 }
 
+export function validateWebSearchResponse(
+  contentBlocks: BetaContentBlock[],
+  output: Output,
+  aborted: boolean,
+): void {
+  const searchResultBlocks = contentBlocks.filter(
+    block => block.type === 'web_search_tool_result',
+  )
+  const errorBlock = searchResultBlocks.find(
+    block => !Array.isArray(block.content),
+  )
+  if (errorBlock && !Array.isArray(errorBlock.content)) {
+    throw new Error(
+      `Web search failed: ${errorBlock.content.error_code || 'unknown_error'}`,
+    )
+  }
+
+  const hasSearchResults = searchResultBlocks.some(block =>
+    Array.isArray(block.content),
+  )
+  const hasSearchHits = output.results.some(
+    result => typeof result !== 'string' && result.content.length > 0,
+  )
+  const hasText = output.results.some(
+    result => typeof result === 'string' && result.trim().length > 0,
+  )
+  if (!hasSearchHits && !hasText && aborted) {
+    throw new AbortError()
+  }
+  if (!hasSearchResults) {
+    throw new Error(
+      'Web search failed: the current API endpoint returned no verifiable web search activity or structured results (the provider or selected search model may not support web search)',
+    )
+  }
+  if (!hasSearchHits && !hasText) {
+    throw new Error(
+      'Web search failed: the current API endpoint returned no search results',
+    )
+  }
+}
+
 export const WebSearchTool = buildTool({
   name: WEB_SEARCH_TOOL_NAME,
   searchHint: 'search the web for current information',
@@ -412,10 +453,9 @@ export const WebSearchTool = buildTool({
       durationSeconds,
     )
 
-    // Fail loudly instead of returning an empty success. Endpoints that don't
-    // support web search (or where the search call failed) produce no
-    // web_search_tool_result blocks at all, which used to surface as a silent
-    // "did 0 searches" success.
+    // Ordinary commentary is not evidence that a search ran: unsupported
+    // endpoints often answer the nested prompt with "I cannot search" text.
+    // Require a native/synthesized search block as well as usable output.
     // Errors thrown by the stream itself propagate from the for-await above
     // with their original reason; the executor turns thrown errors into an
     // is_error tool result.
@@ -423,22 +463,11 @@ export const WebSearchTool = buildTool({
       throw new Error(`Web search failed: ${apiErrorReason}`)
     }
 
-    const hasSearchHits = data.results.some(
-      result => typeof result !== 'string' && result.content.length > 0,
+    validateWebSearchResponse(
+      allContentBlocks,
+      data,
+      context.abortController.signal.aborted,
     )
-    const hasText = data.results.some(
-      result => typeof result === 'string' && result.trim().length > 0,
-    )
-    if (!hasSearchHits && !hasText) {
-      // An aborted nested query ends the stream with no events and no error —
-      // report the interrupt, not a bogus search failure.
-      if (context.abortController.signal.aborted) {
-        throw new AbortError()
-      }
-      throw new Error(
-        'Web search failed: the current API endpoint returned no search results (the provider may not support web search)',
-      )
-    }
 
     return { data }
   },

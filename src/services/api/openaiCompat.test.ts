@@ -885,3 +885,184 @@ test('request ending with a multi-image tool round flushes one merged user image
   expect(lastContent.filter(part => part.type === 'text')).toHaveLength(2)
   expectContiguousToolMessages(request.messages)
 })
+
+function synthesizedSearchResults(events: BetaRawMessageStreamEvent[]) {
+  return events.flatMap(event =>
+    event.type === 'content_block_start' &&
+    event.content_block.type === 'web_search_tool_result'
+      ? [event.content_block]
+      : [],
+  )
+}
+
+test('Chat web search maps to web_search_options without a phantom function tool', () => {
+  const request = convertAnthropicRequestToOpenAI({
+    model: 'gpt-4o-search-preview',
+    messages: [],
+    tools: [
+      {
+        type: 'web_search_20250305',
+        name: 'web_search',
+        max_uses: 8,
+      } as unknown as Parameters<typeof convertAnthropicRequestToOpenAI>[0]['tools'][number],
+    ],
+    tool_choice: { type: 'tool', name: 'web_search' },
+  })
+  expect(request.web_search_options).toEqual({ search_context_size: 'high' })
+  expect(request.tools).toBeUndefined()
+  expect(request.tool_choice).toBeUndefined()
+})
+
+test('Chat delta url_citation annotations synthesize structured search results', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      { id: 'search_1', choices: [{ delta: { content: 'Found it.' }, finish_reason: null }] },
+      {
+        id: 'search_1',
+        choices: [{
+          delta: {
+            annotations: [{
+              type: 'url_citation',
+              url_citation: { url: 'https://example.com/a', title: 'Article A' },
+            }],
+          },
+          finish_reason: 'stop',
+        }],
+      },
+    ]),
+  )
+  const blocks = synthesizedSearchResults(events)
+  expect(blocks).toHaveLength(1)
+  expect(blocks[0].content).toEqual([
+    expect.objectContaining({
+      type: 'web_search_result',
+      url: 'https://example.com/a',
+      title: 'Article A',
+    }),
+  ])
+})
+
+test('Chat final-message annotations support direct citations and reject unsafe URLs', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      { choices: [{ delta: { content: 'Done.' }, finish_reason: null }] },
+      {
+        choices: [{
+          delta: {},
+          message: {
+            annotations: [
+              { type: 'url_citation', url: 'https://example.com/final', title: 'Final' },
+              { type: 'url_citation', url: 'javascript:alert(1)', title: 'Unsafe' },
+            ],
+          },
+          finish_reason: 'stop',
+        }],
+      },
+    ]),
+  )
+  const blocks = synthesizedSearchResults(events)
+  expect(blocks).toHaveLength(1)
+  expect(blocks[0].content).toEqual([
+    expect.objectContaining({ url: 'https://example.com/final', title: 'Final' }),
+  ])
+})
+
+test('Chat GLM search_result metadata is collected, deduped and retains the best title', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      {
+        search_result: [{ title: '', link: 'https://example.com/glm' }],
+        choices: [{ delta: { content: 'Found.' }, finish_reason: null }],
+      },
+      {
+        choices: [{
+          delta: {
+            search_result: [
+              { title: 'GLM result', link: 'https://example.com/glm' },
+              { title: 'Second', url: 'https://example.com/second' },
+            ],
+          },
+          finish_reason: 'stop',
+        }],
+      },
+    ]),
+  )
+  const blocks = synthesizedSearchResults(events)
+  expect(blocks).toHaveLength(1)
+  expect(blocks[0].content).toEqual([
+    expect.objectContaining({ url: 'https://example.com/glm', title: 'GLM result' }),
+    expect.objectContaining({ url: 'https://example.com/second', title: 'Second' }),
+  ])
+})
+
+test('Chat empty search_result metadata preserves search activity with zero hits', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      {
+        search_result: [],
+        choices: [{ delta: { content: 'No matching pages.' }, finish_reason: 'stop' }],
+      },
+    ]),
+  )
+  const blocks = synthesizedSearchResults(events)
+  expect(blocks).toHaveLength(1)
+  expect(blocks[0].content).toEqual([])
+})
+
+test('Chat ordinary text without structured metadata does not fabricate search activity', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      { choices: [{ delta: { content: 'I cannot search https://example.com' }, finish_reason: 'stop' }] },
+    ]),
+  )
+  expect(synthesizedSearchResults(events)).toHaveLength(0)
+})
+
+test('Chat standalone search_result metadata chunks may have no choices', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      {
+        search_result: [{ title: 'Standalone', link: 'https://example.com/standalone' }],
+        choices: [],
+      },
+      { choices: [{ delta: { content: 'Done.' }, finish_reason: 'stop' }] },
+    ]),
+  )
+  const blocks = synthesizedSearchResults(events)
+  expect(blocks).toHaveLength(1)
+  expect(blocks[0].content).toEqual([
+    expect.objectContaining({ url: 'https://example.com/standalone', title: 'Standalone' }),
+  ])
+})
+
+test('Chat no-text tool and search blocks use consecutive content indices', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      {
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call_weather',
+              type: 'function',
+              function: { name: 'Weather', arguments: '{}' },
+            }],
+            annotations: [{
+              type: 'url_citation',
+              url_citation: { url: 'https://example.com/weather', title: 'Weather' },
+            }],
+          },
+          finish_reason: null,
+        }],
+      },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    ]),
+  )
+  const starts = events.filter(event => event.type === 'content_block_start')
+  expect(starts.map(event => event.index)).toEqual([0, 1, 2])
+  expect(starts.map(event => event.content_block.type)).toEqual([
+    'tool_use',
+    'server_tool_use',
+    'web_search_tool_result',
+  ])
+})

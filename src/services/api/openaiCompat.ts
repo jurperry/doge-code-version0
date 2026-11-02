@@ -71,9 +71,31 @@ export type OpenAIChatRequest = {
   }
 }
 
+type OpenAIAnnotation = {
+  type?: string
+  url?: string
+  title?: string
+  url_citation?: {
+    url?: string
+    title?: string
+  }
+}
+
+type OpenAISearchResult = {
+  title?: string
+  url?: string
+  link?: string
+}
+
+type OpenAIMessageSearchMetadata = {
+  annotations?: OpenAIAnnotation[]
+  search_result?: OpenAISearchResult[]
+}
+
 type OpenAIStreamChunk = {
   id?: string
   model?: string
+  search_result?: OpenAISearchResult[]
   choices?: Array<{
     index?: number
     delta?: {
@@ -89,16 +111,12 @@ type OpenAIStreamChunk = {
           arguments?: string
         }
       }>
-      // gpt-4o-search-preview style citations; some providers only emit
-      // these on the final chunk.
-      annotations?: Array<{
-        type?: string
-        url_citation?: {
-          url?: string
-          title?: string
-        }
-      }>
+      annotations?: OpenAIAnnotation[]
+      search_result?: OpenAISearchResult[]
     }
+    // Some compatible gateways attach final search metadata to message instead
+    // of delta even when the response is transported as SSE chunks.
+    message?: OpenAIMessageSearchMetadata
     finish_reason?: string | null
   }>
   usage?: {
@@ -565,6 +583,47 @@ function mapFinishReason(reason: string | null | undefined): BetaMessage['stop_r
   return 'end_turn'
 }
 
+function addSearchHit(
+  hits: Map<string, string>,
+  url: unknown,
+  title: unknown,
+): void {
+  if (typeof url !== 'string') return
+  const normalizedUrl = url.trim()
+  try {
+    const parsed = new URL(normalizedUrl)
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return
+  } catch {
+    return
+  }
+  const normalizedTitle = typeof title === 'string' ? title.trim() : ''
+  if (!hits.has(normalizedUrl) || (!hits.get(normalizedUrl) && normalizedTitle)) {
+    hits.set(normalizedUrl, normalizedTitle)
+  }
+}
+
+function collectAnnotations(
+  hits: Map<string, string>,
+  annotations?: OpenAIAnnotation[],
+): void {
+  for (const annotation of annotations ?? []) {
+    if (annotation?.type !== 'url_citation') continue
+    const citation = annotation.url_citation ?? annotation
+    addSearchHit(hits, citation.url, citation.title)
+  }
+}
+
+function collectSearchResults(
+  hits: Map<string, string>,
+  results?: OpenAISearchResult[],
+): boolean {
+  if (!Array.isArray(results)) return false
+  for (const result of results) {
+    addSearchHit(hits, result?.url ?? result?.link, result?.title)
+  }
+  return true
+}
+
 export async function* createAnthropicStreamFromOpenAI(input: {
   reader: ReadableStreamDefaultReader<Uint8Array>
   model: string
@@ -588,9 +647,8 @@ export async function* createAnthropicStreamFromOpenAI(input: {
   let reasoningContentIndex: number | null = null
   let reasoningClosed = false
   const toolCallState = new Map<number, { id: string; name: string; arguments: string }>()
-  // url_citation annotations accumulated across chunks (deduped by url) —
-  // some providers only emit them on the final chunk.
   const urlCitations = new Map<string, string>()
+  let sawSearchResultMetadata = false
 
   try {
   while (true) {
@@ -618,7 +676,11 @@ export async function* createAnthropicStreamFromOpenAI(input: {
         const choice = chunk.choices?.[0]
         const delta = choice?.delta
 
-        if (!choice && data !== '[DONE]') {
+        if (
+          !choice &&
+          !Array.isArray(chunk.search_result) &&
+          chunk.usage === undefined
+        ) {
           throw new Error(
             `[openaiCompat] chunk missing choices[0]: ${JSON.stringify(chunk).slice(0, 1000)}`,
           )
@@ -639,13 +701,18 @@ export async function* createAnthropicStreamFromOpenAI(input: {
         if (cache.cacheRead > 0) cacheReadTokens = cache.cacheRead
         if (cache.cacheWrite > 0) cacheWriteTokens = cache.cacheWrite
 
-        // Collect web search citations (gpt-4o-search-preview style) so a
-        // web_search_tool_result block can be synthesized at stream end.
-        for (const annotation of delta?.annotations ?? []) {
-          if (annotation?.type !== 'url_citation') continue
-          const url = annotation.url_citation?.url
-          if (!url || urlCitations.has(url)) continue
-          urlCitations.set(url, annotation.url_citation?.title ?? '')
+        // Preserve only structured provider search evidence. URLs written in
+        // ordinary model text are deliberately not promoted to search results.
+        collectAnnotations(urlCitations, delta?.annotations)
+        collectAnnotations(urlCitations, choice?.message?.annotations)
+        for (const results of [
+          chunk.search_result,
+          delta?.search_result,
+          choice?.message?.search_result,
+        ]) {
+          if (collectSearchResults(urlCitations, results)) {
+            sawSearchResultMetadata = true
+          }
         }
 
         if (!started) {
@@ -706,6 +773,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           if (!textStarted) {
             textStarted = true
             textContentIndex = nextContentIndex
+            nextContentIndex++
             yield {
               type: 'content_block_start',
               index: textContentIndex,
@@ -731,14 +799,9 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           const openAIIndex = toolCall.index ?? 0
           let anthropicIndex = toolIndexByOpenAIIndex.get(openAIIndex)
           if (anthropicIndex === undefined) {
-            anthropicIndex = textStarted ? nextContentIndex + 1 : nextContentIndex
+            anthropicIndex = nextContentIndex
+            nextContentIndex++
             toolIndexByOpenAIIndex.set(openAIIndex, anthropicIndex)
-            // Without a preceding text block the +1 above never applies, so
-            // advancing only to anthropicIndex hands the same index to every
-            // tool call and their input_json_delta streams interleave.
-            nextContentIndex = textStarted
-              ? Math.max(nextContentIndex, anthropicIndex)
-              : anthropicIndex + 1
             const state = {
               id: toolCall.id ?? `toolu_${openAIIndex}`,
               name: toolCall.function?.name ?? '',
@@ -789,9 +852,11 @@ export async function* createAnthropicStreamFromOpenAI(input: {
             } as BetaRawMessageStreamEvent
           }
           if (!emittedAnyContent) {
+            const emptyTextIndex = nextContentIndex
+            nextContentIndex++
             yield {
               type: 'content_block_start',
-              index: 0,
+              index: emptyTextIndex,
               content_block: {
                 type: 'text',
                 text: '',
@@ -799,7 +864,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
             } as BetaRawMessageStreamEvent
             yield {
               type: 'content_block_stop',
-              index: 0,
+              index: emptyTextIndex,
             } as BetaRawMessageStreamEvent
           }
           // completionTokens already updated from chunk.usage above
@@ -818,16 +883,16 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           }
 
           // Synthesize Anthropic server_tool_use + web_search_tool_result
-          // blocks from collected url_citation annotations so downstream
-          // consumers (e.g. WebSearchTool) can reuse the native Anthropic
-          // parsing path. The search query is unknown on this API, so the
-          // input_json_delta carries an empty query.
+          // blocks from structured search metadata so downstream consumers
+          // can reuse the native Anthropic parsing path. The search query is
+          // unknown on this API, so input_json_delta carries an empty query.
           let webSearchRequests = 0
-          if (urlCitations.size > 0) {
+          if (urlCitations.size > 0 || sawSearchResultMetadata) {
             webSearchRequests = 1
-            const searchBlockIndex = nextContentIndex + 1
-            const resultBlockIndex = nextContentIndex + 2
-            nextContentIndex = resultBlockIndex
+            const searchBlockIndex = nextContentIndex
+            nextContentIndex++
+            const resultBlockIndex = nextContentIndex
+            nextContentIndex++
             const searchToolUseId = `srvtoolu_${chunk.id ?? 'openai_compat'}`
             yield {
               type: 'content_block_start',

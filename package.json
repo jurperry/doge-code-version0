@@ -1,6 +1,6 @@
 {
   "name": "@doge-code/cli",
-  "version": "2.1.315",
+  "version": "2.1.316",
   "private": true,
   "description": "Restored Claude Code source tree reconstructed from source maps.",
   "license": "SEE LICENSE IN LICENSE.md",
@@ -55,6 +55,7 @@
     "chokidar": "*",
     "cli-boxes": "*",
     "code-excerpt": "*",
+    "color-diff-napi": "file:./shims/color-diff-napi",
     "diff": "*",
     "emoji-regex": "*",
     "env-paths": "*",
@@ -72,6 +73,7 @@
     "lodash-es": "*",
     "lru-cache": "*",
     "marked": "*",
+    "modifiers-napi": "file:./shims/modifiers-napi",
     "p-map": "*",
     "picomatch": "*",
     "proper-lockfile": "*",
@@ -85,8 +87,10 @@
     "strip-ansi": "*",
     "supports-hyperlinks": "*",
     "tree-kill": "*",
+    "turndown": "^7.2.4",
     "type-fest": "*",
     "undici": "*",
+    "url-handler-napi": "file:./shims/url-handler-napi",
     "usehooks-ts": "*",
     "vscode-jsonrpc": "*",
     "vscode-languageserver-protocol": "*",
@@ -95,9 +99,9 @@
     "ws": "*",
     "xss": "*",
     "yaml": "*",
-    "zod": "*",
-    "color-diff-napi": "file:./shims/color-diff-napi",
-    "modifiers-napi": "file:./shims/modifiers-napi",
-    "url-handler-napi": "file:./shims/url-handler-napi"
+    "zod": "*"
+  },
+  "devDependencies": {
+    "@types/turndown": "^5.0.6"
   }
 }
