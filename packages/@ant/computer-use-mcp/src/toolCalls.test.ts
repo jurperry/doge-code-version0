@@ -239,6 +239,19 @@ describe('screenshot validity and persistence', () => {
     expect(captures).toBe(1)
     expect(saves).toBe(0)
   })
+
+  test('cursor outside a bound screenshot is not misreported as another monitor', async () => {
+    const result = await handleToolCall(makeAdapter({
+      getCursorPosition: async () => ({ x: 150, y: 25 }),
+    }), 'cursor_position', {}, makeOverrides())
+    expect(json(result)).toMatchObject({
+      x: 150,
+      y: 25,
+      coordinateSpace: 'logical_points',
+      note: expect.stringContaining('outside the last screenshot'),
+    })
+    expect(json(result).note).not.toContain('different monitor')
+  })
 })
 
 describe('computer_batch failure and visual feedback', () => {
@@ -774,6 +787,18 @@ describe('Windows effective-target permission gates', () => {
     expect(allowed.isError).toBeUndefined()
     const combo = await handleToolCall(adapter, 'key', { text: 'alt+tab' }, grants('full'))
     expect(combo.telemetry?.error_kind).toBe('grant_flag_required')
+  })
+
+  test('open_application accepts an exact granted Windows executable path', async () => {
+    const exePath = 'E:\\Plants Vs Zombies Food Version\\game\\植物大战僵尸食物版\\PlantsVsZombiesFood.exe'
+    let opened = ''
+    const result = await handleToolCall(makeAdapter({
+      openApp: async bundleId => { opened = bundleId },
+    }), 'open_application', { app: exePath }, makeOverrides({
+      allowedApps: [{ bundleId: exePath, displayName: 'PlantsVsZombiesFood', grantedAt: 1, tier: 'full' }],
+    }))
+    expect(result.isError).toBeUndefined()
+    expect(opened).toBe(exePath)
   })
 
   test('unknown and non-granted targets fail closed on Windows', async () => {

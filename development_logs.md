@@ -2,6 +2,12 @@
 
 仅保留最近 10 条，每条三行：问题 / 解决 / 位置与验证。历史实现以 git 记录为准，测试统一遵守 [test_specification.md](test_specification.md)。
 
+## 2026-11-13 Windows 高 DPI 截图与点击坐标修复（2.1.322）
+
+1. 问题：150% DPI 下 PopCap/DirectDraw 与 WinForms 的 `PrintWindow` 仅将逻辑尺寸内容贴在物理画布左上角，后续声明整窗坐标导致点击错位；绑定窗口光标回读使用缓存，真实滚轮缺少 DPI-aware 设置；安装版黑盒另发现完整中文 exe 路径已授权却无法被 `open_application` 精确匹配。
+2. 解决：捕获与输入切换 Per-Monitor-V2 并校验最终 context；在移动最小化窗口前固定显示器 DPI，只对已验证的 PopCap `MainWindow` 与 WinForms 归一化贴角内容，其他 unaware 窗口不盲目裁剪；后台消息保留物理客户区偏移，由 Windows 做接收端转换，避免双重缩放；光标改为实时窗口局部坐标并修正越界提示；`open_application` 优先接受 allowlist 中的精确路径/bundleId，再回退显示名匹配。
+3. 位置：`src/utils/computerUse/{executor,platforms/win32,win32/windowCapture,win32/windowMessage}.ts`、`packages/@ant/computer-use-mcp/src/{toolCalls,toolCalls.test}.ts`、`tools/computer-use-input-fixture-e2e.ts`、`computer_use.md`、`test_specification.md`。相关单测 109/109、隔离 WinForms 25/25、Chromium Unicode 与只读 e2e 全通过；显示器枚举 20/20；PvZ 中文路径授权及启动页、玩玩小游戏两次真实 MCP 点击通过。独立复审 Approve，无 Critical/Important；混合 DPI 副屏与游戏内 Esc 未实测。
+
 ## 2026-11-12 Windows 中文输入乱码修复（2.1.319）
 
 1. 问题：DeepSeek Harness 输入“你好，做个自我介绍”出现乱码；独立 Electron 与原生 EDIT 均复现，证明短文本 `WM_CHAR` 通道在中文环境不可靠，而非目标应用或更新器异常。
@@ -55,9 +61,3 @@
 1. 问题：Auto 执行和收尾允许五分钟人工询问，自动 Plan 却禁止讨论；队友问题沿用强制选择且切回 Auto 后未撤销。
 2. 解决：Auto 执行禁止提问，自动 Plan 保留有界讨论；共享自动推荐、展示起钟、首赢清理和迟到回复隔离，ExitPlan 自动回 Auto，不伪造提交/合并同意。
 3. 位置：`src/utils/permissions/`、`src/tools/{AskUserQuestionTool,EnterPlanModeTool}/`、`src/hooks/toolPermission/`、`src/cli/`、Auto 测试脚本。隔离 125 文件 954 测试、三协议与 IM/elicitation 验证通过。
-
-## 2026-10-24 已停止用户提示的原位替换（2.1.313 / App 消息编辑配套）
-
-1. 问题：headless 无法可靠区分纯人工停止与已有正文/工具的轮次，编辑后内存、磁盘和后续上下文可能分裂，重连还会加入合成哨兵。
-2. 解决：新增 `get_user_message_edit_state` 与 `replace_user_message`，按真实 UUID、人工停止和 sticky activity 授权；编辑前原子提交转录，失败不追加执行，支持 checkpoint、工作流恢复和配置安全边界。
-3. 位置：`src/utils/userMessageEdit*`、`src/sessionStorage*`、`src/messages.ts`、`src/tools/WorkflowTool/`、`src/QueryEngine.ts`、`src/entrypoints/sdk/`。聚焦 11 文件 71 测试、真实 stream-json 黑盒 28 项、全量 125 文件 948 pass。

@@ -38,14 +38,18 @@ public class CuInputControl : UserControl {
         KeyPress += (sender, e) => CuLog.Write("keypress", "code=" + ((int)e.KeyChar));
         KeyDown += (sender, e) => CuLog.Write("keydown", "key=" + e.KeyCode + ";ctrl=" + ((ModifierKeys & Keys.Control) != 0));
         KeyUp += (sender, e) => CuLog.Write("keyup", "key=" + e.KeyCode + ";ctrl=" + ((ModifierKeys & Keys.Control) != 0));
-        MouseDown += (sender, e) => CuLog.Write("mousedown", "button=" + e.Button + ";clicks=" + e.Clicks);
+        MouseDown += (sender, e) => CuLog.Write("mousedown", "button=" + e.Button + ";clicks=" + e.Clicks + ";x=" + e.X + ";y=" + e.Y);
         MouseUp += (sender, e) => CuLog.Write("mouseup", "button=" + e.Button);
     }
 }
 public class CuFixtureForm : Form {
     protected override void WndProc(ref Message m) {
         if (m.Msg == 0x0207 || m.Msg == 0x0208) CuLog.Write("middle", "msg=" + m.Msg);
-        if (m.Msg == 0x0201 || m.Msg == 0x0202) CuLog.Write("leftmsg", "msg=" + m.Msg);
+        if (m.Msg == 0x0201 || m.Msg == 0x0202) {
+            int x = (short)(m.LParam.ToInt64() & 0xFFFF);
+            int y = (short)((m.LParam.ToInt64() >> 16) & 0xFFFF);
+            CuLog.Write("leftmsg", "msg=" + m.Msg + ";x=" + x + ";y=" + y);
+        }
         if (m.Msg == 0x0115 || m.Msg == 0x0114) CuLog.Write("scroll", "msg=" + m.Msg + ";param=" + m.WParam.ToInt64());
         base.WndProc(ref m);
     }
@@ -131,6 +135,84 @@ $bmp.Dispose()
   const channels = pixel.split(',').map(Number)
   check('bound-window capture contains the white fixture rather than a black frame', channels.every(value => value > 200), pixel)
 
+  const bottomRight = runPowerShellSync(`
+Add-Type -AssemblyName System.Drawing
+$bmp = [System.Drawing.Bitmap]::FromFile('${boundPath.replace(/'/g, "''")}')
+$x = [Math]::Floor($bmp.Width * 0.9)
+$y = [Math]::Floor($bmp.Height * 0.9)
+$p = $bmp.GetPixel($x, $y)
+$dimensions = "$($bmp.Width),$($bmp.Height)"
+$bmp.Dispose()
+"$($p.R),$($p.G),$($p.B);$dimensions"
+`)
+  const [bottomPixel, actualDimensions] = bottomRight.split(';')
+  check('DPI-unaware capture normalizes content across the full declared canvas', bottomPixel.split(',').map(Number).every(value => value > 200), bottomPixel)
+  check('encoded JPEG dimensions match the declared screenshot dimensions', actualDimensions === `${boundShot.width},${boundShot.height}`, `${actualDimensions} vs ${boundShot.width},${boundShot.height}`)
+
+  const geometryParts = runPowerShellSync(`
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class CuFixtureGeometry {
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] public static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr h);
+    [DllImport("user32.dll")] public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr c);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+    [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);
+}
+'@
+[CuFixtureGeometry]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) | Out-Null
+$r = New-Object CuFixtureGeometry+RECT
+$p = New-Object CuFixtureGeometry+POINT
+[CuFixtureGeometry]::GetWindowRect([IntPtr]${hwnd}, [ref]$r) | Out-Null
+[CuFixtureGeometry]::ClientToScreen([IntPtr]${hwnd}, [ref]$p) | Out-Null
+$monitor = [CuFixtureGeometry]::MonitorFromWindow([IntPtr]${hwnd}, 2)
+$dpiX = [uint32]0
+$dpiY = [uint32]0
+[CuFixtureGeometry]::GetDpiForMonitor($monitor, 0, [ref]$dpiX, [ref]$dpiY) | Out-Null
+$awareness = [CuFixtureGeometry]::GetAwarenessFromDpiAwarenessContext([CuFixtureGeometry]::GetWindowDpiAwarenessContext([IntPtr]${hwnd}))
+"$($p.X - $r.L),$($p.Y - $r.T),$dpiX,$awareness"
+`).split(',').map(Number)
+  const [clientOffsetX, clientOffsetY, windowDpi, windowAwareness] = geometryParts
+  check('fixture exercises the DPI-unaware non-96-DPI capture path', windowAwareness === 0 && windowDpi > 96, `awareness=${windowAwareness}, monitorDpi=${windowDpi}`)
+  const clickPoint = {
+    x: Math.round(boundShot.displayWidth! * 0.75),
+    y: Math.round(boundShot.displayHeight! * 0.75),
+  }
+  const expectedClient = {
+    x: Math.round((clickPoint.x - clientOffsetX) * 96 / windowDpi),
+    y: Math.round((clickPoint.y - clientOffsetY) * 96 / windowDpi),
+  }
+  clearEvents()
+  await executor.click(clickPoint.x, clickPoint.y, 'left', 1)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  const coordinatedDown = events().find(event => event.kind === 'leftmsg' && event.detail.startsWith('msg=513'))
+  const actualClient = coordinatedDown
+    ? { x: Number(coordinatedDown.detail.match(/;x=(\d+)/)?.[1]), y: Number(coordinatedDown.detail.match(/;y=(\d+)/)?.[1]) }
+    : null
+  check('background SendMessage maps physical screenshot coordinates to the DPI-unaware client', JSON.stringify(actualClient) === JSON.stringify(expectedClient), `expected=${JSON.stringify(expectedClient)}, actual=${JSON.stringify(actualClient)}`)
+
+  runPowerShellSync(`
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class CuFixtureCursor {
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+}
+'@
+[CuFixtureCursor]::SetProcessDPIAware() | Out-Null
+$r = New-Object CuFixtureCursor+RECT
+[CuFixtureCursor]::GetWindowRect([IntPtr]${hwnd}, [ref]$r) | Out-Null
+[CuFixtureCursor]::SetCursorPos($r.L + 120, $r.T + 90) | Out-Null
+`)
+  const liveCursor = await executor.getCursorPosition()
+  check('cursor_position reads the live cursor in bound-window coordinates', liveCursor.x === 120 && liveCursor.y === 90, JSON.stringify(liveCursor))
+
   runPowerShellSync(`
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -142,6 +224,16 @@ public class CuFixtureWindow {
 [CuFixtureWindow]::ShowWindow([IntPtr]${hwnd}, 6) | Out-Null
 `)
   const minimizedShot = await executor.screenshot({ allowedBundleIds: ['fixture.app'] })
+  const minimizedPath = join(TMP_DIR, 'minimized.jpg')
+  writeFileSync(minimizedPath, Buffer.from(minimizedShot.base64, 'base64'))
+  const minimizedPixel = runPowerShellSync(`
+Add-Type -AssemblyName System.Drawing
+$bmp = [System.Drawing.Bitmap]::FromFile('${minimizedPath.replace(/'/g, "''")}')
+$p = $bmp.GetPixel([Math]::Floor($bmp.Width * 0.9), [Math]::Floor($bmp.Height * 0.9))
+$bmp.Dispose()
+"$($p.R),$($p.G),$($p.B)"
+`)
+  check('minimized capture preserves normalized content as well as window state', minimizedPixel.split(',').map(Number).every(value => value > 200), minimizedPixel)
   const minimized = runPowerShellSync(`
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -187,6 +279,8 @@ public class CuFixtureMin {
       ? systemCounts.at(-1) === 2
       : systemCounts.length === 3 && systemCounts[0] === 1 && systemCounts[1] === 2
     check(`${count}-click reaches the expected Windows click sequence`, nativeSequenceOk, `counts=${systemCounts.join(',')}`)
+    const clickedCursor = await executor.getCursorPosition()
+    check(`${count}-click leaves the live cursor at the requested window point`, clickedCursor.x === 60 && clickedCursor.y === 60, JSON.stringify(clickedCursor))
   }
 
   clearEvents()

@@ -24,7 +24,7 @@ Computer Use 是 Doge Code 内置的一组 MCP 工具，允许模型在用户授
 | 鼠标 | `left_click_drag` | 拖拽 |
 | 鼠标 | `left_mouse_down` / `left_mouse_up` | 分解按下与释放；释放与按下使用同一输入通道 |
 | 鼠标 | `scroll` | 四向滚动 |
-| 鼠标 | `cursor_position` | 未绑定时读取真实光标；后台绑定时返回最近的模型目标坐标 |
+| 鼠标 | `cursor_position` | 实时读取真实光标；绑定窗口时返回窗口局部坐标 |
 | 键盘 | `type` | 输入连续文本、中文、emoji、换行和 Tab |
 | 键盘 | `key` | 单键和组合键，支持 repeat |
 | 键盘 | `hold_key` | 按住组合键一段时间后释放 |
@@ -63,7 +63,7 @@ Auto/bypass 模式会按既有自动放行设计授予已解析应用及请求 f
 
 ### 2. 打开或绑定应用，再截图
 
-`open_application` 只能打开已授权应用。Windows 会记录该授权对应的 HWND、PID 和应用身份，普通后台输入与真实前台输入都可据此路由。
+`open_application` 只能打开已授权应用，优先匹配 allowlist 中完全一致的 exe 路径/bundleId，再按显示名匹配。Windows 会记录该授权对应的 HWND、PID 和应用身份，普通后台输入与真实前台输入都可据此路由。
 
 随后调用 `screenshot`：
 
@@ -213,6 +213,9 @@ AppState 保存：
 - 未绑定全屏：origin 来自 Windows `Screen.Bounds.Left/Top`，支持副屏负坐标；
 - 绑定窗口：origin 为 `(0,0)`，坐标是窗口局部坐标；
 - 真实输入只在原生边界加一次窗口 `GetWindowRect` 偏移；
+- 窗口矩形、捕获和真实输入使用 Per-Monitor-V2 物理像素；
+- 已验证的 PopCap `MainWindow` 与 WinForms DPI-unaware 窗口可能只把逻辑尺寸内容绘到物理画布左上角；捕获端在窗口移动前记录所在显示器 DPI，并只对这些已验证类型归一化到完整物理画布，其他 unaware 窗口不盲目裁剪；
+- 后台 `SendMessage` 只扣除物理客户区偏移，接收端 DPI 转换由 Windows 完成，不重复手工缩放；
 - 绑定窗口捕获失败不会回退成全屏图后继续按窗口坐标点击。
 
 绑定模式下 `getDisplaySize` 返回窗口输入表面，因此 `normalized_0_100` 也按窗口计算。默认仍为 pixels。
@@ -372,7 +375,7 @@ ESC hook 注册成功时，ESC 触发宿主 `AbortController`；注册失败时�
 - SendMessage 并非对所有应用有效；
 - `SendInput` 全部注入不代表目标应用完成业务动作；
 - PrintWindow 返回 true 仍可能遇到特殊硬件加速黑图；
-- 当前 DPI 处理不等于完整 Per-Monitor-V2；
+- Windows 捕获与输入使用 Per-Monitor-V2；混合 DPI 多屏仍应覆盖实际硬件验证，不能由单屏测试推断全部组合；
 - 多屏原点已贯通，但应用→显示器的自动映射能力有限，负坐标副屏仍需相应硬件验证；
 - 当前 CLI 不支持 Linux Computer Use；仓库中的 Linux 内部后端不等于对模型开放了完整能力；
 - 任何平台都应保留截图验证和用户接管路径。

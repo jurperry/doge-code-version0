@@ -161,7 +161,10 @@ next.customApiEndpoint = undefined
 隔离 fixture 当前覆盖：
 
 - 绑定窗口 PrintWindow 与非黑图像素；
-- 最小化捕获后的状态恢复；
+- 显式核验 fixture 为 DPI-unaware 且显示器 DPI > 96，截图画布/JPEG 尺寸一致且右下角无贴角黑边；
+- 后台消息的实际客户区坐标与独立显示器 DPI 计算一致；
+- 实时物理光标到绑定窗口局部坐标的回读；
+- 最小化捕获的图像内容与窗口状态恢复；
 - Unicode、中文、emoji、长文本 stdin；
 - 组合键按下与释放；
 - 双/三击与 Windows 点击序列；
@@ -172,7 +175,7 @@ next.customApiEndpoint = undefined
 
 - `Clicked`/`Typed` 不代表应用生效，必须检查 UI 状态或目标内容；
 - 截图有 image block 不代表截图正确，需检查尺寸、坐标、必要时像素；
-- `cursor_position` 的数值形状只是冒烟信号；未绑定时用独立 `GetCursorPos` 对照，后台绑定时验证最近派发的模型目标坐标，不能把虚拟坐标误当物理光标位置。
+- `cursor_position` 的数值形状只是冒烟信号；必须用独立 `GetCursorPos + GetWindowRect` 对照实时位置，绑定窗口时验证局部坐标，不能接受缓存的最近目标值。
 - down/up 对数正确不代表双击/三击被系统识别，需检查系统点击序列；
 - 测试某个输入通道时，不能拿另一个通道的 happy path 作为证明。
 

@@ -372,10 +372,8 @@ export function createCliExecutor(opts: {
   // Unified input: on darwin → @ant/computer-use-input, on others → platform.input.
   // Uses the same interface so all callsites can use `getInput()` uniformly.
   type Input = ReturnType<typeof requireComputerUseInput>
-  // Track last mouse position for non-darwin platforms where moveMouse is a no-op
-  // (HWND-bound SendMessage mode). The macOS path moves the real cursor, so
-  // mouseButton() can click at (0,0) knowing the cursor is already in place.
-  // Windows SendMessage sends coordinates inline, so we must preserve them.
+  // SendMessage carries coordinates inline instead of moving the real cursor,
+  // so mouseButton still needs the most recent target position.
   let lastMouseX = 0
   let lastMouseY = 0
   const getInput = (): Input => {
@@ -385,16 +383,9 @@ export function createCliExecutor(opts: {
       moveMouse: (x: number, y: number, _animated: boolean) => { lastMouseX = x; lastMouseY = y; return p.moveMouse(x, y) },
       key: (k: string, a: 'press' | 'release') => p.key(k, a),
       keys: (parts: string[]) => p.keys(parts),
-      // In HWND-bound SendMessage mode, the real cursor doesn't move.
-      // Return the saved logical coordinates so cursor_position reports
-      // the position the model expects, not the physical cursor location.
-      mouseLocation: () => {
-        if (process.platform === 'win32') {
-          const { getBoundHwnd } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
-          if (getBoundHwnd()) return Promise.resolve({ x: lastMouseX, y: lastMouseY })
-        }
-        return p.mouseLocation()
-      },
+      // Windows returns the live cursor in bound-window coordinates when an
+      // HWND is bound, and in virtual-screen coordinates otherwise.
+      mouseLocation: () => p.mouseLocation(),
       // press/release map to the platform's phase primitives when available —
       // the old blanket click() mapping turned executor drag() into three
       // independent full clicks on Windows.

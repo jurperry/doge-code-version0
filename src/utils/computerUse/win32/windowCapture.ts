@@ -2,11 +2,55 @@
  * Window-level screenshot capture using Win32 PrintWindow API.
  * Captures windows even when occluded or minimized.
  *
- * DPI-aware: calls SetProcessDPIAware() so GetWindowRect returns physical
- * pixels and PrintWindow captures at native (physical) resolution.
+ * Per-monitor-v2 DPI awareness keeps window rectangles in physical pixels.
+ * Verified PopCap/WinForms DPI-unaware windows can render into a logical-sized
+ * corner of that physical bitmap; only those captures are normalized.
  */
 
 import { runPowerShellSync } from './powerShell.js'
+
+const NORMALIZE_UNAWARE_CAPTURE_CS = `
+    static void GetCaptureDpi(IntPtr hwnd, out uint dpiX, out uint dpiY) {
+        dpiX = 96;
+        dpiY = 96;
+        IntPtr context = GetWindowDpiAwarenessContext(hwnd);
+        if (GetAwarenessFromDpiAwarenessContext(context) != 0) return;
+        IntPtr monitor = MonitorFromWindow(hwnd, 2);
+        int hr = GetDpiForMonitor(monitor, 0, out dpiX, out dpiY);
+        if (hr != 0 || dpiX == 0 || dpiY == 0) {
+            throw new System.Exception("GetDpiForMonitor failed while reading capture geometry (HRESULT " + hr + ").");
+        }
+    }
+
+    static Bitmap NormalizeUnawareCapture(IntPtr hwnd, Bitmap bmp, uint dpiX, uint dpiY) {
+        IntPtr context = GetWindowDpiAwarenessContext(hwnd);
+        if (GetAwarenessFromDpiAwarenessContext(context) != 0) return bmp;
+        StringBuilder className = new StringBuilder(256);
+        GetClassName(hwnd, className, className.Capacity);
+        string name = className.ToString();
+        if (name != "MainWindow" && !name.StartsWith("WindowsForms10.", StringComparison.OrdinalIgnoreCase)) return bmp;
+        int sourceW = Math.Max(1, (int)Math.Round(bmp.Width * 96.0 / dpiX));
+        int sourceH = Math.Max(1, (int)Math.Round(bmp.Height * 96.0 / dpiY));
+        if (sourceW >= bmp.Width && sourceH >= bmp.Height) return bmp;
+
+        Bitmap normalized = new Bitmap(bmp.Width, bmp.Height);
+        try {
+            using (Graphics g = Graphics.FromImage(normalized)) {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.DrawImage(
+                    bmp,
+                    new Rectangle(0, 0, normalized.Width, normalized.Height),
+                    new Rectangle(0, 0, Math.Min(sourceW, bmp.Width), Math.Min(sourceH, bmp.Height)),
+                    GraphicsUnit.Pixel);
+            }
+        } catch {
+            normalized.Dispose();
+            throw;
+        }
+        bmp.Dispose();
+        return normalized;
+    }
+`
 
 interface CaptureResult {
   base64: string
@@ -23,6 +67,7 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -ReferencedAssemblies System.Drawing @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Drawing;
 using System.Drawing.Imaging;
 public class WinCap {
@@ -33,10 +78,32 @@ public class WinCap {
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint f);
     [DllImport("user32.dll")]
-    public static extern bool SetProcessDPIAware();
+    static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")]
+    static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")]
+    static extern bool AreDpiAwarenessContextsEqual(IntPtr a, IntPtr b);
+    public static bool SetProcessDPIAware() {
+        SetProcessDpiAwarenessContext(new IntPtr(-4));
+        if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), new IntPtr(-4))) {
+            throw new System.Exception("Per-monitor-v2 DPI awareness is required for physical-pixel capture.");
+        }
+        return true;
+    }
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr h);
+    [DllImport("user32.dll")]
+    public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr c);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+    [DllImport("shcore.dll")]
+    public static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int L, T, R, B; }
 
+${NORMALIZE_UNAWARE_CAPTURE_CS}
     public static string Capture(string title) {
         SetProcessDPIAware();
         IntPtr hwnd = FindWindow(null, title);
@@ -45,15 +112,26 @@ public class WinCap {
         if (!GetWindowRect(hwnd, out r)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         int w = r.R - r.L; int h = r.B - r.T;
         if (w <= 0 || h <= 0) return "INVALID_SIZE";
+        uint dpiX, dpiY;
+        GetCaptureDpi(hwnd, out dpiX, out dpiY);
         Bitmap bmp = new Bitmap(w, h);
         Graphics g = Graphics.FromImage(bmp);
-        IntPtr hdc = g.GetHdc();
-        if (!PrintWindow(hwnd, hdc, 2)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        g.ReleaseHdc(hdc); g.Dispose();
-        var ms = new System.IO.MemoryStream();
-        bmp.Save(ms, ImageFormat.Png);
-        bmp.Dispose();
-        return w + "," + h + "," + Convert.ToBase64String(ms.ToArray());
+        IntPtr hdc = IntPtr.Zero;
+        try {
+            hdc = g.GetHdc();
+            if (!PrintWindow(hwnd, hdc, 2)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            g.ReleaseHdc(hdc); hdc = IntPtr.Zero;
+            g.Dispose(); g = null;
+            bmp = NormalizeUnawareCapture(hwnd, bmp, dpiX, dpiY);
+            using (var ms = new System.IO.MemoryStream()) {
+                bmp.Save(ms, ImageFormat.Png);
+                return w + "," + h + "," + Convert.ToBase64String(ms.ToArray());
+            }
+        } finally {
+            if (hdc != IntPtr.Zero && g != null) g.ReleaseHdc(hdc);
+            if (g != null) g.Dispose();
+            if (bmp != null) bmp.Dispose();
+        }
     }
 }
 '@
@@ -64,6 +142,7 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -ReferencedAssemblies System.Drawing @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Drawing;
 using System.Drawing.Imaging;
 public class WinCapH {
@@ -80,7 +159,28 @@ public class WinCapH {
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")]
-    public static extern bool SetProcessDPIAware();
+    static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")]
+    static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")]
+    static extern bool AreDpiAwarenessContextsEqual(IntPtr a, IntPtr b);
+    public static bool SetProcessDPIAware() {
+        SetProcessDpiAwarenessContext(new IntPtr(-4));
+        if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), new IntPtr(-4))) {
+            throw new System.Exception("Per-monitor-v2 DPI awareness is required for physical-pixel capture.");
+        }
+        return true;
+    }
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr h);
+    [DllImport("user32.dll")]
+    public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr c);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+    [DllImport("shcore.dll")]
+    public static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int L, T, R, B; }
     public const int SW_RESTORE = 9;
@@ -101,6 +201,7 @@ public class WinCapH {
     }
     public const int SW_SHOWNOACTIVATE = 4;
 
+${NORMALIZE_UNAWARE_CAPTURE_CS}
     public static string Capture(IntPtr hwnd, uint expectedPid) {
         SetProcessDPIAware();
         if (!IsWindow(hwnd)) return "NOT_FOUND";
@@ -110,6 +211,8 @@ public class WinCapH {
             if (actualPid != expectedPid) return "PIDMISMATCH";
         }
 
+        uint dpiX, dpiY;
+        GetCaptureDpi(hwnd, out dpiX, out dpiY);
         bool wasMinimized = IsIconic(hwnd);
         bool placementChanged = false;
         WINDOWPLACEMENT origWp = new WINDOWPLACEMENT();
@@ -145,6 +248,7 @@ public class WinCapH {
             if (!PrintWindow(hwnd, hdc, 2)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
             g.ReleaseHdc(hdc); hdc = IntPtr.Zero;
             g.Dispose(); g = null;
+            bmp = NormalizeUnawareCapture(hwnd, bmp, dpiX, dpiY);
 
             tmp = System.IO.Path.GetTempFileName() + ".jpg";
             bmp.Save(tmp, ImageFormat.Jpeg);

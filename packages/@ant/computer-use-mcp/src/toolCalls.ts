@@ -3086,7 +3086,7 @@ async function handleOpenApplication(
   const allowed = new Set(overrides.allowedApps.map((g) => g.bundleId));
   let targetBundleId: string | undefined;
 
-  if (looksLikeBundleId(app) && allowed.has(app)) {
+  if (allowed.has(app)) {
     targetBundleId = app;
   } else {
     // Try display name → bundle ID, but ONLY against the allowlist itself.
@@ -3351,7 +3351,7 @@ async function handleCursorPosition(
         x: logical.x,
         y: logical.y,
         coordinateSpace: "logical_points",
-        note: "cursor is on a different monitor than your last screenshot; take a fresh screenshot",
+        note: "cursor is outside the last screenshot; move it into the captured area or take a fresh screenshot",
       });
     }
     const x = Math.round(localX * (shot.width / shot.displayWidth));

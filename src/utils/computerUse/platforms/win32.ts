@@ -117,7 +117,9 @@ public class CuWin32 {
     // --- Cursor ---
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 
     // --- SendInput (kept for potential future use, but mouse operations use mouse_event instead) ---
     [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {
@@ -138,7 +140,16 @@ public class CuWin32 {
     [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint n, KINPUT[] i, int cb);
 
     // --- DPI Awareness ---
-    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")] static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")] static extern bool AreDpiAwarenessContextsEqual(IntPtr a, IntPtr b);
+    public static bool SetProcessDPIAware() {
+        SetProcessDpiAwarenessContext(new IntPtr(-4));
+        if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), new IntPtr(-4))) {
+            throw new System.Exception("Per-monitor-v2 DPI awareness is required for physical-pixel input.");
+        }
+        return true;
+    }
 
     // --- Keyboard ---
     [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
@@ -163,12 +174,23 @@ public class CuWin32 {
 '@
 `
 
-// Prefix to make each PowerShell invocation DPI-aware so GetWindowRect,
-// Screen.Bounds, CopyFromScreen, and SetCursorPos all use physical pixels.
+// Per-monitor-v2 keeps window, display, capture, and input coordinates in
+// physical pixels on every monitor.
 const DPI_AWARE_PS = `
 Add-Type @'
 using System; using System.Runtime.InteropServices;
-public class CuDpi { [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }
+public class CuDpi {
+    [DllImport("user32.dll")] static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")] static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")] static extern bool AreDpiAwarenessContextsEqual(IntPtr a, IntPtr b);
+    public static bool SetProcessDPIAware() {
+        SetProcessDpiAwarenessContext(new IntPtr(-4));
+        if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), new IntPtr(-4))) {
+            throw new System.Exception("Per-monitor-v2 DPI awareness is required for physical-pixel capture.");
+        }
+        return true;
+    }
+}
 '@
 [CuDpi]::SetProcessDPIAware() | Out-Null
 `
@@ -835,6 +857,7 @@ if (-not [CuWin32]::SetCursorPos(${Math.round(x)} + \$r.L, ${Math.round(y)} + \$
 `
   ps(`${WIN32_TYPES}
 ${requireForegroundScript(hwnd)}
+[CuWin32]::SetProcessDPIAware() | Out-Null
 ${position}
 if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw 'Foreground changed immediately before scroll' }
 [CuWin32]::mouse_event(${flag}, 0, 0, ${wheelDelta(amount, direction)}, [IntPtr]::Zero)
@@ -1028,8 +1051,11 @@ public class WScroll {
   },
 
   async mouseLocation() {
-    // Always returns real cursor position (informational, doesn't move it)
-    const out = ps(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; $p = New-Object CuWin32+POINT; if (-not [CuWin32]::GetCursorPos([ref]$p)) { throw 'GetCursorPos failed' }; "$($p.X),$($p.Y)"`)
+    const windowOffset = boundHwnd
+      ? `$r = New-Object CuWin32+RECT; if (-not [CuWin32]::GetWindowRect([IntPtr]${boundHwnd}, [ref]$r)) { throw 'GetWindowRect failed while reading cursor position' }; `
+      : ''
+    const output = boundHwnd ? '$($p.X - $r.L),$($p.Y - $r.T)' : '$($p.X),$($p.Y)'
+    const out = ps(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; $p = New-Object CuWin32+POINT; if (-not [CuWin32]::GetCursorPos([ref]$p)) { throw 'GetCursorPos failed' }; ${windowOffset}"${output}"`)
     const [xStr, yStr] = out.split(',')
     if (![xStr, yStr].every(value => Number.isFinite(Number(value)))) {
       throw new Error(`Invalid cursor position: ${out}`)

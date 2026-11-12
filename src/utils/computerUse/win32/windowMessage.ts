@@ -2,13 +2,10 @@
  * SendMessage-based input for Win32 windows.
  * All operations target a specific HWND without stealing focus or moving the mouse.
  *
- * DPI-aware: calls SetProcessDPIAware() so GetWindowRect/ClientToScreen return
- * physical pixels matching the PrintWindow screenshot resolution.
- *
- * Client-area offset: screenshots (PrintWindow) capture the full window including
- * the title bar and borders, but WM_MOUSEMOVE lParam uses client-area coordinates.
- * We compute the offset via GetWindowRect + ClientToScreen and adjust all
- * coordinates before sending.
+ * Per-monitor-v2 DPI awareness keeps GetWindowRect/ClientToScreen in the same
+ * physical pixels as the normalized PrintWindow screenshot. The native-boundary
+ * helper subtracts the client offset; Windows translates message coordinates
+ * for the receiving window's DPI awareness, so no second manual scale is applied.
  */
 
 import { runPowerShellSync } from './powerShell.js'
@@ -45,7 +42,18 @@ public class WinMsg {
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
     [DllImport("user32.dll")]
-    public static extern bool SetProcessDPIAware();
+    static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")]
+    static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")]
+    static extern bool AreDpiAwarenessContextsEqual(IntPtr a, IntPtr b);
+    public static bool SetProcessDPIAware() {
+        SetProcessDpiAwarenessContext(new IntPtr(-4));
+        if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), new IntPtr(-4))) {
+            throw new System.Exception("Per-monitor-v2 DPI awareness is required for physical-pixel input.");
+        }
+        return true;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int L, T, R, B; }
@@ -66,12 +74,7 @@ public class WinMsg {
         }
     }
 
-    /// <summary>
-    /// Compute the offset from window-rect top-left to client-area top-left.
-    /// This accounts for the title bar height and window borders.
-    /// Returns "offsetX,offsetY" as a string for easy parsing in PowerShell.
-    /// </summary>
-    public static string GetClientOffset(IntPtr hwnd) {
+    public static IntPtr MakeClientLParam(IntPtr hwnd, int x, int y) {
         SetProcessDPIAware();
         RECT wr;
         if (!GetWindowRect(hwnd, out wr)) {
@@ -81,7 +84,7 @@ public class WinMsg {
         if (!ClientToScreen(hwnd, ref pt)) {
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         }
-        return (pt.X - wr.L) + "," + (pt.Y - wr.T);
+        return MakeLParam(x - (pt.X - wr.L), y - (pt.Y - wr.T));
     }
 
     public const uint WM_CHAR = 0x0102;
@@ -291,11 +294,7 @@ ${lines.join('\n')}
 export function sendMouseMove(hwnd: number, x: number, y: number, expectedPid?: number): boolean {
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
-$offset = [WinMsg]::GetClientOffset([IntPtr]${hwnd})
-$parts = $offset.Split(',')
-$cx = ${Math.round(x)} - [int]$parts[0]
-$cy = ${Math.round(y)} - [int]$parts[1]
-$lp = [WinMsg]::MakeLParam($cx, $cy)
+$lp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(x)}, ${Math.round(y)})
 [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]0, $lp)
 `
   return runPs(script) !== null
@@ -317,11 +316,7 @@ export function sendClick(hwnd: number, x: number, y: number, button: 'left' | '
 
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
-$offset = [WinMsg]::GetClientOffset([IntPtr]${hwnd})
-$parts = $offset.Split(',')
-$cx = ${Math.round(x)} - [int]$parts[0]
-$cy = ${Math.round(y)} - [int]$parts[1]
-$lp = [WinMsg]::MakeLParam($cx, $cy)
+$lp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(x)}, ${Math.round(y)})
 [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]0, $lp)
 [WinMsg]::SendMessage([IntPtr]${hwnd}, ${downMsg}, [IntPtr]0, $lp)
 [WinMsg]::SendMessage([IntPtr]${hwnd}, ${upMsg}, [IntPtr]0, $lp)
@@ -346,11 +341,7 @@ export function sendMouseButton(
     : (button === 'left' ? '0x0202' : '0x0205')
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
-$offset = [WinMsg]::GetClientOffset([IntPtr]${hwnd})
-$parts = $offset.Split(',')
-$cx = ${Math.round(x)} - [int]$parts[0]
-$cy = ${Math.round(y)} - [int]$parts[1]
-$lp = [WinMsg]::MakeLParam($cx, $cy)
+$lp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(x)}, ${Math.round(y)})
 [WinMsg]::SendMessage([IntPtr]${hwnd}, ${msg}, [IntPtr]0, $lp)
 `
   return runPs(script) !== null
@@ -376,13 +367,7 @@ export function sendDrag(
   const frameMs = Math.max(10, Math.round(durationMs / frames))
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
-$offset = [WinMsg]::GetClientOffset([IntPtr]${hwnd})
-$parts = $offset.Split(',')
-$ox = [int]$parts[0]
-$oy = [int]$parts[1]
-$fx = ${Math.round(fromX)} - $ox
-$fy = ${Math.round(fromY)} - $oy
-$lpDown = [WinMsg]::MakeLParam($fx, $fy)
+$lpDown = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(fromX)}, ${Math.round(fromY)})
 [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]0, $lpDown)
 Start-Sleep -Milliseconds 20
 [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0201, [IntPtr]1, $lpDown)
@@ -392,14 +377,14 @@ try {
     for ($i = 1; $i -le $frames; $i++) {
         $t = $i / $frames
         $eased = 1 - [math]::Pow(1 - $t, 3)
-        $x = [math]::Round(${Math.round(fromX)} + (${Math.round(toX)} - ${Math.round(fromX)}) * $eased) - $ox
-        $y = [math]::Round(${Math.round(fromY)} + (${Math.round(toY)} - ${Math.round(fromY)}) * $eased) - $oy
-        $lp = [WinMsg]::MakeLParam($x, $y)
+        $x = [math]::Round(${Math.round(fromX)} + (${Math.round(toX)} - ${Math.round(fromX)}) * $eased)
+        $y = [math]::Round(${Math.round(fromY)} + (${Math.round(toY)} - ${Math.round(fromY)}) * $eased)
+        $lp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, $x, $y)
         [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]1, $lp)
         Start-Sleep -Milliseconds ${frameMs}
     }
 } finally {
-    $lpUp = [WinMsg]::MakeLParam((${Math.round(toX)} - $ox), (${Math.round(toY)} - $oy))
+    $lpUp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(toX)}, ${Math.round(toY)})
     [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0202, [IntPtr]0, $lpUp)
 }
 `
