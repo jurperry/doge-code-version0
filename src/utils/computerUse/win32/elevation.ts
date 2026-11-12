@@ -12,6 +12,8 @@
  * mismatches and recommends elevation when needed.
  */
 
+import { runPowerShellSync } from './powerShell.js'
+
 export type IntegrityLevel = 'low' | 'medium' | 'high' | 'system' | 'unknown'
 
 export interface ElevationStatus {
@@ -46,13 +48,7 @@ let cachedElevationStatus: ElevationStatus | undefined
 
 function runPs(script: string): string {
   try {
-    const result = Bun.spawnSync({
-      cmd: ['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeoutMs: 8000,
-    })
-    return new TextDecoder().decode(result.stdout).trim()
+    return runPowerShellSync(script, 8000)
   } catch {
     return ''
   }
@@ -260,16 +256,27 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public class MsgTest {
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError=true)]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")]
+    public static extern void SetLastError(uint dwErrCode);
+    public static int Probe(IntPtr hwnd) {
+        SetLastError(0);
+        SendMessage(hwnd, 0, IntPtr.Zero, IntPtr.Zero);
+        return Marshal.GetLastWin32Error();
+    }
 }
 '@
-$result = [MsgTest]::SendMessage([IntPtr]${hwnd}, 0, [IntPtr]::Zero, [IntPtr]::Zero)
-$result.ToInt64()
+[MsgTest]::Probe([IntPtr]${hwnd})
 `
   const result = runPs(script)
-  // WM_NULL returns 0 on success, but the call itself succeeding means UIPI didn't block it
-  return result !== '' && !result.startsWith('Exception')
+  if (result === '') {
+    throw new Error('WM_NULL probe returned no result; message accessibility is unknown.')
+  }
+  const error = Number(result)
+  if (error === 0) return true
+  if (error === 5) return false
+  throw new Error(`WM_NULL probe failed with Win32 error ${error}; message accessibility is unknown.`)
 }
 
 /**

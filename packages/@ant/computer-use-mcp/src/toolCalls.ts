@@ -38,10 +38,12 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 
 import { getDefaultTierForApp, getDeniedCategoryForApp, isPolicyDenied } from "./deniedApps.js";
+import { MAX_BATCH_ACTIONS, MAX_BATCH_IMAGE_BYTES, MAX_BATCH_SCREENSHOTS, MAX_TYPE_TEXT_LENGTH } from "./limits.js";
 import type {
   ComputerExecutor,
   DisplayGeometry,
   InstalledApp,
+  ResolvePrepareCaptureResult,
   ScreenshotResult,
 } from "./executor.js";
 import { isSystemKeyCombo } from "./keyBlocklist.js";
@@ -372,6 +374,9 @@ async function syncClipboardStash(
   frontmostIsClickTier: boolean,
 ): Promise<void> {
   const current = overrides.getClipboardStash?.();
+  if (frontmostIsClickTier && (!overrides.getClipboardStash || !overrides.onClipboardStashChanged)) {
+    throw new Error("Clipboard guard state is not wired; refusing to clear the clipboard.");
+  }
   if (!frontmostIsClickTier) {
     // Restore + clear. Idempotent — if nothing is stashed, no-op.
     if (current === undefined) return;
@@ -389,11 +394,15 @@ async function syncClipboardStash(
   if (current === undefined) {
     try {
       const read = await adapter.executor.readClipboard();
+      throwIfActionAborted(overrides);
       overrides.onClipboardStashChanged?.(read);
-    } catch {
-      // readClipboard failed — use empty sentinel so we don't retry the stash
-      // on the next action; restore becomes a harmless writeClipboard("").
-      overrides.onClipboardStashChanged?.("");
+    } catch (error) {
+      if (overrides.isAborted?.() || (error instanceof Error && error.name === "AbortError")) {
+        throw error;
+      }
+      throw new Error(
+        `Could not read the clipboard for the click-tier guard; it was left unchanged. ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
   // Re-clear on EVERY click-tier action, not just the first. Defeats the
@@ -401,6 +410,7 @@ async function syncClipboardStash(
   // through runInputActionGates) between stash and a left_click on a UI
   // Paste button — the next action's clear clobbers the agent's write
   // before the click lands.
+  throwIfActionAborted(overrides);
   try {
     await adapter.executor.writeClipboard("");
   } catch {
@@ -418,6 +428,7 @@ async function runInputActionGates(
   subGates: CuSubGates,
   actionKind: CuActionKind,
 ): Promise<CuCallToolResult | null> {
+  throwIfActionAborted(overrides);
   // Step A+B — hide non-allowlisted apps + defocus us. Sub-gated. After this
   // runs, the frontmost gate below becomes a rare edge-case detector (something
   // popped up between prepare and action) rather than a normal-path blocker.
@@ -434,17 +445,24 @@ async function runInputActionGates(
     }
   }
 
-  // Windows/Linux: operations go through SendMessage (HWND-bound) or platform
-  // abstraction, not global input to the foreground. The frontmost gate is a
-  // macOS safety net for global CGEvent input — on other platforms, skip it
-  // when the platform's screenshotFiltering is 'none' (no per-app filtering,
-  // meaning no hide/defocus, meaning frontmost is meaningless).
-  if (adapter.executor.capabilities.screenshotFiltering === 'none') {
-    return null; // pass — non-macOS platform, frontmost irrelevant
+  throwIfActionAborted(overrides);
+  // Non-Windows platforms without native filtering do not have a meaningful
+  // macOS-style frontmost gate. Windows continues below with its effective
+  // input target so allowlist and read/click/full tiers remain enforced.
+  const isWin32 = adapter.executor.capabilities.platform === "win32";
+  if (adapter.executor.capabilities.screenshotFiltering === 'none' && !isWin32) {
+    return null;
+  }
+  if (isWin32 && overrides.allowedApps.length === 0) {
+    return errorResult(
+      "No applications are granted for this session. Call request_access first.",
+      "allowlist_empty",
+    );
   }
 
-  // Frontmost gate. Check FRESH on every call.
+  // Frontmost/effective-target gate. Check FRESH on every call.
   const frontmost = await adapter.executor.getFrontmostApp();
+  throwIfActionAborted(overrides);
 
   const tierByBundleId = new Map(
     overrides.allowedApps.map((a) => [a.bundleId, a.tier] as const),
@@ -467,8 +485,13 @@ async function runInputActionGates(
   }
 
   if (!frontmost) {
-    // No frontmost app (rare — login window?). Let it through; the click
-    // will land somewhere and PixelCompare catches staleness.
+    if (isWin32) {
+      return errorResult(
+        "The Windows input target could not be identified. Call open_application for an authorized app, then take a screenshot before retrying.",
+        "state_conflict",
+      );
+    }
+    // No frontmost app (rare — login window?). Preserve the macOS fallback.
     return null;
   }
 
@@ -578,6 +601,7 @@ async function runHitTestGate(
   }
 
   const target = await adapter.executor.appUnderPoint(x, y);
+  throwIfActionAborted(overrides);
   if (!target) return null; // desktop / nothing under point / platform no-op
 
   // Finder (desktop, file dialogs) is always clickable — same exemption as
@@ -656,17 +680,89 @@ function decodedByteLength(base64: string): number {
   return Math.floor((base64.length * 3) / 4) - padding;
 }
 
+function fullScreenshotIssue(shot: ScreenshotResult): string | null {
+  const dimensions = [shot.width, shot.height, shot.displayWidth, shot.displayHeight];
+  if (dimensions.some(value => !Number.isFinite(value) || value <= 0)) {
+    return `invalid dimensions ${shot.width}x${shot.height} (display ${shot.displayWidth}x${shot.displayHeight})`;
+  }
+  if (![shot.originX, shot.originY].every(Number.isFinite)) {
+    return `invalid display origin ${shot.originX},${shot.originY}`;
+  }
+  if (!shot.base64) return "empty image data";
+  return null;
+}
+
+function screenshotRetryIssue(shot: ScreenshotResult): string | null {
+  const issue = fullScreenshotIssue(shot);
+  if (issue) return issue;
+  const bytes = decodedByteLength(shot.base64);
+  return bytes < MIN_SCREENSHOT_BYTES
+    ? `implausibly small image (${bytes} decoded bytes)`
+    : null;
+}
+
+function zoomIssue(shot: { base64: string; width: number; height: number }): string | null {
+  if (!shot.base64 || ![shot.width, shot.height].every(value => Number.isFinite(value) && value > 0)) {
+    return `invalid zoom image ${shot.width}x${shot.height} (${decodedByteLength(shot.base64)} decoded bytes)`;
+  }
+  return null;
+}
+
+async function maybeSaveImage(
+  adapter: ComputerUseHostAdapter,
+  toolName: "screenshot" | "zoom",
+  args: Record<string, unknown>,
+  result: CuCallToolResult,
+): Promise<CuCallToolResult> {
+  if (args.save_to_disk !== true || result.isError) return result;
+  const image = result.content.find(item => item.type === "image");
+  if (!image || image.type !== "image") {
+    return errorResult(`${toolName} succeeded without an image to save.`, "capture_failed");
+  }
+  if (!adapter.saveImageToDisk) {
+    return errorResult("save_to_disk is not available in this session.", "feature_unavailable");
+  }
+  try {
+    const filepath = await adapter.saveImageToDisk(
+      image.data,
+      "image/jpeg",
+      `computer-use-${toolName}-${randomUUID()}`,
+    );
+    return {
+      ...result,
+      content: [
+        ...result.content,
+        { type: "text" as const, text: `${toolName === "zoom" ? "Zoomed screenshot" : "Screenshot"} saved to: ${filepath}` },
+      ],
+    };
+  } catch (err) {
+    return errorResult(
+      `Failed to save ${toolName} to disk: ${err instanceof Error ? err.message : String(err)}`,
+      "other",
+    );
+  }
+}
+
 async function takeScreenshotWithRetry(
   executor: ComputerExecutor,
   allowedBundleIds: string[],
   logger: ComputerUseHostAdapter["logger"],
   displayId?: number,
+  isAborted?: () => boolean,
 ): Promise<ScreenshotResult> {
-  let shot = await executor.screenshot({ allowedBundleIds, displayId });
-  if (decodedByteLength(shot.base64) < MIN_SCREENSHOT_BYTES) {
-    logger.warn(
-      `[computer-use] screenshot implausibly small (${decodedByteLength(shot.base64)} bytes decoded), retrying once`,
-    );
+  if (isAborted?.()) throw new DOMException("Screenshot aborted", "AbortError");
+  let shot: ScreenshotResult;
+  try {
+    shot = await executor.screenshot({ allowedBundleIds, displayId });
+  } catch (err) {
+    logger.warn(`[computer-use] screenshot threw, retrying once: ${err instanceof Error ? err.message : String(err)}`);
+    if (isAborted?.()) throw new DOMException("Screenshot aborted", "AbortError");
+    return executor.screenshot({ allowedBundleIds, displayId });
+  }
+  const firstIssue = screenshotRetryIssue(shot);
+  if (firstIssue) {
+    logger.warn(`[computer-use] screenshot invalid (${firstIssue}), retrying once`);
+    if (isAborted?.()) throw new DOMException("Screenshot aborted", "AbortError");
     shot = await executor.screenshot({ allowedBundleIds, displayId });
   }
   return shot;
@@ -703,6 +799,12 @@ function segmentGraphemes(text: string): string[] {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function throwIfActionAborted(overrides: ComputerUseOverrides): void {
+  if (overrides.isAborted?.()) {
+    throw new DOMException("Computer Use action aborted before new side effects", "AbortError");
+  }
 }
 
 /**
@@ -969,7 +1071,7 @@ async function handleRequestAccess(
       screenshotFiltering: adapter.executor.capabilities.screenshotFiltering,
       tccState,
     };
-    await overrides.onPermissionRequest(req);
+    const response = await overrides.onPermissionRequest(req);
 
     // Re-check: the user may have granted in System Settings while the
     // dialog was up. The `tccState` arg is a pre-dialog snapshot — reading
@@ -984,6 +1086,15 @@ async function handleRequestAccess(
           "Call request_access again immediately — the next call will show " +
           "the app selection list.",
       );
+    }
+
+    if (response.userConsented === false) {
+      return okJson({
+        granted: [],
+        denied: [],
+        userConsented: false,
+        guidance: "The user cancelled macOS permission setup. Do not reopen the same permission dialog. Choose a non-Computer-Use approach or ask the user to perform the action themselves.",
+      });
     }
 
     const missing: string[] = [];
@@ -1035,6 +1146,7 @@ async function handleRequestAccess(
     reason: "user_denied" | "not_installed";
   }> = [];
   let dialogFlags: CuGrantFlags = overrides.grantFlags;
+  let dialogUserConsented: boolean | undefined;
 
   if (needDialog.length > 0 || Object.keys(requestedFlags).length > 0) {
     const req: CuPermissionRequest = {
@@ -1050,9 +1162,16 @@ async function handleRequestAccess(
       }),
     };
     const response = await overrides.onPermissionRequest(req);
+    if (response.permissionUIUnavailable) {
+      return errorResult(
+        "Computer Use requires an interactive permission dialog, which is not available in this session. Use a non-Computer-Use approach or ask the user to perform the action.",
+        "feature_unavailable",
+      );
+    }
     dialogGranted = response.granted;
     dialogDenied = response.denied;
     dialogFlags = response.flags;
+    dialogUserConsented = response.userConsented;
   }
 
   // Do NOT return display geometry or coordinateMode. See COORDINATES.md
@@ -1082,6 +1201,10 @@ async function handleRequestAccess(
     {
       granted: allGranted,
       denied: dialogDenied,
+      ...(dialogUserConsented !== undefined && { userConsented: dialogUserConsented }),
+      ...(dialogUserConsented === false && {
+        guidance: "The user declined this Computer Use request. Do not show the same permission dialog again or retry the same request. Choose a non-Computer-Use approach or ask the user to perform the action themselves.",
+      }),
       // Policy blocklist — precedes userDenied in precedence and response
       // order. No escape hatch; the agent is told to find another approach.
       ...(policyDenied.length > 0 && {
@@ -1824,7 +1947,7 @@ async function executeTeachStep(
       stepSubGates,
     );
 
-    const text = firstTextContent(inner);
+    const text = textContent(inner);
     const result = { action, ok: !inner.isError, output: text };
     results.push(result);
 
@@ -2136,6 +2259,7 @@ async function handleScreenshot(
       "allowlist_empty",
     );
   }
+  throwIfActionAborted(overrides);
 
   // Atomic resolve→prepare→capture (one Swift call, no scheduler gap).
   // Off → fall through to separate-calls path below.
@@ -2150,15 +2274,21 @@ async function handleScreenshot(
     const appSetChanged = currentAppSetKey !== overrides.displayResolvedForApps;
     const autoResolve = !overrides.displayPinnedByModel && appSetChanged;
 
-    const result = await adapter.executor.resolvePrepareCapture({
-      allowedBundleIds,
-      preferredDisplayId: overrides.selectedDisplayId,
-      autoResolve,
-      // Keep the hideBeforeAction sub-gate independently rollable —
-      // atomic path honors the same toggle the non-atomic path checks
-      // at the prepareForAction call site.
-      doHide: subGates.hideBeforeAction,
-    });
+    let result: ResolvePrepareCaptureResult;
+    try {
+      result = await adapter.executor.resolvePrepareCapture({
+        allowedBundleIds,
+        preferredDisplayId: overrides.selectedDisplayId,
+        autoResolve,
+        doHide: subGates.hideBeforeAction,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") throw err;
+      return errorResult(
+        `Screenshot capture failed: ${err instanceof Error ? err.message : String(err)}`,
+        "capture_failed",
+      );
+    }
 
     // Non-atomic path's takeScreenshotWithRetry has a MIN_SCREENSHOT_BYTES
     // check + retry. The atomic call is expensive (resolve+prepare+capture),
@@ -2206,6 +2336,13 @@ async function handleScreenshot(
     // restore hidden apps at turn end. Now surface the error to the model.
     if (result.captureError !== undefined) {
       return errorResult(result.captureError, "capture_failed");
+    }
+    const captureIssue = fullScreenshotIssue(result);
+    if (captureIssue) {
+      return errorResult(
+        `Screenshot capture failed: ${captureIssue}. Take another screenshot; do not click using stale coordinates.`,
+        "capture_failed",
+      );
     }
 
     const hiddenNote = await buildHiddenNote(adapter, hiddenSinceLastSeen);
@@ -2281,12 +2418,29 @@ async function handleScreenshot(
   }
 
   const allowedBundleIds = overrides.allowedApps.map((g) => g.bundleId);
-  const shot = await takeScreenshotWithRetry(
-    adapter.executor,
-    allowedBundleIds,
-    adapter.logger,
-    overrides.selectedDisplayId,
-  );
+  let shot: ScreenshotResult;
+  try {
+    shot = await takeScreenshotWithRetry(
+      adapter.executor,
+      allowedBundleIds,
+      adapter.logger,
+      overrides.selectedDisplayId,
+      overrides.isAborted,
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw err;
+    return errorResult(
+      `Screenshot capture failed after one retry: ${err instanceof Error ? err.message : String(err)}`,
+      "capture_failed",
+    );
+  }
+  const captureIssue = fullScreenshotIssue(shot);
+  if (captureIssue) {
+    return errorResult(
+      `Screenshot capture failed after one retry: ${captureIssue}. Do not click using stale coordinates.`,
+      "capture_failed",
+    );
+  }
 
   const hiddenNote = await buildHiddenNote(adapter, hiddenSinceLastSeen);
 
@@ -2376,11 +2530,17 @@ async function handleZoom(
   const allowedIds = overrides.allowedApps.map((g) => g.bundleId);
   // Crop from the same display as lastScreenshot so the zoom region
   // matches the image the model is reading coords from.
+  throwIfActionAborted(overrides);
   const zoomed = await adapter.executor.zoom(
     regionLogical,
     allowedIds,
     last.displayId,
+    { x: last.originX, y: last.originY },
   );
+  const captureIssue = zoomIssue(zoomed);
+  if (captureIssue) {
+    return errorResult(`Zoom capture failed: ${captureIssue}.`, "capture_failed");
+  }
 
   // Return the image. NO `.screenshot` piggyback — this is the invariant.
   return {
@@ -2516,8 +2676,9 @@ async function handleClickVariant(
   );
   if (hitGate) return hitGate;
 
+  throwIfActionAborted(overrides);
   await adapter.executor.click(x, y, button, count, modifiers);
-  return okText("Clicked.");
+  return okText(`Click dispatched (count=${count}); application effect is not verified.`);
 }
 
 async function handleType(
@@ -2528,6 +2689,9 @@ async function handleType(
 ): Promise<CuCallToolResult> {
   const text = requireString(args, "text");
   if (text instanceof Error) return errorResult(text.message, "bad_args");
+  if (text.length > MAX_TYPE_TEXT_LENGTH) {
+    return errorResult(`text exceeds maximum length of ${MAX_TYPE_TEXT_LENGTH} UTF-16 code units`, "bad_args");
+  }
 
   const gate = await runInputActionGates(
     adapter,
@@ -2537,41 +2701,56 @@ async function handleType(
   );
   if (gate) return gate;
 
-  // §6 item 3 — clipboard-paste fast path for multi-line. Sub-gated AND
-  // requires clipboardWrite grant. The save/restore + read-back-verify
-  // lives in the EXECUTOR (task #5), not here. Here we just route.
   const viaClipboard =
     text.includes("\n") &&
     overrides.grantFlags.clipboardWrite &&
     subGates.clipboardPasteMultiline;
 
   if (viaClipboard) {
+    throwIfActionAborted(overrides);
     await adapter.executor.type(text, { viaClipboard: true });
-    return okText("Typed (via clipboard).");
+    return okText("Text pasted via clipboard; application effect is not verified.");
   }
 
-  // §6 item 7 — grapheme-cluster iteration. Prevents ZWJ emoji → �.
-  // §6 item 4 — 8ms between graphemes (125 Hz USB polling). Battle-tested:
-  // sleep BEFORE each keystroke, not after.
-  //
-  // \n, \r, \t MUST route through executor.key(), not type(). Two reasons:
-  //   1. enigo.text("\n") on macOS posts a stale CGEvent with virtualKey=0
-  //      after stripping the newline — virtualKey 0 is the 'a' key, so a
-  //      ghost 'a' gets typed. Upstream bug in enigo 0.6.1 fast_text().
-  //   2. Unicode text-insertion of '\n' is not a Return key press. URL bars
-  //      and terminals ignore it; the model's intent (submit/execute) is lost.
-  // CRLF (\r\n) is one grapheme cluster (UAX #29 GB3), so check for it too.
   const graphemes = segmentGraphemes(text);
+
+  if (adapter.executor.capabilities.platform === "win32") {
+    const runs = text.split(/(\r\n|\r|\n|\t)/).filter(Boolean);
+    let completed = 0;
+    for (const run of runs) {
+      if (overrides.isAborted?.()) {
+        return errorResult(
+          `Typing aborted after ${completed} fully dispatched of ${graphemes.length} graphemes (user interrupt). Previously dispatched text may remain.`,
+        );
+      }
+      try {
+        if (run === "\n" || run === "\r" || run === "\r\n") {
+          await adapter.executor.key("return");
+        } else if (run === "\t") {
+          await adapter.executor.key("tab");
+        } else {
+          await adapter.executor.type(run, { viaClipboard: false });
+        }
+        completed += segmentGraphemes(run).length;
+      } catch (err) {
+        throw new Error(
+          `Windows text input failed after ${completed} fully dispatched of ${graphemes.length} graphemes; the failed run may be partially delivered. ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return okText(`Text input dispatched for ${completed} grapheme(s); application effect is not verified.`);
+  }
+
+  // macOS keeps per-grapheme pacing. Newlines and tabs must be real key
+  // events, not Unicode text insertion, so Return/Tab retain their UI meaning.
   for (const [i, g] of graphemes.entries()) {
-    // Same abort check as handleComputerBatch. At 8ms/grapheme a 50-char
-    // type() runs ~400ms; this is where an in-flight batch actually
-    // spends its time.
     if (overrides.isAborted?.()) {
       return errorResult(
         `Typing aborted after ${i} of ${graphemes.length} graphemes (user interrupt).`,
       );
     }
     await sleep(INTER_GRAPHEME_SLEEP_MS);
+    throwIfActionAborted(overrides);
     if (g === "\n" || g === "\r" || g === "\r\n") {
       await adapter.executor.key("return");
     } else if (g === "\t") {
@@ -2580,7 +2759,7 @@ async function handleType(
       await adapter.executor.type(g, { viaClipboard: false });
     }
   }
-  return okText(`Typed ${graphemes.length} grapheme(s).`);
+  return okText(`Text input dispatched for ${graphemes.length} grapheme(s); application effect is not verified.`);
 }
 
 async function handleKey(
@@ -2630,8 +2809,9 @@ async function handleKey(
   );
   if (gate) return gate;
 
+  throwIfActionAborted(overrides);
   await adapter.executor.key(keySequence, repeat);
-  return okText("Key pressed.");
+  return okText("Key input dispatched; application effect is not verified.");
 }
 
 async function handleScroll(
@@ -2696,8 +2876,9 @@ async function handleScroll(
   if (hitGate) return hitGate;
   if (mouseButtonHeld) mouseMoved = true;
 
+  throwIfActionAborted(overrides);
   await adapter.executor.scroll(x, y, dx, dy);
-  return okText("Scrolled.");
+  return okText("Scroll dispatched; application effect is not verified.");
 }
 
 async function handleDrag(
@@ -2789,8 +2970,9 @@ async function handleDrag(
   );
   if (toGate) return toGate;
 
+  throwIfActionAborted(overrides);
   await adapter.executor.drag(from, to);
-  return okText("Dragged.");
+  return okText("Drag dispatched; application effect is not verified.");
 }
 
 async function handleMoveMouse(
@@ -2844,9 +3026,10 @@ async function handleMoveMouse(
     if (hitGate) return hitGate;
   }
 
+  throwIfActionAborted(overrides);
   await adapter.executor.moveMouse(x, y);
   if (mouseButtonHeld) mouseMoved = true;
-  return okText("Moved.");
+  return okText("Pointer movement dispatched.");
 }
 
 async function handleOpenApplication(
@@ -2885,6 +3068,7 @@ async function handleOpenApplication(
   // what tier "read" enables (you need it on screen to screenshot it). The
   // tier gates on click/type catch any follow-up interaction.
 
+  throwIfActionAborted(overrides);
   await adapter.executor.openApp(targetBundleId);
 
   // On multi-monitor setups, macOS may place the opened window on a monitor
@@ -2901,13 +3085,13 @@ async function handleOpenApplication(
     }
     if (displayCount >= 2) {
       return okText(
-        `Opened "${app}". If it isn't visible in the next screenshot, it may ` +
+        `Open dispatched for "${app}". If it isn't visible in the next screenshot, it may ` +
           `have opened on a different monitor — use switch_display to check.`,
       );
     }
   }
 
-  return okText(`Opened "${app}".`);
+  return okText(`Open dispatched for "${app}"; verify the next screenshot.`);
 }
 
 async function handleSwitchDisplay(
@@ -3060,6 +3244,7 @@ async function handleWriteClipboard(
     await syncClipboardStash(adapter, overrides, frontmostTier === "click");
   }
 
+  throwIfActionAborted(overrides);
   await adapter.executor.writeClipboard(text);
   return okText("Clipboard written.");
 }
@@ -3189,8 +3374,9 @@ async function handleHoldKey(
   if (gate) return gate;
 
   const keyNames = parseKeyChord(text);
+  throwIfActionAborted(overrides);
   await adapter.executor.holdKey(keyNames, duration * 1000);
-  return okText("Key held.");
+  return okText("Key hold dispatched; application effect is not verified.");
 }
 
 /**
@@ -3228,10 +3414,11 @@ async function handleLeftMouseDown(
   );
   if (hitGate) return hitGate;
 
+  throwIfActionAborted(overrides);
   await adapter.executor.mouseDown();
   mouseButtonHeld = true;
   mouseMoved = false;
-  return okText("Mouse button pressed.");
+  return okText("Mouse button press dispatched.");
 }
 
 /**
@@ -3262,7 +3449,16 @@ async function handleLeftMouseUp(
     return err;
   };
 
-  const gate = await runInputActionGates(adapter, overrides, subGates, "mouse");
+  let gate: CuCallToolResult | null;
+  try {
+    gate = await runInputActionGates(adapter, overrides, subGates, "mouse");
+  } catch (err) {
+    await releaseFirst(errorResult(
+      `Mouse release gate failed: ${err instanceof Error ? err.message : String(err)}`,
+      "state_conflict",
+    ));
+    throw err;
+  }
   if (gate) return releaseFirst(gate);
 
   // When the cursor moved since mouseDown, this is a drop (text-injection
@@ -3286,7 +3482,7 @@ async function handleLeftMouseUp(
   await adapter.executor.mouseUp();
   mouseButtonHeld = false;
   mouseMoved = false;
-  return okText("Mouse button released.");
+  return okText("Mouse button release dispatched.");
 }
 
 // ---------------------------------------------------------------------------
@@ -3321,6 +3517,58 @@ interface BatchActionResult {
   action: string;
   ok: boolean;
   output: string;
+}
+
+function validateBatchActionArgs(
+  args: Record<string, unknown>,
+  index: number,
+): Error | null {
+  const action = args.action as string;
+  const fail = (message: string): Error => new Error(`actions[${index}] ${message}`);
+  const coordinateActions = new Set([
+    "mouse_move", "left_click", "left_click_drag", "right_click",
+    "middle_click", "double_click", "triple_click", "scroll",
+  ]);
+  if (coordinateActions.has(action)) {
+    const coordinate = extractCoordinate(args);
+    if (coordinate instanceof Error) return fail(coordinate.message);
+  }
+  if (action === "left_click_drag" && args.start_coordinate !== undefined) {
+    const start = extractCoordinate(args, "start_coordinate");
+    if (start instanceof Error) return fail(start.message);
+  }
+  if (action === "type" || action === "key" || action === "hold_key") {
+    const text = requireString(args, "text");
+    if (text instanceof Error) return fail(text.message);
+    if (action === "type" && text.length > MAX_TYPE_TEXT_LENGTH) {
+      return fail(`text exceeds maximum length of ${MAX_TYPE_TEXT_LENGTH} UTF-16 code units`);
+    }
+  }
+  if (action === "key" && args.repeat !== undefined) {
+    if (!Number.isInteger(args.repeat) || (args.repeat as number) < 1 || (args.repeat as number) > 100) {
+      return fail("repeat must be an integer from 1 to 100");
+    }
+  }
+  if (action === "scroll") {
+    if (!["up", "down", "left", "right"].includes(String(args.scroll_direction))) {
+      return fail("scroll_direction must be 'up', 'down', 'left', or 'right'");
+    }
+    if (!Number.isInteger(args.scroll_amount) || (args.scroll_amount as number) < 0 || (args.scroll_amount as number) > 100) {
+      return fail("scroll_amount must be an integer from 0 to 100");
+    }
+  }
+  if (action === "hold_key" || action === "wait") {
+    if (typeof args.duration !== "number" || !Number.isFinite(args.duration) || args.duration < 0 || args.duration > 100) {
+      return fail("duration must be a number from 0 to 100 seconds");
+    }
+  }
+  if (action === "screenshot" && args.save_to_disk !== undefined && typeof args.save_to_disk !== "boolean") {
+    return fail("save_to_disk must be a boolean");
+  }
+  if (args.text !== undefined && action !== "type" && action !== "key" && action !== "hold_key" && typeof args.text !== "string") {
+    return fail("text must be a string");
+  }
+  return null;
 }
 
 /**
@@ -3363,6 +3611,13 @@ async function handleComputerBatch(
   if (!Array.isArray(actions) || actions.length === 0) {
     return errorResult("actions must be a non-empty array", "bad_args");
   }
+  if (actions.length > MAX_BATCH_ACTIONS) {
+    return errorResult(`actions exceeds maximum of ${MAX_BATCH_ACTIONS} entries`, "bad_args");
+  }
+  const screenshotCount = actions.filter(act => (act as Record<string, unknown>)?.action === "screenshot").length;
+  if (screenshotCount > MAX_BATCH_SCREENSHOTS) {
+    return errorResult(`batch allows at most ${MAX_BATCH_SCREENSHOTS} screenshot actions`, "bad_args");
+  }
 
   for (const [i, act] of actions.entries()) {
     if (typeof act !== "object" || act === null) {
@@ -3379,10 +3634,13 @@ async function handleComputerBatch(
         "bad_args",
       );
     }
+    const validationError = validateBatchActionArgs(act as Record<string, unknown>, i);
+    if (validationError) return errorResult(validationError.message, "bad_args");
   }
 
   // prepareForAction ONCE. After this, inner dispatches skip it via
   // hideBeforeAction:false.
+  throwIfActionAborted(overrides);
   if (subGates.hideBeforeAction) {
     const hidden = await adapter.executor.prepareForAction(
       overrides.allowedApps.map((a) => a.bundleId),
@@ -3407,6 +3665,30 @@ async function handleComputerBatch(
   };
 
   const results: BatchActionResult[] = [];
+  const batchImages: CuCallToolResult["content"] = [];
+  let batchImageBytes = 0;
+  const finishFailedAction = async (
+    failed: BatchActionResult,
+    telemetry?: CuCallTelemetry,
+  ): Promise<CuCallToolResult> => {
+    let output = failed.output;
+    try {
+      await releaseHeldMouse(adapter);
+    } catch (err) {
+      output += ` Mouse cleanup also failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    const failedWithCleanup = { ...failed, output };
+    results[results.length - 1] = failedWithCleanup;
+    const result = okJson(
+      {
+        completed: results.slice(0, -1),
+        failed: failedWithCleanup,
+        remaining: actions.length - results.length,
+      },
+      telemetry,
+    );
+    return { ...result, isError: true, content: [...result.content, ...batchImages] };
+  };
   for (const [i, act] of actions.entries()) {
     // Overlay Stop → host's stopSession → lifecycleState leaves "running"
     // synchronously before query.interrupt(). The SDK abort tears down the
@@ -3427,46 +3709,74 @@ async function handleComputerBatch(
     const actionArgs = act as Record<string, unknown>;
     const action = actionArgs.action as string;
 
-    // Drop mid-batch screenshot piggyback (strip .screenshot). Click coords
-    // stay anchored to the pre-batch lastScreenshot.
-    const { screenshot: _dropped, ...inner } = await dispatchAction(
-      action,
-      actionArgs,
-      adapter,
-      overrides,
-      batchSubGates,
-    );
+    let inner: CuCallToolResult;
+    try {
+      // Drop mid-batch screenshot piggyback (strip .screenshot). Click coords
+      // stay anchored to the pre-batch lastScreenshot.
+      const { screenshot: _dropped, ...dispatched } = await dispatchAction(
+        action,
+        actionArgs,
+        adapter,
+        overrides,
+        batchSubGates,
+      );
+      inner = dispatched;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const failed: BatchActionResult = {
+        action,
+        ok: false,
+        output: `actions[${i}] (${action}) threw: ${message}`,
+      };
+      results.push(failed);
+      overrides.reportProgress?.({
+        progress: results.length,
+        total: actions.length,
+        message: `${action} threw`,
+      });
+      return finishFailedAction(failed, { error_kind: "executor_threw" });
+    }
 
-    const text = firstTextContent(inner);
+    const innerImages = inner.content.filter(item => item.type === "image");
+    const innerImageBytes = innerImages.reduce(
+      (sum, item) => sum + (item.type === "image" ? decodedByteLength(item.data) : 0),
+      0,
+    );
+    if (batchImageBytes + innerImageBytes > MAX_BATCH_IMAGE_BYTES) {
+      const failed: BatchActionResult = {
+        action,
+        ok: false,
+        output: `actions[${i}] (${action}) exceeded the ${MAX_BATCH_IMAGE_BYTES}-byte batch image budget; earlier images are preserved.`,
+      };
+      results.push(failed);
+      overrides.reportProgress?.({ progress: results.length, total: actions.length, message: `${action} image budget exceeded` });
+      return finishFailedAction(failed, { error_kind: "other" });
+    }
+    batchImageBytes += innerImageBytes;
+    batchImages.push(...innerImages);
+    const text = textContent(inner);
     const result = { action, ok: !inner.isError, output: text };
     results.push(result);
+    overrides.reportProgress?.({
+      progress: results.length,
+      total: actions.length,
+      message: `${action} ${inner.isError ? "failed" : "completed"}`,
+    });
 
     if (inner.isError) {
-      // Stop-on-first-error. Return everything so far + the error.
-      // Forward the inner action's telemetry (error_kind) so cu_tool_call
-      // reflects the actual failure — without this, batch-internal errors
-      // emit error_kind: undefined despite the inner handler tagging it.
-      // Release held mouse: the error may be a mid-grapheme abort in
-      // handleType, or a frontmost gate, landing between mouse_down and
-      // mouse_up.
-      await releaseHeldMouse(adapter);
-      return okJson(
-        {
-          completed: results.slice(0, -1),
-          failed: result,
-          remaining: actions.length - results.length,
-        },
-        inner.telemetry,
-      );
+      return finishFailedAction(result, inner.telemetry);
     }
   }
 
-  return okJson({ completed: results });
+  const result = okJson({ completed: results });
+  return { ...result, content: [...result.content, ...batchImages] };
 }
 
-function firstTextContent(r: CuCallToolResult): string {
-  const first = r.content[0];
-  return first && first.type === "text" ? first.text : "";
+function textContent(r: CuCallToolResult): string {
+  return r.content
+    .filter(item => item.type === "text")
+    .map(item => item.type === "text" ? item.text : "")
+    .join("\n");
 }
 
 /**
@@ -3482,11 +3792,23 @@ async function dispatchAction(
   subGates: CuSubGates,
 ): Promise<CuCallToolResult> {
   switch (name) {
-    case "screenshot":
-      return handleScreenshot(adapter, overrides, subGates);
+    case "screenshot": {
+      if (a.save_to_disk !== undefined && typeof a.save_to_disk !== "boolean") {
+        return errorResult("save_to_disk must be a boolean", "bad_args");
+      }
+      const result = await handleScreenshot(adapter, overrides, subGates);
+      throwIfActionAborted(overrides);
+      return maybeSaveImage(adapter, "screenshot", a, result);
+    }
 
-    case "zoom":
-      return handleZoom(adapter, a, overrides);
+    case "zoom": {
+      if (a.save_to_disk !== undefined && typeof a.save_to_disk !== "boolean") {
+        return errorResult("save_to_disk must be a boolean", "bad_args");
+      }
+      const result = await handleZoom(adapter, a, overrides);
+      throwIfActionAborted(overrides);
+      return maybeSaveImage(adapter, "zoom", a, result);
+    }
 
     case "left_click":
       return handleClickVariant(adapter, a, overrides, subGates, "left", 1);

@@ -32,8 +32,39 @@ export async function cleanupComputerUseAfterTurn(
     ToolUseContext,
     'getAppState' | 'setAppState' | 'sendOSNotification'
   >,
+  restoreClipboard: (text: string) => Promise<void> = async text => {
+    const { restoreComputerUseClipboard } = await import('./executor.js')
+    await restoreComputerUseClipboard(text)
+  },
+  restoreTimeoutMs = UNHIDE_TIMEOUT_MS,
 ): Promise<void> {
   const appState = ctx.getAppState()
+
+  const clipboardStash = appState.computerUseMcpState?.clipboardStash
+  if (clipboardStash !== undefined) {
+    const timeout = withResolvers<boolean>()
+    const timer = setTimeout(() => timeout.resolve(false), restoreTimeoutMs)
+    let restored = false
+    try {
+      restored = await Promise.race([
+        restoreClipboard(clipboardStash).then(() => true),
+        timeout.promise,
+      ])
+    } catch (err) {
+      logForDebugging(`[Computer Use MCP] clipboard restore failed: ${errorMessage(err)}`)
+    } finally {
+      clearTimeout(timer)
+    }
+    if (restored) {
+      ctx.setAppState(prev => ({
+        ...prev,
+        computerUseMcpState: {
+          ...prev.computerUseMcpState,
+          clipboardStash: undefined,
+        },
+      }))
+    }
+  }
 
   const hidden = appState.computerUseMcpState?.hiddenDuringTurn
   if (hidden && hidden.size > 0) {

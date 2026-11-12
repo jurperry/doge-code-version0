@@ -18,7 +18,8 @@ type ComputerUseApprovalProps = {
 const DENY_ALL_RESPONSE: CuPermissionResponse = {
   granted: [],
   denied: [],
-  flags: DEFAULT_GRANT_FLAGS
+  flags: DEFAULT_GRANT_FLAGS,
+  userConsented: false
 };
 
 /**
@@ -35,7 +36,7 @@ export function ComputerUseApproval(t0) {
   } = t0;
   let t1;
   if ($[0] !== onDone || $[1] !== request) {
-    t1 = request.tccState ? <ComputerUseTccPanel tccState={request.tccState} onDone={() => onDone(DENY_ALL_RESPONSE)} /> : <ComputerUseAppListPanel request={request} onDone={onDone} />;
+    t1 = request.tccState ? <ComputerUseTccPanel tccState={request.tccState} onDone={(retry: boolean) => onDone({ ...DENY_ALL_RESPONSE, userConsented: retry ? undefined : false })} /> : <ComputerUseAppListPanel request={request} onDone={onDone} />;
     $[0] = onDone;
     $[1] = request;
     $[2] = t1;
@@ -121,7 +122,7 @@ function ComputerUseTccPanel(t0) {
           }
         case "retry":
           {
-            onDone();
+            onDone(true);
             return;
           }
       }
@@ -168,7 +169,7 @@ function ComputerUseTccPanel(t0) {
   }
   let t8;
   if ($[16] !== onChange || $[17] !== onDone || $[18] !== options) {
-    t8 = <Select options={options} onChange={onChange} onCancel={onDone} />;
+    t8 = <Select options={options} onChange={onChange} onCancel={() => onDone(false)} />;
     $[16] = onChange;
     $[17] = onDone;
     $[18] = options;
@@ -187,7 +188,7 @@ function ComputerUseTccPanel(t0) {
   }
   let t10;
   if ($[23] !== onDone || $[24] !== t9) {
-    t10 = <Dialog title="Computer Use needs macOS permissions" onCancel={onDone}>{t9}</Dialog>;
+    t10 = <Dialog title="Computer Use needs macOS permissions" onCancel={() => onDone(false)}>{t9}</Dialog>;
     $[23] = onDone;
     $[24] = t9;
     $[25] = t10;
@@ -298,7 +299,8 @@ function ComputerUseAppListPanel(t0) {
       onDone({
         granted,
         denied,
-        flags
+        flags,
+        userConsented: true
       });
     };
     $[12] = checked;

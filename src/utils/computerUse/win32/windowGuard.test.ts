@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
   buildEnsureWindowScript,
+  buildRequireWindowScript,
   parseEnsureOutput,
 } from './windowGuard.js'
 
@@ -20,6 +21,22 @@ test('parses empty title in NOFG as null', () => {
     status: 'not_foreground',
     foregroundTitle: null,
   })
+})
+
+test('parses HWND identity mismatch separately from a dead window', () => {
+  expect(parseEnsureOutput('PIDMISMATCH|4242')).toEqual({
+    status: 'identity_mismatch',
+    actualPid: 4242,
+  })
+})
+
+test('expected-PID guard emits identity checks and final-input guard throws on failure', () => {
+  const probe = buildEnsureWindowScript(12345, true, 4242)
+  expect(probe).toContain('GetWindowThreadProcessId')
+  expect(probe).toContain('PIDMISMATCH|')
+  const required = buildRequireWindowScript(12345, 4242)
+  expect(required).toContain('Window identity changed')
+  expect(required).toContain("throw 'Could not foreground the target window")
 })
 
 test('treats empty or garbage output as dead (fail-closed, never blind input)', () => {

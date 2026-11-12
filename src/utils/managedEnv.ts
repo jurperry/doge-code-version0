@@ -220,6 +220,12 @@ let persistedProfileStartupComplete = false
 // another profile without mistaking our own defaults for explicit user env.
 const restoredProfileEnv = new Map<string, string>()
 
+export function _resetManagedEnvForTesting(): void {
+  persistedProfileStartupComplete = false
+  restoredProfileEnv.clear()
+  ccdSpawnEnvKeys = undefined
+}
+
 function applyPersistedCustomApiEndpointEnv(overrides: Record<string, string> = {}): void {
   // The desktop host supplies a complete connection snapshot, including empty
   // values that clear optional fields. Never fill those from changing disk defaults.

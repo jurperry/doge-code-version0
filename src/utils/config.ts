@@ -905,6 +905,22 @@ let globalConfigCache: { config: GlobalConfig | null; mtime: number } = {
 
 // Tracking for config file operations (telemetry)
 let lastReadFileStats: { mtime: number; size: number } | null = null
+
+export function _resetGlobalConfigForTesting(): void {
+  globalConfigCache = { config: null, mtime: 0 }
+  lastReadFileStats = null
+  configCacheHits = 0
+  configCacheMisses = 0
+  globalConfigWriteCount = 0
+  for (const key of Object.keys(TEST_GLOBAL_CONFIG_FOR_TESTING)) {
+    delete TEST_GLOBAL_CONFIG_FOR_TESTING[key]
+  }
+  Object.assign(TEST_GLOBAL_CONFIG_FOR_TESTING, DEFAULT_GLOBAL_CONFIG, { autoUpdates: false })
+  for (const key of Object.keys(TEST_PROJECT_CONFIG_FOR_TESTING)) {
+    delete TEST_PROJECT_CONFIG_FOR_TESTING[key]
+  }
+  Object.assign(TEST_PROJECT_CONFIG_FOR_TESTING, DEFAULT_PROJECT_CONFIG)
+}
 let configCacheHits = 0
 let configCacheMisses = 0
 // Session-total count of actual disk writes to the global config file.

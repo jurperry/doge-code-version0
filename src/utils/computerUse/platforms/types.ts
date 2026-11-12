@@ -33,6 +33,8 @@ export interface DisplayInfo {
   height: number
   scaleFactor: number
   displayId: number
+  originX?: number
+  originY?: number
 }
 
 export interface InstalledApp {
@@ -67,11 +69,11 @@ export interface FrontmostAppInfo {
 export interface InputPlatform {
   // --- Mode A: Global input (all platforms) ---
   moveMouse(x: number, y: number): Promise<void>
-  click(x: number, y: number, button: 'left' | 'right' | 'middle'): Promise<void>
+  click(x: number, y: number, button: 'left' | 'right' | 'middle', count?: number): Promise<void>
   typeText(text: string): Promise<void>
   key(name: string, action: 'press' | 'release'): Promise<void>
   keys(combo: string[]): Promise<void>
-  scroll(amount: number, direction: 'vertical' | 'horizontal'): Promise<void>
+  scroll(amount: number, direction: 'vertical' | 'horizontal', x?: number, y?: number): Promise<void>
   mouseLocation(): Promise<{ x: number; y: number }>
 
   // --- Drag primitives (optional; Windows implements both transports) ---
@@ -86,7 +88,7 @@ export interface InputPlatform {
   // --- Mode B: Window-bound input (Windows only, optional) ---
   sendChar?(hwnd: string, char: string): Promise<void>
   sendKey?(hwnd: string, vk: number, action: 'down' | 'up'): Promise<void>
-  sendClick?(hwnd: string, x: number, y: number, button: 'left' | 'right'): Promise<void>
+  sendClick?(hwnd: string, x: number, y: number, button: 'left' | 'right' | 'middle'): Promise<void>
   sendText?(hwnd: string, text: string): Promise<void>
 }
 
@@ -98,9 +100,9 @@ export interface ScreenshotPlatform {
   /** Full-screen capture. Returns JPEG base64. Optionally downscaled to target dims. */
   captureScreen(displayId?: number, targetW?: number, targetH?: number): Promise<ScreenshotResult>
   /** Region capture. Returns JPEG base64. */
-  captureRegion(x: number, y: number, w: number, h: number): Promise<ScreenshotResult>
+  captureRegion(x: number, y: number, w: number, h: number, origin?: { x: number; y: number }): Promise<ScreenshotResult>
   /** Window capture (Windows: PrintWindow, macOS: SCContentFilter, Linux: xdotool+import). */
-  captureWindow?(hwnd: string): Promise<ScreenshotResult | null>
+  captureWindow?(hwnd: string, expectedPid?: number): Promise<ScreenshotResult | null>
 }
 
 // ---------------------------------------------------------------------------

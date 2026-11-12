@@ -1,5 +1,5 @@
 /** Run each unit-test file in a clean process to isolate global settings/mocks. */
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 const root = resolve(import.meta.dir, '..')
 const testRoot = join(root, 'test')
@@ -23,9 +23,8 @@ try {
     const result = { file, exit, pass: Number(output.match(/\b(\d+) pass\b/)?.[1] ?? 0), fail: Number(output.match(/\b(\d+) fail\b/)?.[1] ?? 0) }
     results.push(result)
     console.log(`${exit === 0 ? 'PASS' : 'FAIL'} ${file} ${result.pass}/${result.pass + result.fail}`)
-    if (exit !== 0) await writeFile(join(testRoot, 'network-isolated-' + file.replaceAll(/[\\/:]/g, '-') + '.log'), output)
+    if (exit !== 0) console.log(output)
   }
-  await writeFile(join(testRoot, 'network-isolated-results.json'), JSON.stringify(results, null, 2))
   console.log(JSON.stringify({ files: results.length, pass: results.reduce((n, r) => n + r.pass, 0), fail: results.reduce((n, r) => n + r.fail, 0), failedFiles: results.filter(r => r.exit !== 0).map(r => r.file) }))
 } finally { await rm(sandbox, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 process.exitCode = results.some(r => r.exit !== 0) ? 1 : 0

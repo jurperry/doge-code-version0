@@ -1689,6 +1689,10 @@ async function checkPermissionsAndCallTool(
       })
     }
     const content = formatError(error)
+    const { content: errorContent, imageCount } = buildMcpErrorContent(error, toolUseID, content)
+    const imagePasteIds = imageCount > 0
+      ? Array.from({ length: imageCount }, (_, i) => getNextImagePasteId(toolUseContext.messages) + i)
+      : undefined
 
     // Determine if this was a user interrupt
     const isInterrupt = error instanceof AbortError
@@ -1715,15 +1719,9 @@ async function checkPermissionsAndCallTool(
     return [
       {
         message: createUserMessage({
-          content: [
-            {
-              type: 'tool_result',
-              content,
-              is_error: true,
-              tool_use_id: toolUseID,
-            },
-          ],
+          content: errorContent,
           toolUseResult: `Error: ${content}`,
+          imagePasteIds,
           mcpMeta: toolUseContext.agentId
             ? undefined
             : error instanceof
@@ -1743,3 +1741,35 @@ async function checkPermissionsAndCallTool(
     }
   }
 }
+
+function buildMcpErrorContent(
+  error: unknown,
+  toolUseID: string,
+  fallback: string,
+): { content: ContentBlockParam[]; imageCount: number } {
+  const raw = error instanceof McpToolCallError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS && error.errorContent !== undefined
+    ? error.errorContent
+    : fallback
+  if (!Array.isArray(raw)) {
+    return {
+      content: [{ type: 'tool_result', content: raw as string, is_error: true, tool_use_id: toolUseID }],
+      imageCount: 0,
+    }
+  }
+  const textBlocks = raw.filter(block => block.type === 'text')
+  const siblings = raw.filter(block => block.type !== 'text')
+  return {
+    content: [
+      {
+        type: 'tool_result',
+        content: textBlocks.length > 0 ? textBlocks : fallback,
+        is_error: true,
+        tool_use_id: toolUseID,
+      },
+      ...siblings,
+    ],
+    imageCount: siblings.filter(block => block.type === 'image').length,
+  }
+}
+
+export const _test = { buildMcpErrorContent }

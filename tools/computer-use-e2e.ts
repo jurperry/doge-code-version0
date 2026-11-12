@@ -15,7 +15,7 @@ process.env.CLAUDE_CONFIG_DIR = (() => {
   return join(process.cwd(), 'test', 'tmp-cu-e2e-config')
 })()
 
-const { mkdirSync, rmSync, writeFileSync } = await import('fs')
+const { mkdirSync, rmSync, writeFileSync, readFileSync } = await import('fs')
 const { join } = await import('path')
 
 const TMP_DIR = process.env.CLAUDE_CONFIG_DIR
@@ -113,7 +113,25 @@ try {
     console.log(`       screenshot saved: ${shotPath} (${shotImage.data.length} b64 chars, ${shot.screenshot?.width}x${shot.screenshot?.height})`)
   }
 
-  // ── 2. zoom：基于 lastScreenshot 的区域放大（同一 dispatcher 闭包） ──
+  // ── 2. save_to_disk：显式保存必须返回真实可读文件 ─────────────────────
+  const saved = await dispatch('screenshot', { save_to_disk: true })
+  const savedImage = (saved.content as any[]).find(c => c.type === 'image')
+  const savedText = (saved.content as any[])
+    .filter(c => c.type === 'text')
+    .map(c => c.text)
+    .find(text => text.startsWith('Screenshot saved to: '))
+  const savedPath = savedText?.slice('Screenshot saved to: '.length)
+  let saveMatches = false
+  if (savedPath && savedImage?.data) {
+    saveMatches = readFileSync(savedPath).equals(Buffer.from(savedImage.data, 'base64'))
+  }
+  check(
+    'save_to_disk returns a readable JPEG at the reported path',
+    !saved.isError && !!savedPath && saveMatches,
+    savedPath ?? JSON.stringify(saved.content).slice(0, 200),
+  )
+
+  // ── 3. zoom：基于 lastScreenshot 的区域放大（同一 dispatcher 闭包） ──
   const zoomed = await dispatch('zoom', { region: [0, 0, 600, 400] })
   const zoomImage = (zoomed.content as any[]).find(c => c.type === 'image')
   check(
@@ -122,7 +140,7 @@ try {
     zoomed.isError ? JSON.stringify(zoomed.content).slice(0, 200) : '',
   )
 
-  // ── 3. cursor_position：只读坐标查询 ────────────────────────────────
+  // ── 4. cursor_position：只读坐标查询 ────────────────────────────────
   const cursor = await dispatch('cursor_position', {})
   const cursorText = ((cursor.content as any[])?.[0]?.text ?? '') as string
   const xy = cursorText.match(/-?\d+/g)
@@ -132,7 +150,7 @@ try {
     cursorText.slice(0, 120),
   )
 
-  // ── 4. 锁释放：回合结束 cleanup.ts 的路径 ───────────────────────────
+  // ── 5. 锁释放：回合结束 cleanup.ts 的路径 ───────────────────────────
   const released = await releaseComputerUseLock()
   check('computer-use lock released after turn', released, '')
 } catch (e) {

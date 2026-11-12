@@ -6,6 +6,8 @@
  * pixels and PrintWindow captures at native (physical) resolution.
  */
 
+import { runPowerShellSync } from './powerShell.js'
+
 interface CaptureResult {
   base64: string
   width: number
@@ -26,9 +28,9 @@ using System.Drawing.Imaging;
 public class WinCap {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern IntPtr FindWindow(string c, string t);
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError=true)]
     public static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError=true)]
     public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint f);
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
@@ -39,13 +41,14 @@ public class WinCap {
         SetProcessDPIAware();
         IntPtr hwnd = FindWindow(null, title);
         if (hwnd == IntPtr.Zero) return "NOT_FOUND";
-        RECT r; GetWindowRect(hwnd, out r);
+        RECT r;
+        if (!GetWindowRect(hwnd, out r)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         int w = r.R - r.L; int h = r.B - r.T;
         if (w <= 0 || h <= 0) return "INVALID_SIZE";
         Bitmap bmp = new Bitmap(w, h);
         Graphics g = Graphics.FromImage(bmp);
         IntPtr hdc = g.GetHdc();
-        PrintWindow(hwnd, hdc, 2);
+        if (!PrintWindow(hwnd, hdc, 2)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         g.ReleaseHdc(hdc); g.Dispose();
         var ms = new System.IO.MemoryStream();
         bmp.Save(ms, ImageFormat.Png);
@@ -64,10 +67,12 @@ using System.Runtime.InteropServices;
 using System.Drawing;
 using System.Drawing.Imaging;
 public class WinCapH {
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError=true)]
     public static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError=true)]
     public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint f);
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
     [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll")]
@@ -81,9 +86,9 @@ public class WinCapH {
     public const int SW_RESTORE = 9;
     public const int SW_SHOWMINNOACTIVE = 7;
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError=true)]
     public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT wp);
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError=true)]
     public static extern bool SetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT wp);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -96,49 +101,71 @@ public class WinCapH {
     }
     public const int SW_SHOWNOACTIVATE = 4;
 
-    public static string Capture(IntPtr hwnd) {
+    public static string Capture(IntPtr hwnd, uint expectedPid) {
         SetProcessDPIAware();
         if (!IsWindow(hwnd)) return "NOT_FOUND";
+        if (expectedPid != 0) {
+            uint actualPid = 0;
+            GetWindowThreadProcessId(hwnd, out actualPid);
+            if (actualPid != expectedPid) return "PIDMISMATCH";
+        }
 
         bool wasMinimized = IsIconic(hwnd);
+        bool placementChanged = false;
         WINDOWPLACEMENT origWp = new WINDOWPLACEMENT();
         origWp.length = Marshal.SizeOf(origWp);
+        Bitmap bmp = null;
+        Graphics g = null;
+        IntPtr hdc = IntPtr.Zero;
+        string tmp = null;
 
-        if (wasMinimized) {
-            // Save original placement, temporarily restore offscreen
-            GetWindowPlacement(hwnd, ref origWp);
-            RECT rc = origWp.rcNormalPosition;
-            int nw = rc.R - rc.L; int nh = rc.B - rc.T;
-            if (nw <= 0 || nh <= 0) return "INVALID_SIZE";
+        try {
+            if (wasMinimized) {
+                if (!GetWindowPlacement(hwnd, ref origWp)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                RECT rc = origWp.rcNormalPosition;
+                int nw = rc.R - rc.L; int nh = rc.B - rc.T;
+                if (nw <= 0 || nh <= 0) return "INVALID_SIZE";
 
-            WINDOWPLACEMENT tempWp = origWp;
-            tempWp.showCmd = SW_SHOWNOACTIVATE;
-            tempWp.rcNormalPosition = new RECT { L = -32000, T = -32000, R = -32000 + nw, B = -32000 + nh };
-            SetWindowPlacement(hwnd, ref tempWp);
-            System.Threading.Thread.Sleep(100);
+                WINDOWPLACEMENT tempWp = origWp;
+                tempWp.showCmd = SW_SHOWNOACTIVATE;
+                tempWp.rcNormalPosition = new RECT { L = -32000, T = -32000, R = -32000 + nw, B = -32000 + nh };
+                if (!SetWindowPlacement(hwnd, ref tempWp)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                placementChanged = true;
+                System.Threading.Thread.Sleep(100);
+            }
+
+            RECT r;
+            if (!GetWindowRect(hwnd, out r)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            int w = r.R - r.L; int h = r.B - r.T;
+            if (w <= 0 || h <= 0) return "INVALID_SIZE";
+
+            bmp = new Bitmap(w, h);
+            g = Graphics.FromImage(bmp);
+            hdc = g.GetHdc();
+            if (!PrintWindow(hwnd, hdc, 2)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            g.ReleaseHdc(hdc); hdc = IntPtr.Zero;
+            g.Dispose(); g = null;
+
+            tmp = System.IO.Path.GetTempFileName() + ".jpg";
+            bmp.Save(tmp, ImageFormat.Jpeg);
+            bmp.Dispose(); bmp = null;
+            return w + "," + h + "," + tmp;
+        } catch {
+            if (tmp != null) {
+                try { System.IO.File.Delete(tmp); } catch {}
+            }
+            throw;
+        } finally {
+            if (hdc != IntPtr.Zero && g != null) g.ReleaseHdc(hdc);
+            if (g != null) g.Dispose();
+            if (bmp != null) bmp.Dispose();
+            if (placementChanged && !SetWindowPlacement(hwnd, ref origWp)) {
+                if (tmp != null) {
+                    try { System.IO.File.Delete(tmp); } catch {}
+                }
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
         }
-
-        RECT r; GetWindowRect(hwnd, out r);
-        int w = r.R - r.L; int h = r.B - r.T;
-        if (w <= 0 || h <= 0) {
-            if (wasMinimized) SetWindowPlacement(hwnd, ref origWp);
-            return "INVALID_SIZE";
-        }
-
-        Bitmap bmp = new Bitmap(w, h);
-        Graphics g = Graphics.FromImage(bmp);
-        IntPtr hdc = g.GetHdc();
-        PrintWindow(hwnd, hdc, 2); // PW_RENDERFULLCONTENT
-        g.ReleaseHdc(hdc); g.Dispose();
-
-        string tmp = System.IO.Path.GetTempFileName() + ".jpg";
-        bmp.Save(tmp, ImageFormat.Jpeg);
-        bmp.Dispose();
-
-        // Restore minimized state
-        if (wasMinimized) SetWindowPlacement(hwnd, ref origWp);
-
-        return w + "," + h + "," + tmp;
     }
 }
 '@
@@ -146,7 +173,7 @@ public class WinCapH {
 
 function parseCaptureOutput(raw: string): CaptureResult | null {
   const trimmed = raw.trim()
-  if (!trimmed || trimmed === 'NOT_FOUND' || trimmed === 'INVALID_SIZE') {
+  if (!trimmed || trimmed === 'NOT_FOUND' || trimmed === 'INVALID_SIZE' || trimmed === 'PIDMISMATCH') {
     return null
   }
   const firstComma = trimmed.indexOf(',')
@@ -168,18 +195,13 @@ function parseCaptureOutput(raw: string): CaptureResult | null {
     try { fs.unlinkSync(thirdPart) } catch {}
     return { base64, width, height, displayWidth: width, displayHeight: height, originX: 0, originY: 0 }
   } catch {
+    try { require('fs').unlinkSync(thirdPart) } catch {}
     return null
   }
 }
 
 function runPs(script: string): string {
-  const result = Bun.spawnSync({
-    cmd: ['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
-    stdout: 'pipe',
-    stderr: 'pipe',
-    timeoutMs: 15000,
-  })
-  return new TextDecoder().decode(result.stdout).trim()
+  return runPowerShellSync(script, 15000)
 }
 
 /**
@@ -196,8 +218,8 @@ export function captureWindow(title: string): CaptureResult | null {
 /**
  * Capture a window screenshot by its HWND handle.
  */
-export function captureWindowByHwnd(hwnd: number): CaptureResult | null {
-  const script = `${CAPTURE_BY_HWND_PS}\n[WinCapH]::Capture([IntPtr]::new(${hwnd}))`
+export function captureWindowByHwnd(hwnd: number, expectedPid?: number): CaptureResult | null {
+  const script = `${CAPTURE_BY_HWND_PS}\n[WinCapH]::Capture([IntPtr]::new(${hwnd}), ${expectedPid ?? 0})`
   const raw = runPs(script)
   return parseCaptureOutput(raw)
 }

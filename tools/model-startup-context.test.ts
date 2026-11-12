@@ -1,6 +1,7 @@
-import { afterAll, beforeAll, expect, test } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { resetModelTestState } from './modelTestIsolation.js'
 
 const dir = join(process.cwd(), 'test', 'model-startup-context')
 const saved = { ...process.env }
@@ -9,7 +10,12 @@ beforeAll(() => {
   process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
   mkdirSync(dir, { recursive: true })
 })
-afterAll(() => {
+beforeEach(async () => {
+  process.env.CLAUDE_CONFIG_DIR = dir
+  await resetModelTestState({ managed: true })
+})
+afterAll(async () => {
+  await resetModelTestState({ managed: true })
   for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]
   Object.assign(process.env, saved)
   rmSync(dir, { recursive: true, force: true })

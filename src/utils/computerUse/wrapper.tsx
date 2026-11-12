@@ -16,15 +16,19 @@
  * GrowthBook gate `tengu_malort_pedway` (see gates.ts).
  */
 
-import { bindSessionContext, type ComputerUseSessionContext, type CuCallToolResult, type CuPermissionRequest, type CuPermissionResponse, DEFAULT_GRANT_FLAGS, type ScreenshotDims } from '@ant/computer-use-mcp';
+import { bindSessionContext, type ComputerUseSessionContext, type CuCallToolResult, type CuPermissionRequest, type CuPermissionResponse, type CuToolProgress, DEFAULT_GRANT_FLAGS, type ScreenshotDims } from '@ant/computer-use-mcp';
+import type { ToolResultBlockParam } from '@anthropic-ai/sdk/resources/index.mjs';
 import * as React from 'react';
 import { getSessionId } from '../../bootstrap/state.js';
 import { ComputerUseApproval } from '../../components/permissions/ComputerUseApproval/ComputerUseApproval.js';
-import type { Tool, ToolUseContext } from '../../Tool.js';
+import { mcpToolCallLimits, McpToolCallError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, runMcpToolCall, type McpCallLimits } from '../../services/mcp/toolCallLifecycle.js';
+import type { AssistantMessage } from '../../types/message.js';
+import type { Tool, ToolCallProgress, ToolUseContext } from '../../Tool.js';
 import { logForDebugging } from '../debug.js';
 import { isAutoBypassActive } from '../permissions/autoBypass.js';
 import { buildAutoGrantResponse } from './autoGrant.js';
 import { checkComputerUseLock, tryAcquireComputerUseLock } from './computerUseLock.js';
+import { COMPUTER_USE_MCP_SERVER_NAME } from './common.js';
 import { registerEscHotkey } from './escHotkey.js';
 import { getChicagoCoordinateMode } from './gates.js';
 import { getComputerUseHostAdapter } from './hostAdapter.js';
@@ -32,7 +36,12 @@ import { getComputerUseMCPRenderingOverrides } from './toolRendering.js';
 type CallOverride = Pick<Tool, 'call'>['call'];
 type Binding = {
   ctx: ComputerUseSessionContext;
-  dispatch: (name: string, args: unknown) => Promise<CuCallToolResult>;
+  dispatch: (
+    name: string,
+    args: unknown,
+    requestSignal?: AbortSignal,
+    reportProgress?: (progress: CuToolProgress) => void,
+  ) => Promise<CuCallToolResult>;
 };
 
 /**
@@ -63,8 +72,17 @@ export function buildSessionContext(): ComputerUseSessionContext {
     // ── Read state fresh via the per-call ref ─────────────────────────────
     getAllowedApps: () => tuc().getAppState().computerUseMcpState?.allowedApps ?? [],
     getGrantFlags: () => tuc().getAppState().computerUseMcpState?.grantFlags ?? DEFAULT_GRANT_FLAGS,
+    getClipboardStash: () => tuc().getAppState().computerUseMcpState?.clipboardStash,
+    onClipboardStashChanged: stash => tuc().setAppState(prev => ({
+      ...prev,
+      computerUseMcpState: {
+        ...prev.computerUseMcpState,
+        clipboardStash: stash,
+      },
+    })),
     // cc-2 has no Settings page for user-denied apps yet.
     getUserDeniedBundleIds: () => [],
+    isAborted: () => tuc().abortController.signal.aborted,
     getSelectedDisplayId: () => tuc().getAppState().computerUseMcpState?.selectedDisplayId,
     getDisplayPinnedByModel: () => tuc().getAppState().computerUseMcpState?.displayPinnedByModel ?? false,
     getDisplayResolvedForApps: () => tuc().getAppState().computerUseMcpState?.displayResolvedForApps,
@@ -83,7 +101,7 @@ export function buildSessionContext(): ComputerUseSessionContext {
     // dismissal) is irrelevant here: `setToolJSX` blocks the tool call, so
     // the dialog can't outlive it. Ctrl+C is what matters, and
     // `runPermissionDialog` wires that from the per-call ref's abortController.
-    onPermissionRequest: (req, _dialogSignal) => runPermissionDialog(req),
+    onPermissionRequest: (req, dialogSignal) => runPermissionDialog(req, dialogSignal),
     // Package does the merge (dedupe + truthy-only flags). We just persist.
     onAllowedAppsChanged: (apps, flags) => tuc().setAppState(prev => {
       const cu = prev.computerUseMcpState;
@@ -247,31 +265,69 @@ function getOrBind(): Binding {
 type ComputerUseMCPToolOverrides = ReturnType<typeof getComputerUseMCPRenderingOverrides> & {
   call: CallOverride;
 };
-export function getComputerUseMCPToolOverrides(toolName: string): ComputerUseMCPToolOverrides {
-  const call: CallOverride = async (args, context: ToolUseContext) => {
-    // The lock and Esc callback are process-wide. Keep background agents out of
-    // CU instead of letting their cleanup release the main session's lock.
-    if (context.agentId) {
-      throw new Error('Computer Use is available only in the main session. Ask the main agent to perform this action.')
-    }
-    currentToolUseContext = context;
-    const {
-      dispatch
-    } = getOrBind();
-    const {
-      telemetry,
-      ...result
-    } = await dispatch(toolName, args);
+type CallComputerUseToolOptions = {
+  dispatch: Binding['dispatch'];
+  toolName: string;
+  args: Record<string, unknown>;
+  context: ToolUseContext;
+  parentMessage?: AssistantMessage;
+  onProgress?: ToolCallProgress;
+  limits?: McpCallLimits;
+};
+
+function extractToolUseId(message: AssistantMessage | undefined): string | undefined {
+  return message?.message.content[0]?.type === 'tool_use'
+    ? message.message.content[0].id
+    : undefined;
+}
+
+async function callComputerUseTool({
+  dispatch,
+  toolName,
+  args,
+  context,
+  parentMessage,
+  onProgress,
+  limits,
+}: CallComputerUseToolOptions) {
+  currentToolUseContext = context;
+  const toolUseID = extractToolUseId(parentMessage);
+  const emit = (data: Record<string, unknown>): void => {
+    if (toolUseID) onProgress?.({ toolUseID, data });
+  };
+  try {
+    const { telemetry, ...result } = await runMcpToolCall({
+      signal: context.abortController.signal,
+      serverName: COMPUTER_USE_MCP_SERVER_NAME,
+      toolName,
+      limits,
+      invoke: (requestSignal, reportProgress) => dispatch(toolName, args, requestSignal, reportProgress),
+      onProgress: progress => emit({
+        type: 'mcp_progress',
+        status: 'progress',
+        serverName: COMPUTER_USE_MCP_SERVER_NAME,
+        toolName,
+        progress: progress.progress,
+        total: progress.total,
+        progressMessage: progress.message,
+      }),
+      onWait: wait => {
+        logForDebugging(`[Computer Use MCP] ${toolName} waiting ${wait.elapsedMs}ms (${wait.idleMs}ms idle)`);
+        emit({
+          type: 'mcp_progress',
+          status: 'progress',
+          serverName: COMPUTER_USE_MCP_SERVER_NAME,
+          toolName,
+          elapsedTimeMs: wait.elapsedMs,
+          progressMessage: `等待 Computer Use ${toolName} 返回结果 · ${Math.floor(wait.elapsedMs / 1000)}s（无新进展 ${Math.floor(wait.idleMs / 1000)}s）`,
+        });
+      },
+    });
     if (telemetry?.error_kind) {
       logForDebugging(`[Computer Use MCP] ${toolName} error_kind=${telemetry.error_kind}`);
     }
-
-    // MCP content blocks → Anthropic API blocks. CU only produces text and
-    // pre-sized JPEG (executor.ts computeTargetDims → targetImageSize), so
-    // unlike the generic MCP path there's no resize needed — the MCP image
-    // shape just maps to the API's base64-source shape. The package's result
-    // type admits audio/resource too, but CU's handleToolCall never emits
-    // those; the fallthrough coerces them to empty text.
+    // MCP content blocks → Anthropic API blocks. Preserve the full payload for
+    // both success and structured partial-failure results.
     const data = Array.isArray(result.content) ? result.content.map(item => item.type === 'image' ? {
       type: 'image' as const,
       source: {
@@ -283,9 +339,44 @@ export function getComputerUseMCPToolOverrides(toolName: string): ComputerUseMCP
       type: 'text' as const,
       text: item.type === 'text' ? item.text : ''
     }) : result.content;
-    return {
-      data
-    };
+    if (result.isError) {
+      const first = Array.isArray(result.content)
+        ? result.content.find(item => item.type === 'text')
+        : undefined;
+      const message = first && first.type === 'text' ? first.text : 'Unknown error';
+      throw new McpToolCallError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS(
+        message,
+        'MCP tool returned error',
+        result._meta ? { _meta: result._meta } : undefined,
+        data as ToolResultBlockParam['content'],
+      );
+    }
+
+    return { data };
+  } catch (error) {
+    if (context.abortController.signal.aborted && error instanceof Error && error.name === 'AbortError') {
+      return { data: undefined };
+    }
+    throw error;
+  }
+}
+
+export function getComputerUseMCPToolOverrides(toolName: string): ComputerUseMCPToolOverrides {
+  const call: CallOverride = async (args, context, _canUseTool, parentMessage, onProgress) => {
+    // The lock and Esc callback are process-wide. Keep background agents out of
+    // CU instead of letting their cleanup release the main session's lock.
+    if (context.agentId) {
+      throw new Error('Computer Use is available only in the main session. Ask the main agent to perform this action.')
+    }
+    const { dispatch } = getOrBind();
+    return callComputerUseTool({
+      dispatch,
+      toolName,
+      args,
+      context,
+      parentMessage,
+      onProgress,
+    });
   };
   return {
     ...getComputerUseMCPRenderingOverrides(toolName),
@@ -300,7 +391,7 @@ export function getComputerUseMCPToolOverrides(toolName: string): ComputerUseMCP
  * The merge-into-AppState that used to live here (dedupe + truthy-only flags)
  * is now in the package's `bindSessionContext` → `onAllowedAppsChanged`.
  */
-async function runPermissionDialog(req: CuPermissionRequest): Promise<CuPermissionResponse> {
+async function runPermissionDialog(req: CuPermissionRequest, dialogSignal: AbortSignal): Promise<CuPermissionResponse> {
   const context = tuc();
   // doge fork: auto mode (/auto → bypassPermissions) skips the consent
   // dialog — the session is already fully released. Plan mode entered from
@@ -319,28 +410,31 @@ async function runPermissionDialog(req: CuPermissionRequest): Promise<CuPermissi
     return {
       granted: [],
       denied: [],
-      flags: DEFAULT_GRANT_FLAGS
+      flags: DEFAULT_GRANT_FLAGS,
+      userConsented: false,
+      permissionUIUnavailable: true,
     };
   }
   try {
     return await new Promise<CuPermissionResponse>((resolve, reject) => {
-      const signal = context.abortController.signal;
-      // If already aborted, addEventListener won't fire — reject now so the
-      // promise doesn't hang waiting for a user who Ctrl+C'd.
-      if (signal.aborted) {
-        reject(new Error('Computer Use permission dialog aborted'));
+      const signals = [dialogSignal, context.abortController.signal];
+      const cleanup = (): void => {
+        for (const signal of signals) signal.removeEventListener('abort', onAbort);
+      };
+      const onAbort = (): void => {
+        cleanup();
+        reject(new DOMException('Computer Use permission dialog aborted', 'AbortError'));
+      };
+      if (signals.some(signal => signal.aborted)) {
+        onAbort();
         return;
       }
-      const onAbort = (): void => {
-        signal.removeEventListener('abort', onAbort);
-        reject(new Error('Computer Use permission dialog aborted'));
-      };
-      signal.addEventListener('abort', onAbort);
+      for (const signal of signals) signal.addEventListener('abort', onAbort, { once: true });
       setToolJSX({
         jsx: React.createElement(ComputerUseApproval, {
           request: req,
           onDone: (resp: CuPermissionResponse) => {
-            signal.removeEventListener('abort', onAbort);
+            cleanup();
             resolve(resp);
           }
         }),
@@ -351,3 +445,8 @@ async function runPermissionDialog(req: CuPermissionRequest): Promise<CuPermissi
     setToolJSX(null);
   }
 }
+
+export const _test = {
+  callComputerUseTool,
+  runPermissionDialog,
+};

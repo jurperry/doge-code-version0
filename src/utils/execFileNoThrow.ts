@@ -21,6 +21,7 @@ type ExecFileOptions = {
   env?: NodeJS.ProcessEnv
   stdin?: 'ignore' | 'inherit' | 'pipe'
   input?: string
+  stripFinalNewline?: boolean
 }
 
 export function execFileNoThrow(
@@ -40,6 +41,7 @@ export function execFileNoThrow(
     env: options.env,
     stdin: options.stdin,
     input: options.input,
+    stripFinalNewline: options.stripFinalNewline,
   })
 }
 
@@ -53,6 +55,7 @@ type ExecFileWithCwdOptions = {
   shell?: boolean | string | undefined
   stdin?: 'ignore' | 'inherit' | 'pipe'
   input?: string
+  stripFinalNewline?: boolean
 }
 
 type ExecaResultWithError = {
@@ -99,6 +102,7 @@ export function execFileNoThrowWithCwd(
     shell,
     stdin: finalStdin,
     input: finalInput,
+    stripFinalNewline: finalStripFinalNewline = true,
   }: ExecFileWithCwdOptions = {
     timeout: 10 * SECONDS_IN_MINUTE * MS_IN_SECOND,
     preserveOutputOnError: true,
@@ -116,6 +120,7 @@ export function execFileNoThrowWithCwd(
       shell,
       stdin: finalStdin,
       input: finalInput,
+      stripFinalNewline: finalStripFinalNewline,
       reject: false, // Don't throw on non-zero exit codes
     })
       .then(result => {

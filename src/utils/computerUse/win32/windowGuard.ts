@@ -18,6 +18,7 @@
  */
 
 import { listWindows } from './windowEnum.js'
+import { runPowerShellSync } from './powerShell.js'
 
 // ── C# P/Invoke helper ──────────────────────────────────────────────────────
 
@@ -94,6 +95,7 @@ public class CuGuard {
 export type EnsureWindowResult =
   | { status: 'ok' }
   | { status: 'dead' }
+  | { status: 'identity_mismatch'; actualPid: number | null }
   | { status: 'not_foreground'; foregroundTitle: string | null }
 
 // ── Script builders ─────────────────────────────────────────────────────────
@@ -101,6 +103,7 @@ export type EnsureWindowResult =
 export function buildEnsureWindowScript(
   hwnd: number,
   needForeground: boolean,
+  expectedPid?: number,
 ): string {
   const fgBlock = needForeground
     ? `
@@ -120,9 +123,40 @@ if (\$ok) { 'OK' } else { 'NOFG|' + [CuGuard]::FgTitle() }
 `
     : `'OK'
 `
+  const identityBlock = expectedPid === undefined ? fgBlock : `
+\$currentPid = [uint32]0
+[CuGuard]::GetWindowThreadProcessId([IntPtr]${hwnd}, [ref]\$currentPid) | Out-Null
+if (\$currentPid -ne ${expectedPid}) { 'PIDMISMATCH|' + \$currentPid } else {
+${fgBlock}}
+`
   return `${GUARD_TYPES}
 if (-not [CuGuard]::IsWindow([IntPtr]${hwnd})) { 'DEAD' } else {
-${fgBlock}}
+${identityBlock}}
+`
+}
+
+export function buildRequireWindowScript(hwnd: number, expectedPid?: number): string {
+  const pidCheck = expectedPid === undefined ? '' : `
+\$currentPid = [uint32]0
+[CuGuard]::GetWindowThreadProcessId([IntPtr]${hwnd}, [ref]\$currentPid) | Out-Null
+if (\$currentPid -ne ${expectedPid}) { throw 'Window identity changed (PID ' + \$currentPid + ')' }
+`
+  return `${GUARD_TYPES}
+if (-not [CuGuard]::IsWindow([IntPtr]${hwnd})) { throw 'Target window no longer exists' }
+${pidCheck}
+if ([CuGuard]::IsIconic([IntPtr]${hwnd})) {
+    [CuGuard]::ShowWindow([IntPtr]${hwnd}, 9) | Out-Null
+    Start-Sleep -Milliseconds 250
+}
+\$ok = \$false
+for (\$i = 0; \$i -lt 3 -and -not \$ok; \$i++) {
+    \$ok = [CuGuard]::TryForeground([IntPtr]${hwnd})
+    if (-not \$ok) {
+        if (\$i -eq 1) { [CuGuard]::AltNudge() }
+        Start-Sleep -Milliseconds 200
+    }
+}
+if (-not \$ok) { throw 'Could not foreground the target window: ' + [CuGuard]::FgTitle() }
 `
 }
 
@@ -133,6 +167,11 @@ export function parseEnsureOutput(raw: string): EnsureWindowResult {
   const firstLine = trimmed.split('\n')[0].trim()
   if (firstLine === 'DEAD') return { status: 'dead' }
   if (firstLine === 'OK') return { status: 'ok' }
+  if (firstLine.startsWith('PIDMISMATCH|')) {
+    const rawPid = firstLine.slice('PIDMISMATCH|'.length).trim()
+    const actualPid = Number(rawPid)
+    return { status: 'identity_mismatch', actualPid: Number.isFinite(actualPid) ? actualPid : null }
+  }
   if (firstLine.startsWith('NOFG|')) {
     const title = firstLine.slice('NOFG|'.length).trim()
     return { status: 'not_foreground', foregroundTitle: title || null }
@@ -151,22 +190,11 @@ export function parseEnsureOutput(raw: string): EnsureWindowResult {
 export function ensureWindow(
   hwnd: number,
   needForeground: boolean,
+  expectedPid?: number,
 ): EnsureWindowResult {
   if (!Number.isInteger(hwnd) || hwnd <= 0) return { status: 'dead' }
   try {
-    const result = Bun.spawnSync({
-      cmd: [
-        'powershell',
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        buildEnsureWindowScript(hwnd, needForeground),
-      ],
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeoutMs: 10000,
-    })
-    return parseEnsureOutput(new TextDecoder().decode(result.stdout))
+    return parseEnsureOutput(runPowerShellSync(buildEnsureWindowScript(hwnd, needForeground, expectedPid), 10000))
   } catch {
     return { status: 'dead' }
   }
@@ -205,20 +233,7 @@ export function getPidsForProcessName(name: string): number[] {
   const safe = name.replace(/[^A-Za-z0-9_. -]/g, '').replace(/'/g, "''")
   if (!safe.trim()) return []
   try {
-    const result = Bun.spawnSync({
-      cmd: [
-        'powershell',
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Get-Process -Name '${safe}' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }`,
-      ],
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeoutMs: 8000,
-    })
-    return new TextDecoder()
-      .decode(result.stdout)
+    return runPowerShellSync(`Get-Process -Name '${safe}' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }`, 8000)
       .split('\n')
       .map(s => Number(s.trim()))
       .filter(n => Number.isInteger(n) && n > 0)

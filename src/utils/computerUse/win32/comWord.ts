@@ -4,6 +4,8 @@
  * Each function builds a PowerShell script, runs it via Bun.spawnSync, and parses JSON output.
  */
 
+import { runPowerShellSync } from './powerShell.js'
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -41,13 +43,11 @@ export interface AppendTextOptions {
 // ---------------------------------------------------------------------------
 
 function runPs(script: string): string {
-  const result = Bun.spawnSync({
-    cmd: ['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
-    stdout: 'pipe',
-    stderr: 'pipe',
-    timeoutMs: 8000,
-  })
-  return new TextDecoder().decode(result.stdout).trim()
+  try {
+    return runPowerShellSync(script, 8000)
+  } catch {
+    return ''
+  }
 }
 
 function parseJsonOutput<T>(raw: string, fallback: T): T {

@@ -19,6 +19,7 @@ export type {
   CuPermissionRequest,
   CuPermissionResponse,
   CuSubGates,
+  CuToolProgress,
   CuTeachPermissionRequest,
   Logger,
   ResolvedAppRequest,

@@ -21,9 +21,9 @@ export type ModelEnvironment = {
   readonly loginApiKey: { key: string; source: ApiKeySource } | null
 }
 
-const contexts = new AsyncLocalStorage<ModelEnvironment>()
+let contexts = new AsyncLocalStorage<ModelEnvironment>()
 type OAuthSession = { tokens: OAuthTokens }
-const oauthSessions = new WeakMap<ModelEnvironment, OAuthSession>()
+let oauthSessions = new WeakMap<ModelEnvironment, OAuthSession>()
 const oauthLineages = new Map<string, WeakRef<OAuthSession>>()
 function tokenKey(tokens?: OAuthTokens | null): string | undefined {
   return tokens?.accessToken ? `${getModelEnvironment().CLAUDE_CONFIG_DIR ?? ''}:${tokens.accessToken}` : undefined
@@ -189,4 +189,12 @@ export function restoreAgentModelEnvironment(
     registerOAuthSession(restored)
     return restored
   })
+}
+
+/** Reset process-local model state between independent test scenarios. */
+export function _resetModelRuntimeContextForTesting(): void {
+  contexts = new AsyncLocalStorage<ModelEnvironment>()
+  oauthSessions = new WeakMap<ModelEnvironment, OAuthSession>()
+  oauthLineages.clear()
+  agentEnvironments.clear()
 }

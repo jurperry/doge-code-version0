@@ -1,6 +1,7 @@
 import { test, expect, beforeAll, beforeEach, afterAll } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
+import { resetModelTestState } from '../../../tools/modelTestIsolation.js'
 
 // 集成测试：用临时 CLAUDE_CONFIG_DIR 隔离真实的 .claude.json/.credentials.json。
 // 产物写入仓库 test/ 目录（开发纪律），测试结束清理。
@@ -12,25 +13,21 @@ const AUTH_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
 ] as const
-const savedAuthEnv = new Map<string, string | undefined>()
+const savedEnv = { ...process.env }
 
 beforeAll(() => {
   process.env.CLAUDE_CONFIG_DIR = TMP_CONFIG_DIR
   mkdirSync(TMP_CONFIG_DIR, { recursive: true })
   for (const key of AUTH_ENV_KEYS) {
-    savedAuthEnv.set(key, process.env[key])
     delete process.env[key]
   }
 })
 
-afterAll(() => {
-  delete process.env.CLAUDE_CONFIG_DIR
+afterAll(async () => {
+  await resetModelTestState()
+  for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key]
+  Object.assign(process.env, savedEnv)
   rmSync(TMP_CONFIG_DIR, { recursive: true, force: true })
-  for (const key of AUTH_ENV_KEYS) {
-    const value = savedAuthEnv.get(key)
-    if (value === undefined) delete process.env[key]
-    else process.env[key] = value
-  }
 })
 
 function writeCredentials(data: Record<string, unknown>): void {
@@ -45,11 +42,8 @@ function readCredentials(): Record<string, any> {
 beforeEach(async () => {
   rmSync(TMP_CONFIG_DIR, { recursive: true, force: true })
   mkdirSync(TMP_CONFIG_DIR, { recursive: true })
-  delete process.env.ANTHROPIC_MODEL
-  delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
-  delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
-  delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
-  await resetGlobalConfig()
+  process.env.CLAUDE_CONFIG_DIR = TMP_CONFIG_DIR
+  await resetModelTestState()
 })
 
 // NODE_ENV=test 时 getGlobalConfig/saveGlobalConfig 走内存对象
@@ -58,11 +52,6 @@ beforeEach(async () => {
 async function readGlobalConfig(): Promise<Record<string, any>> {
   const { getGlobalConfig } = await import('../config.js')
   return getGlobalConfig() as Record<string, any>
-}
-
-async function resetGlobalConfig(): Promise<void> {
-  const { saveGlobalConfig } = await import('../config.js')
-  saveGlobalConfig((c: any) => ({ ...c, customApiEndpoint: undefined }))
 }
 
 // ── clearLegacyTierState ────────────────────────────────────────────

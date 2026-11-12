@@ -206,6 +206,8 @@ export interface CuPermissionResponse {
    * gate on it.
    */
   userConsented?: boolean;
+  /** No interactive permission surface exists (for example, headless CLI). */
+  permissionUIUnavailable?: boolean;
 }
 
 // ----------------------------------------------------------------------------
@@ -248,6 +250,13 @@ export interface ComputerUseHostAdapter {
    */
   getSubGates(): CuSubGates;
 
+  /** Persist an explicitly requested screenshot and return its absolute path. */
+  saveImageToDisk?(
+    base64: string,
+    mimeType: "image/jpeg",
+    persistId: string,
+  ): Promise<string>;
+
   /**
    * JPEG decode + crop + raw pixel bytes, for the PixelCompare staleness guard.
    * Injected so this package stays Electron-free. The host implements it via
@@ -282,6 +291,12 @@ export interface ComputerUseHostAdapter {
  * (Cowork) wrap them trivially; hosts with cross-process locks (the CLI's
  * O_EXCL file) call the real async primitive directly.
  */
+export interface CuToolProgress {
+  progress: number;
+  total?: number;
+  message?: string;
+}
+
 export interface ComputerUseSessionContext {
   // ── Read state fresh per call ──────────────────────────────────────
 
@@ -513,6 +528,9 @@ export interface ComputerUseOverrides {
    * same lazy-getter pattern as `checkCuLock`.
    */
   isAborted?: () => boolean;
+
+  /** Monotonic, action-based progress for request idle renewal and host UI. */
+  reportProgress?: (progress: CuToolProgress) => void;
 
   // ── Teach mode ───────────────────────────────────────────────────────
   // Wired only when the host's teachModeEnabled gate is on. All five

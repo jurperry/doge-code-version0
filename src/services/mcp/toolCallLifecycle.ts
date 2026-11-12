@@ -1,3 +1,6 @@
+import type { ToolResultBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
+import { TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../../utils/errors.js'
+
 /** Request-scoped deadlines; a silent MCP must give control back to the agent. */
 export interface McpCallLimits { idleMs: number; totalMs: number; waitIntervalMs: number }
 export interface McpCallProgress { progress: number; total?: number; message?: string }
@@ -12,6 +15,18 @@ function positiveTimeout(value: string | undefined, fallback: number): number {
 export function mcpToolCallLimits(env: Record<string, string | undefined> = process.env): McpCallLimits {
   const totalMs = positiveTimeout(env.MCP_TOOL_TIMEOUT, 600_000)
   return { totalMs, idleMs: Math.min(totalMs, positiveTimeout(env.MCP_TOOL_IDLE_TIMEOUT, 120_000)), waitIntervalMs: 30_000 }
+}
+
+export class McpToolCallError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS extends TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS {
+  constructor(
+    message: string,
+    telemetryMessage: string,
+    readonly mcpMeta?: { _meta?: Record<string, unknown> },
+    readonly errorContent?: ToolResultBlockParam['content'],
+  ) {
+    super(message, telemetryMessage)
+    this.name = 'McpToolCallError'
+  }
 }
 
 export class McpToolTimeoutError extends Error {

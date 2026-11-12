@@ -40,6 +40,7 @@ import type {
   CoordinateMode,
   CuGrantFlags,
   CuPermissionResponse,
+  CuToolProgress,
 } from "./types.js";
 import { DEFAULT_GRANT_FLAGS } from "./types.js";
 
@@ -90,12 +91,18 @@ export function bindSessionContext(
   adapter: ComputerUseHostAdapter,
   coordinateMode: CoordinateMode,
   ctx: ComputerUseSessionContext,
-): (name: string, args: unknown) => Promise<CuCallToolResult> {
+): (
+  name: string,
+  args: unknown,
+  requestSignal?: AbortSignal,
+  reportProgress?: (progress: CuToolProgress) => void,
+) => Promise<CuCallToolResult> {
   const { logger, serverName } = adapter;
 
   // Screenshot blob persists here across calls — NOT on `ctx`. Hosts hold
   // onto the returned dispatcher; that's the identity that matters.
   let lastScreenshot: ScreenshotResult | undefined;
+  let callGeneration = 0;
 
   const wrapPermission = ctx.onPermissionRequest
     ? async (
@@ -103,6 +110,9 @@ export function bindSessionContext(
         signal: AbortSignal,
       ): Promise<CuPermissionResponse> => {
         const response = await ctx.onPermissionRequest!(req, signal);
+        if (signal.aborted || ctx.isAborted?.()) {
+          throw new DOMException("Computer Use permission request aborted", "AbortError");
+        }
         const { apps, flags } = mergePermissionResponse(
           ctx.getAllowedApps(),
           ctx.getGrantFlags(),
@@ -122,6 +132,9 @@ export function bindSessionContext(
         signal: AbortSignal,
       ): Promise<CuPermissionResponse> => {
         const response = await ctx.onTeachPermissionRequest!(req, signal);
+        if (signal.aborted || ctx.isAborted?.()) {
+          throw new DOMException("Computer Use teach permission request aborted", "AbortError");
+        }
         logger.debug(
           `[${serverName}] teach permission result: granted=${response.granted.length} denied=${response.denied.length}`,
         );
@@ -139,7 +152,14 @@ export function bindSessionContext(
       }
     : undefined;
 
-  return async (name, args) => {
+  return async (name, args, requestSignal, reportProgress) => {
+    const ticket = ++callGeneration;
+    const throwIfAborted = (): void => {
+      if (requestSignal?.aborted || ctx.isAborted?.()) {
+        throw new DOMException("Computer Use call aborted before new side effects", "AbortError");
+      }
+    };
+    throwIfAborted();
     // ─── Async lock gate ─────────────────────────────────────────────────
     // Replaces the sync Gate-3 in `handleToolCall` — we pass
     // `checkCuLock: undefined` below so it no-ops. Hosts with
@@ -183,6 +203,7 @@ export function bindSessionContext(
       }
     }
 
+    throwIfAborted();
     // ─── Build overrides fresh ───────────────────────────────────────────
     // Blob-first; dims-fallback with base64:"" when the closure cell is
     // unset (cross-respawn). scaleCoord reads dims; pixelCompare sees "" →
@@ -195,6 +216,9 @@ export function bindSessionContext(
     // if handleToolCall finishes (MCP timeout, throw) before the user
     // answers, the host's dialog handler sees the abort and tears down.
     const dialogAbort = new AbortController();
+    const abortDialog = () => dialogAbort.abort(requestSignal?.reason);
+    if (requestSignal?.aborted) abortDialog();
+    else requestSignal?.addEventListener("abort", abortDialog, { once: true });
 
     const overrides: ComputerUseOverrides = {
       allowedApps: [...ctx.getAllowedApps()],
@@ -227,7 +251,8 @@ export function bindSessionContext(
       // above already ran.
       checkCuLock: undefined,
       acquireCuLock: undefined,
-      isAborted: ctx.isAborted,
+      isAborted: () => requestSignal?.aborted === true || ctx.isAborted?.() === true,
+      reportProgress,
     };
 
     logger.debug(
@@ -236,9 +261,10 @@ export function bindSessionContext(
 
     // ─── Dispatch ────────────────────────────────────────────────────────
     try {
+      throwIfAborted();
       const result = await handleToolCall(adapter, name, args, overrides);
 
-      if (result.screenshot) {
+      if (result.screenshot && ticket === callGeneration && !requestSignal?.aborted && !ctx.isAborted?.()) {
         lastScreenshot = result.screenshot;
         const { base64: _blob, ...dims } = result.screenshot;
         logger.debug(`[${serverName}] screenshot dims: ${JSON.stringify(dims)}`);
@@ -247,6 +273,7 @@ export function bindSessionContext(
 
       return result;
     } finally {
+      requestSignal?.removeEventListener("abort", abortDialog);
       dialogAbort.abort();
     }
   };

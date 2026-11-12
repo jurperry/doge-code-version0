@@ -9,6 +9,7 @@ import type { ScrollBoxHandle } from '../ink/components/ScrollBox.js'
 import instances from '../ink/instances.js'
 import { cellAt } from '../ink/screen.js'
 import { Box, render, Text } from '../ink.js'
+import { isXtermJs } from '../ink/terminal.js'
 import { createUserMessage } from '../utils/messages.js'
 import { FullscreenLayout } from './FullscreenLayout.js'
 import { ScrollKeybindingHandler } from './ScrollKeybindingHandler.js'
@@ -244,6 +245,15 @@ describe('FullscreenLayout three-region viewport', () => {
     expect(afterUp).toBeLessThan(before)
     expect(screenLines(harness)[0]).toBe('TOP')
     expect(screenLines(harness)[BOTTOM_ROW]).toBe('BOTTOM')
+
+    await sendMouse(harness, '\x1b[<65;10;5M')
+    const afterFirstDown = harness.scrollRef.current!.getScrollTop() + harness.scrollRef.current!.getPendingDelta()
+    if (isXtermJs()) {
+      expect(afterFirstDown).toBeGreaterThan(afterUp)
+    } else {
+      // Native terminal wheel handling debounces the first direction reversal.
+      expect(afterFirstDown).toBe(afterUp)
+    }
 
     await sendMouse(harness, '\x1b[<65;10;5M')
     const afterDown = harness.scrollRef.current!.getScrollTop() + harness.scrollRef.current!.getPendingDelta()

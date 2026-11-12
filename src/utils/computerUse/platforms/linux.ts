@@ -86,9 +86,19 @@ const input: InputPlatform = {
     run(['xdotool', 'mousemove', '--sync', String(Math.round(x)), String(Math.round(y))])
   },
 
-  async click(x, y, button) {
+  async click(x, y, button, count = 1) {
     run(['xdotool', 'mousemove', '--sync', String(Math.round(x)), String(Math.round(y))])
-    run(['xdotool', 'click', mouseButtonNum(button)])
+    run(['xdotool', 'click', '--repeat', String(count), mouseButtonNum(button)])
+  },
+
+  async mouseDown(x, y) {
+    run(['xdotool', 'mousemove', '--sync', String(Math.round(x)), String(Math.round(y))])
+    run(['xdotool', 'mousedown', '1'])
+  },
+
+  async mouseUp(x, y) {
+    run(['xdotool', 'mousemove', '--sync', String(Math.round(x)), String(Math.round(y))])
+    run(['xdotool', 'mouseup', '1'])
   },
 
   async typeText(text) {

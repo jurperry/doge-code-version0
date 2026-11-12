@@ -5,6 +5,8 @@ export interface DisplayGeometry {
   scaleFactor: number
   originX: number
   originY: number
+  label?: string
+  isPrimary?: boolean
 }
 
 export interface ScreenshotResult {
@@ -42,6 +44,7 @@ export interface ResolvePrepareCaptureResult extends ScreenshotResult {
   hidden: string[]
   activated?: string
   displayId: number
+  captureError?: string
 }
 
 export interface ComputerExecutorCapabilities {
@@ -79,6 +82,7 @@ export interface ComputerExecutor {
     regionLogical: { x: number; y: number; w: number; h: number },
     allowedBundleIds: string[],
     displayId?: number,
+    captureOrigin?: { x: number; y: number },
   ): Promise<{ base64: string; width: number; height: number }>
   key(keySequence: string, repeat?: number): Promise<void>
   holdKey(keyNames: string[], durationMs: number): Promise<void>

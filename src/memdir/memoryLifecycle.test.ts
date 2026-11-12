@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -7,12 +7,16 @@ import {
   ensureMemoryEntrypointExists,
   loadMemoryPrompt,
 } from './memdir.js'
-import { isAutoMemoryEnabled, isExtractModeActive } from './paths.js'
+import { isAutoMemoryEnabled, isExtractModeActive, getAutoMemPath } from './paths.js'
 
 const TMP = mkdtempSync(join(tmpdir(), 'doge-memory-lifecycle-'))
 const previousOverride = process.env.DOGE_HEADLESS_AUTO_MEMORY
 const previousDisable = process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
 const previousPath = process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE
+
+beforeEach(() => {
+  getAutoMemPath.cache.clear()
+})
 
 afterEach(() => {
   if (previousOverride === undefined) delete process.env.DOGE_HEADLESS_AUTO_MEMORY
@@ -21,6 +25,7 @@ afterEach(() => {
   else process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = previousDisable
   if (previousPath === undefined) delete process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE
   else process.env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE = previousPath
+  getAutoMemPath.cache.clear()
 })
 
 afterAll(() => rmSync(TMP, { recursive: true, force: true }))

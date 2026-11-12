@@ -270,6 +270,9 @@ export type AppState = DeepImmutable<{
       clipboardWrite: boolean
       systemKeyCombos: boolean
     }
+    // Clipboard contents temporarily stashed by click-tier guard. Session-local;
+    // restored at turn end and never persisted across resume.
+    clipboardStash?: string
     // Dims-only (NOT the blob) for scaleCoord after compaction. The full
     // `ScreenshotResult` including base64 is process-local in wrapper.tsx.
     lastScreenshotDims?: {

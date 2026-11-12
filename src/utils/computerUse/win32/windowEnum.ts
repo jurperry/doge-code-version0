@@ -3,6 +3,8 @@
  * Returns visible windows with their HWND, PID, and title.
  */
 
+import { runPowerShellSync } from './powerShell.js'
+
 export interface WindowInfo {
   hwnd: number
   pid: number
@@ -58,13 +60,7 @@ public class WinEnum {
  * Returns HWND, PID, and window title for each.
  */
 export function listWindows(): WindowInfo[] {
-  const result = Bun.spawnSync({
-    cmd: ['powershell', '-NoProfile', '-NonInteractive', '-Command', ENUM_WINDOWS_PS],
-    stdout: 'pipe',
-    stderr: 'pipe',
-    timeoutMs: 8000,
-  })
-  const raw = new TextDecoder().decode(result.stdout).trim()
+  const raw = runPowerShellSync(ENUM_WINDOWS_PS, 8000)
   if (!raw) return []
 
   return raw

@@ -12,9 +12,11 @@ test('request timeout is distinct from a connection failure', () => {
 const KEY = 'CLAUDE_CODE_MAX_RETRIES'
 const saved = process.env[KEY]
 const savedApiKey = process.env.DOGE_API_KEY
+const savedUnattendedRetry = process.env.CLAUDE_CODE_UNATTENDED_RETRY
 
 beforeEach(() => {
   delete process.env[KEY]
+  delete process.env.CLAUDE_CODE_UNATTENDED_RETRY
   process.env.DOGE_API_KEY = 'sk-retry-test'
 })
 
@@ -23,6 +25,8 @@ afterEach(() => {
   else process.env[KEY] = saved
   if (savedApiKey === undefined) delete process.env.DOGE_API_KEY
   else process.env.DOGE_API_KEY = savedApiKey
+  if (savedUnattendedRetry === undefined) delete process.env.CLAUDE_CODE_UNATTENDED_RETRY
+  else process.env.CLAUDE_CODE_UNATTENDED_RETRY = savedUnattendedRetry
 })
 
 test('getDefaultMaxRetries: unset → default 10', () => {

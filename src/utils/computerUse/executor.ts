@@ -69,8 +69,9 @@ function computeTargetDims(
 
 async function readClipboardViaPbpaste(): Promise<string> {
   if (process.platform === 'win32') {
-    const { stdout, code } = await execFileNoThrow('powershell', ['-NoProfile', '-Command', 'Get-Clipboard'], {
+    const { stdout, code } = await execFileNoThrow('powershell', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::InputEncoding = [Text.Encoding]::UTF8; [Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Out.Write((Get-Clipboard -Raw))'], {
       useCwd: false,
+      stripFinalNewline: false,
     })
     if (code !== 0) {
       throw new Error(`PowerShell Get-Clipboard exited with code ${code}`)
@@ -80,6 +81,7 @@ async function readClipboardViaPbpaste(): Promise<string> {
   if (process.platform === 'linux') {
     const { stdout, code } = await execFileNoThrow('xclip', ['-selection', 'clipboard', '-o'], {
       useCwd: false,
+      stripFinalNewline: false,
     })
     if (code !== 0) {
       throw new Error(`xclip exited with code ${code}`)
@@ -97,8 +99,10 @@ async function readClipboardViaPbpaste(): Promise<string> {
 
 async function writeClipboardViaPbcopy(text: string): Promise<void> {
   if (process.platform === 'win32') {
-    const { code } = await execFileNoThrow('powershell', ['-NoProfile', '-Command', `Set-Clipboard -Value '${text.replace(/'/g, "''")}'`], {
+    const { code } = await execFileNoThrow('powershell', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::InputEncoding = [Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())'], {
+      input: text,
       useCwd: false,
+      stripFinalNewline: false,
     })
     if (code !== 0) {
       throw new Error(`PowerShell Set-Clipboard exited with code ${code}`)
@@ -109,6 +113,7 @@ async function writeClipboardViaPbcopy(text: string): Promise<void> {
     const { code } = await execFileNoThrow('xclip', ['-selection', 'clipboard'], {
       input: text,
       useCwd: false,
+      stripFinalNewline: false,
     })
     if (code !== 0) {
       throw new Error(`xclip exited with code ${code}`)
@@ -157,8 +162,9 @@ async function moveAndSettle(
 }
 
 /**
- * Release `pressed` in reverse (last pressed = first released). Errors are
- * swallowed so a release failure never masks the real error.
+ * Release `pressed` in reverse (last pressed = first released). Every release is
+ * attempted, then failures are surfaced so a stuck modifier is never reported
+ * as a successful hold.
  *
  * Drains via pop() rather than snapshotting length: if a drainRunLoop-
  * orphaned press lambda resolves an in-flight input.key() AFTER finally
@@ -166,13 +172,17 @@ async function moveAndSettle(
  * orphaned flag stops the lambda at its NEXT check, not the current await.
  */
 async function releasePressed(input: Input, pressed: string[]): Promise<void> {
+  const failures: string[] = []
   let k: string | undefined
   while ((k = pressed.pop()) !== undefined) {
     try {
       await input.key(k, 'release')
-    } catch {
-      // Swallow — best-effort release.
+    } catch (error) {
+      failures.push(`${k}: ${errorMessage(error)}`)
     }
+  }
+  if (failures.length > 0) {
+    throw new Error(`Failed to release held keys; they may still be pressed (${failures.join('; ')})`)
   }
 }
 
@@ -192,8 +202,8 @@ async function withModifiers<T>(
   const pressed: string[] = []
   try {
     for (const m of mods) {
-      await input.key(m, 'press')
       pressed.push(m)
+      await input.key(m, 'press')
     }
     return await fn()
   } finally {
@@ -215,29 +225,32 @@ async function withModifiers<T>(
  *      user's clipboard clobbered. Restore failures are swallowed.
  */
 async function typeViaClipboard(input: Input, text: string): Promise<void> {
-  let saved: string | undefined
+  let saved: string
   try {
     saved = await readClipboardViaPbpaste()
-  } catch {
-    logForDebugging(
-      '[computer-use] pbpaste before paste failed; proceeding without restore',
-    )
+  } catch (error) {
+    throw new Error(`Could not read the existing clipboard, so it was left unchanged: ${errorMessage(error)}`)
   }
 
+  let pasteError: unknown
   try {
     await writeClipboardViaPbcopy(text)
     if ((await readClipboardViaPbpaste()) !== text) {
-      throw new Error('Clipboard write did not round-trip.')
+      throw new Error('Clipboard write did not round-trip; paste was not sent.')
     }
     await input.keys([process.platform === 'darwin' ? 'command' : 'ctrl', 'v'])
     await sleep(100)
+  } catch (error) {
+    pasteError = error
+    throw error
   } finally {
-    if (typeof saved === 'string') {
-      try {
-        await writeClipboardViaPbcopy(saved)
-      } catch {
-        logForDebugging('[computer-use] clipboard restore after paste failed')
+    try {
+      await writeClipboardViaPbcopy(saved)
+    } catch (restoreError) {
+      if (pasteError) {
+        throw new Error(`Paste failed: ${errorMessage(pasteError)}. Clipboard restore also failed: ${errorMessage(restoreError)}`)
       }
+      throw new Error(`Text was pasted, but restoring the previous clipboard failed: ${errorMessage(restoreError)}`)
     }
   }
 }
@@ -318,7 +331,7 @@ export function createCliExecutor(opts: {
     apps: {
       prepareDisplay: async () => ({ activated: '', hidden: [] as string[] }),
       previewHideSet: async () => [] as any[],
-      findWindowDisplays: async (ids: string[]) => ids.map(b => ({ bundleId: b, displayIds: [0] })),
+      findWindowDisplays: async (ids: string[]) => ids.map(b => ({ bundleId: b, displayIds: [] })),
       appUnderPoint: async (x: number, y: number) => {
         const info = platform!.apps.getFrontmostApp()
         return info ? { bundleId: info.id, displayName: info.appName } : null
@@ -337,7 +350,7 @@ export function createCliExecutor(opts: {
     display: {
       getSize: (displayId?: number) => {
         const d = platform!.display.getSize(displayId)
-        return { ...d, scaleFactor: d.scaleFactor ?? 1, displayId: d.displayId ?? 0 }
+        return { ...d, scaleFactor: d.scaleFactor ?? 1, displayId: d.displayId ?? 0, originX: d.originX ?? 0, originY: d.originY ?? 0 }
       },
       listAll: () => platform!.display.listAll(),
     },
@@ -375,19 +388,26 @@ export function createCliExecutor(opts: {
       // In HWND-bound SendMessage mode, the real cursor doesn't move.
       // Return the saved logical coordinates so cursor_position reports
       // the position the model expects, not the physical cursor location.
-      mouseLocation: () => Promise.resolve({ x: lastMouseX, y: lastMouseY }),
+      mouseLocation: () => {
+        if (process.platform === 'win32') {
+          const { getBoundHwnd } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+          if (getBoundHwnd()) return Promise.resolve({ x: lastMouseX, y: lastMouseY })
+        }
+        return p.mouseLocation()
+      },
       // press/release map to the platform's phase primitives when available —
       // the old blanket click() mapping turned executor drag() into three
       // independent full clicks on Windows.
-      mouseButton: (btn: 'left' | 'right' | 'middle', a: 'click' | 'press' | 'release', _count?: number) => {
+      mouseButton: (btn: 'left' | 'right' | 'middle', a: 'click' | 'press' | 'release', count?: number) => {
         if (a === 'press' && p.mouseDown) return p.mouseDown(lastMouseX, lastMouseY)
+        if (a === 'press') throw new Error('Mouse-down is not supported on this platform')
         if (a === 'release') {
           if (p.mouseUp) return p.mouseUp(lastMouseX, lastMouseY)
-          return Promise.resolve()
+          throw new Error('Mouse-up is not supported on this platform')
         }
-        return p.click(lastMouseX, lastMouseY, btn)
+        return p.click(lastMouseX, lastMouseY, btn, count ?? 1)
       },
-      mouseScroll: (amount: number, dir: 'vertical' | 'horizontal') => p.scroll(amount, dir),
+      mouseScroll: (amount: number, dir: 'vertical' | 'horizontal') => p.scroll(amount, dir, lastMouseX, lastMouseY),
       typeText: (text: string) => p.typeText(text),
       getFrontmostAppInfo: () => {
         const info = platform!.apps.getFrontmostApp()
@@ -476,6 +496,19 @@ export function createCliExecutor(opts: {
     // ── Display ──────────────────────────────────────────────────────────
 
     async getDisplaySize(displayId?: number): Promise<DisplayGeometry> {
+      if (!isDarwin && process.platform === 'win32') {
+        const { getBoundWindowDimensions } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+        const bound = getBoundWindowDimensions()
+        if (bound) {
+          return {
+            ...bound,
+            scaleFactor: 1,
+            displayId: displayId ?? 0,
+            originX: 0,
+            originY: 0,
+          }
+        }
+      }
       return cu.display.getSize(displayId)
     },
 
@@ -553,7 +586,17 @@ export function createCliExecutor(opts: {
       regionLogical: { x: number; y: number; w: number; h: number },
       allowedBundleIds: string[],
       displayId?: number,
+      captureOrigin?: { x: number; y: number },
     ): Promise<{ base64: string; width: number; height: number }> {
+      if (!isDarwin && platform) {
+        return platform.screenshot.captureRegion(
+          regionLogical.x,
+          regionLogical.y,
+          regionLogical.w,
+          regionLogical.h,
+          captureOrigin,
+        )
+      }
       const d = cu.display.getSize(displayId)
       const [outW, outH] = computeTargetDims(
         regionLogical.w,
@@ -632,8 +675,8 @@ export function createCliExecutor(opts: {
             if (isBareEscape([k])) {
               notifyExpectedEscape()
             }
-            await input.key(k, 'press')
             pressed.push(k)
+            await input.key(k, 'press')
           }
         })
         await sleep(durationMs)
@@ -646,7 +689,11 @@ export function createCliExecutor(opts: {
     async type(text: string, opts: { viaClipboard: boolean }): Promise<void> {
       // Windows/Linux: route through platform which handles HWND binding
       if (!isDarwin && platform) {
-        await platform.input.typeText(text)
+        if (opts.viaClipboard) {
+          await typeViaClipboard(getInput(), text)
+        } else {
+          await platform.input.typeText(text)
+        }
         return
       }
       const input = getInput()
@@ -764,21 +811,15 @@ export function createCliExecutor(opts: {
     // ── App management ───────────────────────────────────────────────────
 
     async getFrontmostApp(): Promise<FrontmostApp | null> {
-      // When HWND is bound on Windows, operations go through SendMessage
-      // and don't touch the real foreground. Return the first allowed app
-      // so the frontmost gate in toolCalls.ts passes — the real foreground
-      // is irrelevant since we never touch it.
+      // The package gate needs the effective input target for authorization.
+      // Background HWND delivery may legitimately differ from the physical
+      // foreground; real-input delivery is separately verified by the Win32 guard.
       if (!isDarwin) {
         try {
-          const { getBoundHwnd } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
-          if (getBoundHwnd()) {
-            // Return first allowed app — we're operating on it via HWND
-            const allowed = cu.apps?.listRunning?.() ?? []
-            if (allowed.length > 0) {
-              return { bundleId: allowed[0].bundleId, displayName: allowed[0].displayName }
-            }
-            // Fallback: return a synthetic "bound window" identity
-            return { bundleId: 'cu-bound-window', displayName: 'Bound Window' }
+          const { getBoundHwnd, getBoundFilePath, getBoundAppId } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+          if (getBoundHwnd() || getBoundFilePath()) {
+            const bundleId = getBoundAppId()
+            return bundleId ? { bundleId, displayName: bundleId } : null
           }
         } catch {}
         if (platform) {
@@ -826,6 +867,10 @@ export function createCliExecutor(opts: {
       await cu.apps.open(bundleId)
     },
   }
+}
+
+export async function restoreComputerUseClipboard(text: string): Promise<void> {
+  await writeClipboardViaPbcopy(text)
 }
 
 /**

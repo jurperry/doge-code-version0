@@ -78,9 +78,8 @@ function computeCropRect(
 /**
  * Compare the same patch location between two screenshots.
  *
- * @returns true when the raw pixel bytes are identical. false on any
- * difference, or on any internal error (the caller treats an error here as
- * `skipped`, so the false is harmless).
+ * @returns true for identical pixels, false for a real mismatch, and null
+ * when no comparison can be performed (invalid rect or unavailable crop).
  */
 export function comparePixelAtLocation(
   crop: CropRawPatchFn,
@@ -89,7 +88,7 @@ export function comparePixelAtLocation(
   xPercent: number,
   yPercent: number,
   gridSize: number = DEFAULT_GRID_SIZE,
-): boolean {
+): boolean | null {
   // Both screenshots are of the same display — use the fresh one's
   // dimensions (less likely to be stale than last's).
   const rect = computeCropRect(
@@ -99,11 +98,11 @@ export function comparePixelAtLocation(
     yPercent,
     gridSize,
   );
-  if (!rect) return false;
+  if (!rect) return null;
 
   const patch1 = crop(lastScreenshot.base64, rect);
   const patch2 = crop(freshScreenshot.base64, rect);
-  if (!patch1 || !patch2) return false;
+  if (!patch1 || !patch2) return null;
 
   // Direct buffer equality. Note: nativeImage.toBitmap() gives BGRA, sharp's
   // .raw() gave RGB.
@@ -153,6 +152,9 @@ export async function validateClickTarget(
       gridSize,
     );
 
+    if (pixelsMatch === null) {
+      return { valid: true, skipped: true };
+    }
     if (pixelsMatch) {
       return { valid: true, skipped: false };
     }

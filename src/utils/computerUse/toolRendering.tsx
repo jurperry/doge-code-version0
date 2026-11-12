@@ -22,18 +22,43 @@ const RESULT_SUMMARY: Readonly<Partial<Record<string, string>>> = {
   screenshot: 'Captured',
   zoom: 'Captured',
   request_access: 'Access updated',
-  left_click: 'Clicked',
-  right_click: 'Clicked',
-  middle_click: 'Clicked',
-  double_click: 'Clicked',
-  triple_click: 'Clicked',
-  type: 'Typed',
-  key: 'Pressed',
-  hold_key: 'Pressed',
-  scroll: 'Scrolled',
-  left_click_drag: 'Dragged',
-  open_application: 'Opened'
+  left_click: 'Click dispatched',
+  right_click: 'Click dispatched',
+  middle_click: 'Click dispatched',
+  double_click: 'Click dispatched',
+  triple_click: 'Click dispatched',
+  type: 'Text input dispatched',
+  key: 'Key input dispatched',
+  hold_key: 'Key input dispatched',
+  scroll: 'Scroll dispatched',
+  left_click_drag: 'Drag dispatched',
+  open_application: 'Open dispatched'
 };
+
+function firstText(output: MCPToolResult): string {
+  if (typeof output === 'string') return output;
+  if (!Array.isArray(output)) return '';
+  const first = output.find(item => item?.type === 'text');
+  return first && 'text' in first ? String(first.text) : '';
+}
+
+function getResultSummary(toolName: string, output: MCPToolResult): string | undefined {
+  const text = firstText(output);
+  if (toolName === 'computer_batch' && text) {
+    try {
+      const result = JSON.parse(text);
+      return result.failed ? 'Batch stopped with a failed action' : 'Batch dispatched';
+    } catch {}
+  }
+  if (toolName === 'request_access' && text) {
+    try {
+      const result = JSON.parse(text);
+      if (result.userConsented === false) return 'Access declined';
+    } catch {}
+  }
+  return RESULT_SUMMARY[toolName];
+}
+
 
 /**
  * Rendering overrides for `mcp__computer-use__*` tools. Spread into the MCP
@@ -114,7 +139,7 @@ export function getComputerUseMCPRenderingOverrides(toolName: string): {
       if (verbose || typeof output !== 'object' || output === null) return null;
 
       // Non-verbose: one-line dim summary, like Chrome's pattern.
-      const summary = RESULT_SUMMARY[toolName];
+      const summary = getResultSummary(toolName, output);
       if (!summary) return null;
       return <MessageResponse height={1}>
           <Text dimColor>{summary}</Text>
@@ -122,3 +147,5 @@ export function getComputerUseMCPRenderingOverrides(toolName: string): {
     }
   };
 }
+
+export const _test = { getResultSummary };

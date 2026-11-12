@@ -12,6 +12,7 @@
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
+import { MAX_BATCH_ACTIONS, MAX_TYPE_TEXT_LENGTH } from "./limits.js";
 import type { CoordinateMode } from "./types.js";
 
 // See packages/desktop/computer-use-mcp/COORDINATES.md before touching any
@@ -29,7 +30,7 @@ const COORD_DESC: Record<CoordinateMode, { x: string; y: string }> = {
 };
 
 const FRONTMOST_GATE_DESC =
-  "The frontmost application must be in the session allowlist at the time of this call, or this tool returns an error and does nothing.";
+  "The effective input target and its grant tier must allow the action. macOS checks the frontmost application; Windows checks the bound application, or the real foreground for global input. Rejected actions return an error before new input is sent.";
 
 /**
  * Item schema for the `actions` array in `computer_batch`, `teach_step`, and
@@ -80,6 +81,7 @@ const BATCH_ACTION_ITEM_SCHEMA = {
     },
     text: {
       type: "string",
+      maxLength: MAX_TYPE_TEXT_LENGTH,
       description:
         "For type: the text. For key/hold_key: the chord string. For click/scroll: modifier keys to hold.",
     },
@@ -154,7 +156,7 @@ export function buildComputerUseTools(
   const screenshotDesc =
     caps.screenshotFiltering === "native"
       ? "Take a screenshot of the primary display. Applications not in the session allowlist are excluded at the compositor level — only granted apps and the desktop are visible."
-      : "Take a screenshot of the primary display. On this platform, screenshots are NOT filtered — all open windows are visible. Input actions targeting apps not in the session allowlist are rejected.";
+      : "Take a screenshot of the current target display or bound application window. On this platform, screenshots are NOT filtered — all captured windows are visible. Input actions targeting apps not in the session allowlist are rejected.";
 
   return [
     {
@@ -314,7 +316,7 @@ export function buildComputerUseTools(
       inputSchema: {
         type: "object" as const,
         properties: {
-          text: { type: "string", description: "Text to type." },
+          text: { type: "string", maxLength: MAX_TYPE_TEXT_LENGTH, description: "Text to type." },
         },
         required: ["text"],
       },
@@ -557,6 +559,7 @@ export function buildComputerUseTools(
           actions: {
             type: "array",
             minItems: 1,
+            maxItems: MAX_BATCH_ACTIONS,
             items: BATCH_ACTION_ITEM_SCHEMA,
             description:
               'List of actions. Example: [{"action":"left_click","coordinate":[100,200]},{"action":"type","text":"hello"},{"action":"key","text":"Return"}]',

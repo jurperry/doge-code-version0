@@ -10,14 +10,10 @@
  * - Falls back to no-op on older Windows or Electron-style frameless windows
  */
 
+import { runPowerShellSync } from './powerShell.js'
+
 function ps(script: string): string {
-  const result = Bun.spawnSync({
-    cmd: ['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
-    stdout: 'pipe',
-    stderr: 'pipe',
-    timeoutMs: 5000,
-  })
-  return new TextDecoder().decode(result.stdout).trim()
+  return runPowerShellSync(script, 5000)
 }
 
 const DWM_TYPES = `

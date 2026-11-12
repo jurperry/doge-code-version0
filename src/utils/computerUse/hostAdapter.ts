@@ -4,6 +4,7 @@ import type {
 } from '@ant/computer-use-mcp/types'
 import { format } from 'util'
 import { logForDebugging } from '../debug.js'
+import { persistBinaryContent } from '../mcpOutputStorage.js'
 import { COMPUTER_USE_MCP_SERVER_NAME } from './common.js'
 import { createCliExecutor } from './executor.js'
 import { getChicagoEnabled, getChicagoSubGates } from './gates.js'
@@ -69,6 +70,15 @@ export function getComputerUseHostAdapter(): ComputerUseHostAdapter {
     getSubGates: getChicagoSubGates,
     // cleanup.ts always unhides at turn end — no user preference to disable it.
     getAutoUnhideEnabled: () => true,
+    saveImageToDisk: async (base64, mimeType, persistId) => {
+      const result = await persistBinaryContent(
+        Buffer.from(base64, 'base64'),
+        mimeType,
+        persistId,
+      )
+      if ('error' in result) throw new Error(result.error)
+      return result.filepath
+    },
 
     // Pixel-validation JPEG decode+crop. MUST be synchronous (the package
     // does `patch1.equals(patch2)` directly on the return value). Cowork uses
