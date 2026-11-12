@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `debug_updates_1.md` ~ `debug_updates_7.md` 合并精简而成。每条固定三行：问题 / 解决 / 位置。已被后续架构演进取代的记录已剔除，去向见文末「演进注记」。
 
+## 2026-11-12 Windows Computer Use Esc 生命周期修复（2.1.317）
+
+1. 遇到问题：Windows 原生 Esc 的 PowerShell 消息循环放在未执行的字符串中，named pipe 又调用不存在的 `WaitForConnection(100)` 重载，导致 hook 安装后仍无法中止；注册提前返回、失败与 helper 退出存在资源泄漏和迟到回调，模型合成 Escape 也可能误中止当前回合。后台 AgentTool 子代理若持锁还存在主线/子线清理互相覆盖的所有权问题。
+2. 解决方法：直接执行消息循环并以当前模块句柄安装全局 hook；注册改为可等待握手，stdout、stderr、进程退出和超时统一裁决，generation 隔离取消、重注册及旧 pipe 连接，helper 退出走完整清理。Node named pipe 替代轮询，按 PID 隔离。Win32 读取 `KBDLLHOOKSTRUCT.flags` 并跳过 `LLKHF_INJECTED`，模型合成 Escape 不再依赖固定时间窗，物理 Esc 保持中止。后台子代理在加锁及原生模块加载前明确拒绝并提示转主线，避免引入跨作用域锁计数。
+3. 位置：`src/utils/computerUse/{escHotkey,executor,wrapper}.tsx/ts`、`src/utils/computerUse/win32/escHook.ts`、`package.json`；邻仓 `tools/{check-computer-use-esc-hook,verify-computer-use-native,verify-computer-use-subagent}.mjs`。helper 13/13（取消后立即重注册、启动失败、helper 退出后真实新进程重注册、连续 Esc、pipe 回收），真实 CLI 原生 Esc 3/3（锁释放、无第二次模型请求），真实 AgentTool 2/2，`bun run version`=2.1.317；邻仓 App 0.2.215 安装版锁场景 23/23、启动冒烟 5/5 通过，独立最终复审 Approve。物理键盘因安全桌面未实测，原生 named pipe Esc 信号链路已实测。
+
 ## 2026-10-31 App 长驻会话跨会话记忆链路与退出回收（2.1.315）
 
 1. 遇到问题：外部 Bun 构建的 `feature('EXTRACT_MEMORIES')` 在编译期移除记忆提取模块，App 回合结束无法执行后台提取；上游两个灰度门默认关闭，目录初始化也不保证 `MEMORY.md`。审查发现主回合 abort 会联动取消已开始提取，`end_session`/SIGINT 与宿主硬杀可能丢失记忆。

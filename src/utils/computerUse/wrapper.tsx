@@ -216,7 +216,7 @@ export function buildSessionContext(): ComputerUseSessionContext {
         // injection can't dismiss dialogs with Escape). The CGEventTap's
         // CFRunLoopSource is processed by the drainRunLoop pump, so this
         // holds a pump retain until unregisterEscHotkey() in cleanup.ts.
-        const escRegistered = registerEscHotkey(() => {
+        const escRegistered = await registerEscHotkey(() => {
           logForDebugging('[cu-esc] user escape, aborting turn');
           tuc().abortController.abort();
         });
@@ -249,6 +249,11 @@ type ComputerUseMCPToolOverrides = ReturnType<typeof getComputerUseMCPRenderingO
 };
 export function getComputerUseMCPToolOverrides(toolName: string): ComputerUseMCPToolOverrides {
   const call: CallOverride = async (args, context: ToolUseContext) => {
+    // The lock and Esc callback are process-wide. Keep background agents out of
+    // CU instead of letting their cleanup release the main session's lock.
+    if (context.agentId) {
+      throw new Error('Computer Use is available only in the main session. Ask the main agent to perform this action.')
+    }
     currentToolUseContext = context;
     const {
       dispatch

@@ -22,8 +22,16 @@ import { requireComputerUseSwift } from './swiftLoader.js'
 
 let registered = false
 
-export function registerEscHotkey(onEscape: () => void): boolean {
-  if (registered) return true
+export async function registerEscHotkey(onEscape: () => void): Promise<boolean> {
+  if (registered) {
+    if (process.platform === 'win32') {
+      const { isWin32EscHotkeyRegistered } = require('./win32/escHook.js') as typeof import('./win32/escHook.js')
+      if (isWin32EscHotkeyRegistered()) return true
+      registered = false
+    } else {
+      return true
+    }
+  }
 
   // macOS: CGEventTap via Swift
   if (process.platform === 'darwin') {
@@ -41,8 +49,8 @@ export function registerEscHotkey(onEscape: () => void): boolean {
   // Windows: WH_KEYBOARD_LL via PowerShell
   if (process.platform === 'win32') {
     try {
-      const { registerWin32EscHotkey } = require('./win32/escHook.js') as typeof import('./win32/escHook.js')
-      if (registerWin32EscHotkey(onEscape)) {
+      const { registerWin32EscHotkey, isWin32EscHotkeyRegistered } = require('./win32/escHook.js') as typeof import('./win32/escHook.js')
+      if (await registerWin32EscHotkey(onEscape) && isWin32EscHotkeyRegistered()) {
         registered = true
         logForDebugging('[cu-esc] registered (Windows WH_KEYBOARD_LL)')
         return true
@@ -61,15 +69,19 @@ export function registerEscHotkey(onEscape: () => void): boolean {
 }
 
 export function unregisterEscHotkey(): void {
+  if (process.platform === 'win32') {
+    try {
+      const { unregisterWin32EscHotkey } = require('./win32/escHook.js') as typeof import('./win32/escHook.js')
+      unregisterWin32EscHotkey()
+    } catch {}
+    registered = false
+    logForDebugging('[cu-esc] unregistered')
+    return
+  }
   if (!registered) return
   try {
     if (process.platform === 'darwin') {
       (requireComputerUseSwift() as any).hotkey.unregister()
-    } else if (process.platform === 'win32') {
-      try {
-        const { unregisterWin32EscHotkey } = require('./win32/escHook.js') as typeof import('./win32/escHook.js')
-        unregisterWin32EscHotkey()
-      } catch {}
     }
   } finally {
     if (process.platform === 'darwin') {
@@ -85,5 +97,5 @@ export function notifyExpectedEscape(): void {
   if (process.platform === 'darwin') {
     ;(requireComputerUseSwift() as any).hotkey.notifyExpectedEscape()
   }
-  // Windows: no hole-punching needed, WH_KEYBOARD_LL is passive (read-only)
+  // Windows filters model-synthesized Escape at the Win32 hook via LLKHF_INJECTED.
 }

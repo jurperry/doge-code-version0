@@ -591,6 +591,7 @@ export function createCliExecutor(opts: {
         const n = repeat ?? 1
         for (let i = 0; i < n; i++) {
           if (i > 0) await sleep(8)
+          if (isBareEscape(parts)) notifyExpectedEscape()
           await platform.input.keys(parts)
         }
         return
