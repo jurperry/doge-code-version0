@@ -153,6 +153,7 @@ next.customApiEndpoint = undefined
 
 - 只读 e2e：`bun tools/computer-use-e2e.ts`，覆盖 ListTools、真实截图、save_to_disk、zoom、cursor 和锁释放。
 - 隔离输入 e2e：`bun tools/computer-use-input-fixture-e2e.ts`，使用脚本自己创建、绑定并关闭的 WinForms fixture。
+- 中文输入 e2e：`bun tools/computer-use-win32-unicode-e2e.ts`（原生 EDIT）与 `bun tools/computer-use-chromium-unicode-e2e.ts`（独立 Electron 输入框），逐字核对“你好，做个自我介绍”及长 Unicode 文本，直接验证真实控件内容。
 - 不得复用用户的记事本、浏览器、IDE、文档或其他已有窗口。
 - 不得在测试中进行真实系统级破坏性操作、关闭用户应用或覆盖用户剪贴板。
 - 测试窗口、临时图片、配置和进程必须清理。

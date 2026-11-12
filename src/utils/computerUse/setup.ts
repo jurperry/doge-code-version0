@@ -31,6 +31,8 @@ Guidance:
 - Do not guess coordinates: re-screenshot or zoom instead. If a click misses, zoom into the target and correct the coordinates before retrying.
 - A dispatched input event is not proof that the application changed state. Always verify the resulting UI before continuing.
 - Read tool errors before retrying. A batch, type action, or timeout may be partially completed or have an unknown outcome; inspect the current screen instead of blindly replaying side effects.
+- On an error, stop the current action sequence and read the exact failure before issuing more input. For target/foreground failures, call open_application for an already authorized app and take a fresh screenshot; for capture failures, never click using stale coordinates.
+- computer_batch stops at the first failure. Use completed, failed or aborted, remaining, and recovery to understand the boundary; inspect the screen and perform only missing actions instead of replaying the batch.
 - If the user declines request_access, do not show the same dialog again. Choose a non-Computer-Use approach or ask the user to perform the action.
 </computer-use-availability>`
 

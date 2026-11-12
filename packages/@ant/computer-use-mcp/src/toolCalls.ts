@@ -146,6 +146,33 @@ function okJson(obj: unknown, telemetry?: CuCallTelemetry): CuCallToolResult {
   };
 }
 
+const SIDE_EFFECTING_TOOLS = new Set([
+  "left_click", "double_click", "triple_click", "right_click", "middle_click",
+  "type", "key", "scroll", "left_click_drag", "mouse_move", "hold_key",
+  "left_mouse_down", "left_mouse_up", "write_clipboard",
+]);
+
+function recoveryGuidanceForFailure(name: string): string {
+  if (name === "computer_batch") {
+    return "Do not replay the whole batch: earlier actions may have taken effect and the failed action may be partial. Take a screenshot to inspect the current state, then perform only the missing actions. Later actions were not executed.";
+  }
+  if (SIDE_EFFECTING_TOOLS.has(name)) {
+    return "The action may be partial or its outcome may be unknown; do not repeat it blindly. Take a screenshot to inspect the current state. If the target is unavailable, call open_application for an authorized app first, then perform only the remaining needed action.";
+  }
+  if (name === "screenshot" || name === "zoom") {
+    return "Do not click using stale coordinates. If the target window may have changed, call open_application for an authorized app, then take a fresh screenshot. If capture still fails, use a non-Computer-Use approach or report the blocker.";
+  }
+  if (name === "open_application") {
+    return "The app may already have started or come to the foreground. Take a screenshot or inspect the open windows before retrying; rebind only if the intended window exists and is authorized. Do not blindly relaunch it. If the window cannot be restored, use another approach or ask the user for help.";
+  }
+  return "Read the error and inspect the current state before retrying. If the same failure persists, use a non-Computer-Use approach or report the blocker.";
+}
+
+function recoveryGuidanceForAbortedBatch(cleanupFailed: boolean): string {
+  return "The batch was cancelled before the aborted action was dispatched; earlier actions may have taken effect, and this action plus all later actions were not dispatched. Do not replay the whole batch. Take a screenshot, then perform only the actions still needed." +
+    (cleanupFailed ? " Mouse cleanup may also be incomplete; before further input, check that no mouse button remains held." : "");
+}
+
 // ---------------------------------------------------------------------------
 // Arg validation — lightweight, no zod (mirrors chrome-mcp's cast-and-check)
 // ---------------------------------------------------------------------------
@@ -195,8 +222,11 @@ function extractCoordinate(
     return new Error(`${paramName} must be an array of length 2`);
   }
   const [x, y] = coord;
-  if (typeof x !== "number" || typeof y !== "number" || x < 0 || y < 0) {
-    return new Error(`${paramName} must be a tuple of non-negative numbers`);
+  if (
+    typeof x !== "number" || typeof y !== "number" ||
+    !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0
+  ) {
+    return new Error(`${paramName} must be a tuple of finite non-negative numbers`);
   }
   return [x, y];
 }
@@ -801,10 +831,20 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function throwIfActionAborted(overrides: ComputerUseOverrides): void {
-  if (overrides.isAborted?.()) {
-    throw new DOMException("Computer Use action aborted before new side effects", "AbortError");
+class PreActionAbortError extends Error {
+  constructor() {
+    super("Computer Use action aborted before new side effects");
+    this.name = "AbortError";
   }
+}
+
+function throwIfActionAborted(
+  overrides: ComputerUseOverrides,
+  phase: "before_side_effect" | "during_action" = "before_side_effect",
+): void {
+  if (!overrides.isAborted?.()) return;
+  if (phase === "before_side_effect") throw new PreActionAbortError();
+  throw new DOMException("Computer Use action aborted before new side effects", "AbortError");
 }
 
 /**
@@ -2285,7 +2325,7 @@ async function handleScreenshot(
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") throw err;
       return errorResult(
-        `Screenshot capture failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Screenshot capture failed: ${err instanceof Error ? err.message : String(err)}. Recovery: ${recoveryGuidanceForFailure("screenshot")}`,
         "capture_failed",
       );
     }
@@ -2335,7 +2375,10 @@ async function handleScreenshot(
     // revoked mid-session). onAppsHidden fired above so auto-unhide will
     // restore hidden apps at turn end. Now surface the error to the model.
     if (result.captureError !== undefined) {
-      return errorResult(result.captureError, "capture_failed");
+      return errorResult(
+        `${result.captureError}. Recovery: ${recoveryGuidanceForFailure("screenshot")}`,
+        "capture_failed",
+      );
     }
     const captureIssue = fullScreenshotIssue(result);
     if (captureIssue) {
@@ -2430,7 +2473,7 @@ async function handleScreenshot(
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") throw err;
     return errorResult(
-      `Screenshot capture failed after one retry: ${err instanceof Error ? err.message : String(err)}`,
+      `Screenshot capture failed after one retry: ${err instanceof Error ? err.message : String(err)}. Recovery: ${recoveryGuidanceForFailure("screenshot")}`,
       "capture_failed",
     );
   }
@@ -2491,9 +2534,9 @@ async function handleZoom(
     );
   }
   const [x0, y0, x1, y1] = region;
-  if (![x0, y0, x1, y1].every((v) => typeof v === "number" && v >= 0)) {
+  if (![x0, y0, x1, y1].every((v) => typeof v === "number" && Number.isFinite(v) && v >= 0)) {
     return errorResult(
-      "region values must be non-negative numbers",
+      "region values must be finite non-negative numbers",
       "bad_args",
     );
   }
@@ -2652,8 +2695,7 @@ async function handleClickVariant(
       adapter.logger,
     );
     if (!validation.valid && validation.warning) {
-      // Warning result — model told to re-screenshot.
-      return okText(validation.warning);
+      return errorResult(`${validation.warning} The click was not dispatched.`, "state_conflict");
     }
   }
 
@@ -2750,7 +2792,7 @@ async function handleType(
       );
     }
     await sleep(INTER_GRAPHEME_SLEEP_MS);
-    throwIfActionAborted(overrides);
+    throwIfActionAborted(overrides, "during_action");
     if (g === "\n" || g === "\r" || g === "\r\n") {
       await adapter.executor.key("return");
     } else if (g === "\t") {
@@ -3684,9 +3726,28 @@ async function handleComputerBatch(
         completed: results.slice(0, -1),
         failed: failedWithCleanup,
         remaining: actions.length - results.length,
+        recovery: recoveryGuidanceForFailure("computer_batch"),
       },
       telemetry,
     );
+    return { ...result, isError: true, content: [...result.content, ...batchImages] };
+  };
+  const finishAbortedBatch = async (index: number): Promise<CuCallToolResult> => {
+    const action = (actions[index] as Record<string, unknown>).action as string;
+    let output = `Batch aborted after ${results.length} of ${actions.length} actions before actions[${index}] (${action}); this action and all later actions were not dispatched (user interrupt).`;
+    let cleanupFailed = false;
+    try {
+      await releaseHeldMouse(adapter);
+    } catch (err) {
+      cleanupFailed = true;
+      output += ` Mouse cleanup also failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    const result = okJson({
+      completed: results,
+      aborted: { action, index, ok: false, output },
+      remaining: actions.length - results.length,
+      recovery: recoveryGuidanceForAbortedBatch(cleanupFailed),
+    });
     return { ...result, isError: true, content: [...result.content, ...batchImages] };
   };
   for (const [i, act] of actions.entries()) {
@@ -3694,17 +3755,13 @@ async function handleComputerBatch(
     // synchronously before query.interrupt(). The SDK abort tears down the
     // host's await but not this loop — without this check the remaining
     // actions fire into a dead session.
-    if (overrides.isAborted?.()) {
-      await releaseHeldMouse(adapter);
-      return errorResult(
-        `Batch aborted after ${results.length} of ${actions.length} actions (user interrupt).`,
-      );
-    }
+    if (overrides.isAborted?.()) return finishAbortedBatch(i);
 
     // Small inter-step settle. Synthetic CGEvents post instantly; some apps
     // need a tick to process step N's input before step N+1 lands (e.g. a
     // click opening a menu before the next click targets a menu item).
     if (i > 0) await sleep(10);
+    if (overrides.isAborted?.()) return finishAbortedBatch(i);
 
     const actionArgs = act as Record<string, unknown>;
     const action = actionArgs.action as string;
@@ -3722,6 +3779,9 @@ async function handleComputerBatch(
       );
       inner = dispatched;
     } catch (err) {
+      if (err instanceof PreActionAbortError) {
+        return finishAbortedBatch(i);
+      }
       const message = err instanceof Error ? err.message : String(err);
       const failed: BatchActionResult = {
         action,
@@ -3797,7 +3857,7 @@ async function dispatchAction(
         return errorResult("save_to_disk must be a boolean", "bad_args");
       }
       const result = await handleScreenshot(adapter, overrides, subGates);
-      throwIfActionAborted(overrides);
+      throwIfActionAborted(overrides, "during_action");
       return maybeSaveImage(adapter, "screenshot", a, result);
     }
 
@@ -3806,7 +3866,7 @@ async function dispatchAction(
         return errorResult("save_to_disk must be a boolean", "bad_args");
       }
       const result = await handleZoom(adapter, a, overrides);
-      throwIfActionAborted(overrides);
+      throwIfActionAborted(overrides, "during_action");
       return maybeSaveImage(adapter, "zoom", a, result);
     }
 
@@ -4061,7 +4121,10 @@ export async function handleToolCall(
     // the result is still a tool error, never an implicit success.
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[${serverName}] tool=${name} threw: ${msg}`, err);
-    return errorResult(`Tool "${name}" failed: ${msg}`, "executor_threw");
+    return errorResult(
+      `Tool "${name}" failed: ${msg}. Recovery: ${recoveryGuidanceForFailure(name)}`,
+      "executor_threw",
+    );
   }
 }
 

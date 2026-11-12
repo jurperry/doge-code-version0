@@ -936,16 +936,9 @@ const input: InputPlatform = {
       }
       return
     }
-    // HWND-bound apps: try SendMessage first, fall back to real input if the
-    // window is self-drawn (WM_CHAR is an app-layer no-op) or UIPI blocks.
+    // WM_CHAR is not reliable for Unicode text, including native EDIT controls.
+    // Use the same verified SendInput path for every bound window.
     if (boundHwnd) {
-      if (!isSelfDrawn && ensureSendAccess()) {
-        guardBoundWindow(false)
-        // false means no supported edit child and no WM_CHAR was sent, so a
-        // real-input fallback cannot duplicate partially delivered text.
-        if (text.length <= 160 && getWm().sendText(boundHwnd, text, boundPid ?? undefined)) return
-      }
-      // Real keystrokes go to the FOREGROUND window; activate and verify first.
       guardBoundWindow(true)
       await sendInputUnicode(text)
       return

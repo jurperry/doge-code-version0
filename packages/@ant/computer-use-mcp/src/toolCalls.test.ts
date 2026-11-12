@@ -140,7 +140,7 @@ describe('screenshot validity and persistence', () => {
     }), 'screenshot', {}, makeOverrides())
     expect(failed.isError).toBe(true)
     expect(failed.telemetry?.error_kind).toBe('capture_failed')
-    expect(failed.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('capture unavailable') })
+    expect(failed.content[0]).toMatchObject({ type: 'text', text: expect.stringMatching(/capture unavailable.*Recovery:.*Do not click using stale coordinates/) })
   })
 
   test('a valid but very small bound-window image is not rejected by the retry heuristic', async () => {
@@ -358,6 +358,175 @@ describe('computer_batch failure and visual feedback', () => {
   })
 })
 
+describe('failure recovery and argument boundaries', () => {
+  test('side-effect failures include inspect-before-retry guidance', async () => {
+    const result = await handleToolCall(makeAdapter({
+      click: async () => { throw new Error('native click failure') },
+    }), 'left_click', { coordinate: [10, 10] }, makeOverrides())
+    expect(result.isError).toBe(true)
+    expect(result.telemetry?.error_kind).toBe('executor_threw')
+    expect(result.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringMatching(/native click failure.*Recovery:.*do not repeat it blindly.*Take a screenshot/),
+    })
+  })
+
+  test('non-finite coordinates fail before direct or batched side effects', async () => {
+    let clicks = 0
+    let cursorCalls = 0
+    const adapter = makeAdapter({
+      click: async () => { clicks++ },
+      getCursorPosition: async () => { cursorCalls++; return { x: 0, y: 0 } },
+    })
+    for (const coordinate of [[NaN, 1], [Infinity, 1], [-Infinity, 1]]) {
+      const result = await handleToolCall(adapter, 'left_click', { coordinate }, makeOverrides())
+      expect(result.telemetry?.error_kind).toBe('bad_args')
+      expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('finite non-negative') })
+    }
+    const batch = await handleToolCall(adapter, 'computer_batch', {
+      actions: [{ action: 'cursor_position' }, { action: 'left_click', coordinate: [0, NaN] }],
+    }, makeOverrides())
+    expect(batch.telemetry?.error_kind).toBe('bad_args')
+    const zoom = await handleToolCall(adapter, 'zoom', { region: [0, 0, Infinity, 10] }, makeOverrides())
+    expect(zoom.telemetry?.error_kind).toBe('bad_args')
+    expect(clicks).toBe(0)
+    expect(cursorCalls).toBe(0)
+  })
+
+  test('batch interruption preserves completed actions, images and the exact recovery boundary', async () => {
+    let abortAfterCursor = false
+    let keys = 0
+    const result = await handleToolCall(makeAdapter({
+      getCursorPosition: async () => { abortAfterCursor = true; return { x: 25, y: 25 } },
+      key: async () => { keys++ },
+    }), 'computer_batch', {
+      actions: [{ action: 'screenshot' }, { action: 'cursor_position' }, { action: 'key', text: 'a' }],
+    }, makeOverrides({ isAborted: () => abortAfterCursor }))
+    expect(result.isError).toBe(true)
+    expect(result.content.filter(item => item.type === 'image')).toHaveLength(1)
+    expect(json(result).completed).toHaveLength(2)
+    expect(json(result)).toMatchObject({
+      aborted: { action: 'key', index: 2, ok: false },
+      remaining: 1,
+    })
+    expect(json(result).aborted.output).toContain('were not dispatched')
+    expect(json(result).recovery).toContain('Do not replay the whole batch')
+    expect(keys).toBe(0)
+  })
+
+  test('cancellation during the inter-action settle is aborted before the next dispatch', async () => {
+    let checks = 0
+    let keys = 0
+    const result = await handleToolCall(makeAdapter({
+      key: async () => { keys++ },
+    }), 'computer_batch', {
+      actions: [{ action: 'cursor_position' }, { action: 'key', text: 'a' }],
+    }, makeOverrides({ isAborted: () => ++checks >= 4 }))
+    expect(json(result)).toMatchObject({
+      completed: [{ action: 'cursor_position', ok: true }],
+      aborted: { action: 'key', index: 1 },
+      remaining: 1,
+    })
+    expect(json(result).failed).toBeUndefined()
+    expect(keys).toBe(0)
+  })
+
+  test('an abort raised by the pre-input gate is not mislabeled as an attempted failure', async () => {
+    let aborted = false
+    let clicks = 0
+    const result = await handleToolCall(makeAdapter({
+      getFrontmostApp: async () => {
+        aborted = true
+        return { bundleId: 'app.test', displayName: 'Test App' }
+      },
+      click: async () => { clicks++ },
+    }), 'computer_batch', {
+      actions: [{ action: 'left_click', coordinate: [10, 10] }, { action: 'cursor_position' }],
+    }, makeOverrides({ isAborted: () => aborted }))
+    expect(json(result)).toMatchObject({
+      completed: [],
+      aborted: { action: 'left_click', index: 0 },
+      remaining: 2,
+    })
+    expect(json(result).failed).toBeUndefined()
+    expect(result.telemetry?.error_kind).toBeUndefined()
+    expect(clicks).toBe(0)
+  })
+
+  test('an executor AbortError after dispatch remains an outcome-unknown failure', async () => {
+    let aborted = false
+    const result = await handleToolCall(makeAdapter({
+      click: async () => {
+        aborted = true
+        throw new DOMException('native interruption', 'AbortError')
+      },
+    }), 'computer_batch', {
+      actions: [{ action: 'left_click', coordinate: [10, 10] }, { action: 'cursor_position' }],
+    }, makeOverrides({ isAborted: () => aborted }))
+    expect(json(result)).toMatchObject({
+      failed: { action: 'left_click', ok: false },
+      remaining: 1,
+    })
+    expect(json(result).aborted).toBeUndefined()
+    expect(result.telemetry?.error_kind).toBe('executor_threw')
+  })
+
+  test('cancellation after a grapheme was delivered stays a partial failure', async () => {
+    let aborted = false
+    let types = 0
+    const result = await handleToolCall(makeAdapter({
+      type: async () => { types++; aborted = true },
+    }), 'computer_batch', {
+      actions: [{ action: 'type', text: 'ab' }, { action: 'cursor_position' }],
+    }, makeOverrides({ isAborted: () => aborted }))
+    expect(json(result)).toMatchObject({
+      failed: { action: 'type', ok: false },
+      remaining: 1,
+    })
+    expect(json(result).aborted).toBeUndefined()
+    expect(types).toBe(1)
+  })
+
+  test('cancellation after capture cannot claim that no capture happened', async () => {
+    let aborted = false
+    const result = await handleToolCall(makeAdapter({
+      screenshot: async () => { aborted = true; return shot() },
+    }), 'computer_batch', {
+      actions: [{ action: 'screenshot' }, { action: 'cursor_position' }],
+    }, makeOverrides({ isAborted: () => aborted }))
+    expect(json(result)).toMatchObject({
+      failed: { action: 'screenshot', ok: false },
+      remaining: 1,
+    })
+    expect(json(result).aborted).toBeUndefined()
+    expect(result.content.filter(item => item.type === 'image')).toHaveLength(0)
+  })
+
+  test('aborted cleanup failure has distinct recovery guidance', async () => {
+    let checks = 0
+    const adapter = makeAdapter({ mouseUp: async () => { throw new Error('release failed') } })
+    await handleToolCall(adapter, 'left_mouse_down', {}, makeOverrides())
+    const result = await handleToolCall(adapter, 'computer_batch', {
+      actions: [{ action: 'cursor_position' }],
+    }, makeOverrides({ isAborted: () => ++checks >= 2 }))
+    expect(json(result).aborted.output).toContain('Mouse cleanup also failed: release failed')
+    expect(json(result).recovery).toContain('cancelled before the aborted action was dispatched')
+    expect(json(result).recovery).toContain('check that no mouse button remains held')
+  })
+
+  test('open_application recovery never blindly repeats an uncertain launch', async () => {
+    const result = await handleToolCall(makeAdapter({
+      openApp: async () => { throw new Error('window wait timed out') },
+    }), 'open_application', { app: 'Test App' }, makeOverrides())
+    expect(result.isError).toBe(true)
+    const block = result.content[0]!
+    const text = block.type === 'text' ? block.text : ''
+    expect(text).toContain('may already have started')
+    expect(text).toContain('Do not blindly relaunch')
+    expect(text).not.toContain('Retry open_application once')
+  })
+})
+
 describe('pixel-validation host fallback', () => {
   test('aborting a clipboard read does not stash an empty sentinel', async () => {
     let aborted = false
@@ -466,6 +635,30 @@ describe('pixel-validation host fallback', () => {
     }, makeOverrides())
     expect(result.isError).toBeUndefined()
     expect(clicks).toBe(1)
+  })
+
+  test('a changed click target is an explicit error and never reports success', async () => {
+    let clicks = 0
+    const adapter = makeAdapter({
+      click: async () => { clicks++ },
+      screenshot: async () => ({ ...shot(), base64: Buffer.alloc(2048, 8).toString('base64') }),
+    })
+    adapter.cropRawPatch = base64 => Buffer.from(base64 === validBase64 ? 'old' : 'new')
+    adapter.getSubGates = () => ({
+      pixelValidation: true,
+      clipboardPasteMultiline: false,
+      mouseAnimation: false,
+      hideBeforeAction: false,
+      autoTargetDisplay: false,
+      clipboardGuard: false,
+    })
+    const result = await handleToolCall(adapter, 'left_click', {
+      coordinate: [10, 10],
+    }, makeOverrides())
+    expect(result.isError).toBe(true)
+    expect(result.telemetry?.error_kind).toBe('state_conflict')
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('The click was not dispatched') })
+    expect(clicks).toBe(0)
   })
 })
 

@@ -239,7 +239,7 @@ Windows 主要使用两条通道，不会在一个失败动作后盲目换通道
 
 适合普通 Win32 控件：
 
-- 单击、短文本、普通单键、窗口滚动和拖拽；
+- 单击、普通单键、窗口滚动和拖拽；文本输入不走此通道；
 - 不要求目标窗口位于前台；
 - 通过 `GetWindowRect + ClientToScreen` 修正标题栏/边框偏移；
 - 检查实际消息传输结果和 expected PID；
@@ -251,10 +251,10 @@ Windows 主要使用两条通道，不会在一个失败动作后盲目换通道
 
 用于：
 
+- 所有 bound HWND 的直接文本输入（不再使用后台 `WM_CHAR`，避免中文乱码）；
 - Chromium、Qt/SDL 等自绘窗口；
 - 双击/三击；
 - 修饰键组合；
-- 不支持后台编辑控件的文本；
 - 需要真实滚轮的场景。
 
 使用 `SetCursorPos + mouse_event/keybd_event`，并在同一脚本内完成前台复核、最新窗口位置读取和输入。
@@ -275,7 +275,7 @@ Windows 主要使用两条通道，不会在一个失败动作后盲目换通道
 - 文本先 UTF-8 base64 编码，再经 stdin 传入，避免命令行注入和长度上限；
 - `SendInput` 返回事件数必须完整，部分成功会报错并尝试反向释放。
 
-后台 `WM_CHAR` 只用于短文本；长文本统一走真实 Unicode 通道。
+所有 bound HWND 的直接文本输入统一走真实 Unicode 通道；后台 `WM_CHAR` 不再用于这类文本输入。
 
 ### 4. 点击次数与释放
 
@@ -306,7 +306,8 @@ Windows 对第三次点击的计数可能开始新序列，例如 WinForms 报�
 {
   "completed": [{"action": "left_click", "ok": true, "output": "Click dispatched..."}],
   "failed": {"action": "type", "ok": false, "output": "actions[1] (type) threw: ..."},
-  "remaining": 1
+  "remaining": 1,
+  "recovery": "Do not replay the whole batch..."
 }
 ```
 
@@ -315,9 +316,12 @@ Windows 对第三次点击的计数可能开始新序列，例如 WinForms 报�
 - 已完成动作；
 - 失败动作与位置；
 - 未执行数量；
-- 已捕获图像。
+- 已捕获图像；
+- 先检查当前屏幕、只补缺失动作的恢复建议。
 
-顶层批次结果为 `isError=true`，但错误内容仍保留结构化 JSON；图像作为顶层 sibling 传给模型，不塞进只允许文本的错误 `tool_result`。
+在动作之间或副作用前门禁取消时返回 `completed`、`aborted`（含下一动作的 `action/index`）、`remaining` 与同样的图像；被取消动作及其后续动作没有派发，不能把 `aborted` 当成已部分执行的 `failed`。执行器或动作中途（包括已输入部分文本、截图完成后）的 `AbortError` 仍按结果未知的 `failed` 处理。取消专用的 `recovery` 不会暗示被取消动作已部分执行；若鼠标释放清理也失败，会额外提示先确认没有按键仍处于按住状态。
+
+顶层批次结果为 `isError=true`，但错误内容仍保留结构化 JSON；图像作为顶层 sibling 传给模型，不塞进只允许文本的错误 `tool_result`。宿主界面按单个 `tool_result` 关联并展示这些同级图片；并发多结果帧不猜测其归属。
 
 批次中的截图可供检查，但不会把后续点击重新定位到该中间截图；要根据新图重新定位，应结束批次后单独截图。
 
@@ -326,7 +330,9 @@ Windows 对第三次点击的计数可能开始新序列，例如 WinForms 报�
 ### 错误语义
 
 - `isError:true` → 共享 MCP tool error，最终 `tool_result.is_error=true`；
-- 文本保留可操作的恢复建议；
+- 文本保留可操作的恢复建议：截图/窗口异常先重新绑定并截图，输入与批次异常先检查界面，禁止盲目重放未知副作用；
+- 坐标与 zoom 区域必须是有限非负数，批次在首个副作用前完成同样校验；
+- 像素陈旧检查阻止点击时返回 `isError=true` 并明确 `The click was not dispatched`，不再把未执行当成成功警告；
 - hooks、UI 和遥测不再把错误文本当成功；
 - `dispatch` 只表示输入已派发，业务效果仍由截图验证。
 

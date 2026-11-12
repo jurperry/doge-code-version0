@@ -2,6 +2,18 @@
 
 仅保留最近 10 条，每条三行：问题 / 解决 / 位置与验证。历史实现以 git 记录为准，测试统一遵守 [test_specification.md](test_specification.md)。
 
+## 2026-11-12 Windows 中文输入乱码修复（2.1.319）
+
+1. 问题：DeepSeek Harness 输入“你好，做个自我介绍”出现乱码；独立 Electron 与原生 EDIT 均复现，证明短文本 `WM_CHAR` 通道在中文环境不可靠，而非目标应用或更新器异常。
+2. 解决：所有 bound HWND 的直接文本输入统一经原前台守卫和 `SendInput + KEYEVENTF_UNICODE`，保留 Word COM、剪贴板、键鼠授权与释放语义；新增原生 EDIT 和独立 Chromium 真值验证，启动清空沙箱、预置旧真值与失效句柄也不能制造假通过。
+3. 位置：`src/utils/computerUse/{platforms/win32,win32/windowClassify}.ts`、`tools/{computer-use-win32-unicode-e2e,computer-use-chromium-unicode-e2e}.ts`、`computer_use.md`、`test_specification.md`。相关单测 56/56、两轮全量各 1082/0、逐文件隔离 141 文件 1030/0；原生中文短句、Chromium 中英文与 emoji 长文本及原 WinForms 18 项全部通过，独立复审 Approve。
+
+## 2026-11-12 Computer Use 截图展示与异常恢复补强（2.1.318）
+
+1. 问题：App 丢弃截图工具图片，通用原生异常缺少可执行恢复路径；批次中断丢失进度和图像，陈旧像素检查把未点击返回成成功，非有限坐标可穿透到原生层。
+2. 解决：直播与历史统一关联工具图片及单结果同级图像；按动作补充先截图、禁止盲重试的恢复提示，批次新增 `aborted/recovery` 并保留旧中断文案；非有限参数在副作用前拒绝，陈旧点击明确 `isError`。
+3. 位置：`packages/@ant/computer-use-mcp/src/{toolCalls,toolCalls.test}.ts`、`src/utils/computerUse/{setup,setup.test}.ts`、`computer_use.md`，邻仓 App `src/shared/chatHistoryUser.ts` 与 `ChatPane.tsx`。定向 50/50、两轮裸全量各 1082/0、逐文件隔离 141 文件 1030/0、只读实机截图/zoom/cursor/锁释放及隔离 WinForms 输入全通过；独立终审 Approve，安装版结果见邻仓日志。
+
 ## 2026-11-12 全量测试跨文件状态污染与回归修复
 
 1. 问题：全量测试出现 17 项失败，涉及重试、模型/OAuth、启动配置、任务通知、记忆路径和滚轮，单文件与组合结果不同。
@@ -49,15 +61,3 @@
 1. 问题：headless 无法可靠区分纯人工停止与已有正文/工具的轮次，编辑后内存、磁盘和后续上下文可能分裂，重连还会加入合成哨兵。
 2. 解决：新增 `get_user_message_edit_state` 与 `replace_user_message`，按真实 UUID、人工停止和 sticky activity 授权；编辑前原子提交转录，失败不追加执行，支持 checkpoint、工作流恢复和配置安全边界。
 3. 位置：`src/utils/userMessageEdit*`、`src/sessionStorage*`、`src/messages.ts`、`src/tools/WorkflowTool/`、`src/QueryEngine.ts`、`src/entrypoints/sdk/`。聚焦 11 文件 71 测试、真实 stream-json 黑盒 28 项、全量 125 文件 948 pass。
-
-## 2026-10-21 /clear 配置语义与模型显示一致性（2.1.312 / App 0.2.166）
-
-1. 问题：切换 DeepSeek 后 `/model` 取消提示读取 GLM 基线；屏幕外欢迎区可能保留旧模型，clear 被误当全新会话。
-2. 解决：取消提示使用有效会话模型，欢迎布局按模型/强度冻结，LogoHeader 按 conversationId 重建，clear 仅重置终端 UI；fresh/clear/reconnect 使用各自配置重放时机。
-3. 位置：`src/commands/model/`、`src/components/{LogoV2,CondensedLogo,modelDisplay}.tsx`、`src/components/Messages.tsx`。真实组件用例通过，完整验证见邻仓对应 validation。
-
-## 2026-10-21 Teams 续轮转录身份上报（2.1.311 / App 0.2.165）
-
-1. 问题：队友每次接收新任务都创建 roundAgentId，SDK 却只报告固定任务 ID，App 侧栏继续读取首轮 sidechain，显示停滞。
-2. 解决：`task_progress` 可携带实际 agent_id，保持任务 ID、独立转录和重试语义，宿主按任务汇集历轮转录。
-3. 位置：`src/utils/swarm/inProcessRunner.ts`、`src/utils/task/sdkProgress.ts`、`src/utils/sdkEventQueue.ts`、`src/entrypoints/sdk/coreSchemas.ts`、`tools/teammate-transcript-progress.test.ts`。新增 SDK 进度测试及真实 App 两轮验证通过。

@@ -5,11 +5,11 @@
  * 自绘框架（Qt/SDL/GLFW/Unity/Java AWT）在自绘表面里渲染全部内容、自己消费
  * 原始输入消息，父窗口收到的 SendMessage 鼠标/键盘消息不会产生任何应用层
  * 效果 —— Android 模拟器（Qt）即典型：adb getevent 显示 0 个触摸事件。
- * Chromium（Electron/CEF）的鼠标同理（旧代码已单列），但键盘走
- * Chrome_RenderWidgetHostHWND 的 WM_CHAR 仍有效。
+ * Chromium（Electron/CEF）的鼠标同理（旧代码已单列）。WM_CHAR 文本通道在
+ * 中文环境下会产生乱码，因此所有窗口的文本统一走真实 Unicode 输入。
  *
  * 绑定窗口时枚举顶层 + 子窗口类名做一次分类，决定输入通道：
- *   - chromium  → 鼠标走真实输入，键盘仍可 SendMessage
+ *   - chromium  → 鼠标与文本都走真实输入
  *   - selfDrawn → 鼠标 + 键盘都走真实输入（前台卫兵保护）
  */
 
