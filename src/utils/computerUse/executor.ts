@@ -368,6 +368,13 @@ export function createCliExecutor(opts: {
     },
   }
 
+  const captureWindowsForApi = !isDarwin && process.platform === 'win32'
+    ? async (displayId?: number): Promise<ScreenshotResult> => {
+        const { captureScreenForApi } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+        return captureScreenForApi(displayId)
+      }
+    : null
+
   const { getMouseAnimationEnabled, getHideBeforeActionEnabled } = opts
   // Unified input: on darwin → @ant/computer-use-input, on others → platform.input.
   // Uses the same interface so all callsites can use `getInput()` uniformly.
@@ -519,6 +526,10 @@ export function createCliExecutor(opts: {
       autoResolve: boolean
       doHide?: boolean
     }): Promise<ResolvePrepareCaptureResult> {
+      if (captureWindowsForApi) {
+        const shot = await captureWindowsForApi(opts.preferredDisplayId)
+        return { ...shot, hidden: [], displayId: shot.displayId ?? opts.preferredDisplayId ?? 0 }
+      }
       const d = cu.display.getSize(opts.preferredDisplayId)
       const [targetW, targetH] = computeTargetDims(
         d.width,
@@ -556,6 +567,7 @@ export function createCliExecutor(opts: {
       allowedBundleIds: string[]
       displayId?: number
     }): Promise<ScreenshotResult> {
+      if (captureWindowsForApi) return captureWindowsForApi(opts.displayId)
       const d = cu.display.getSize(opts.displayId)
       const [targetW, targetH] = computeTargetDims(
         d.width,
@@ -856,6 +868,12 @@ export function createCliExecutor(opts: {
         return
       }
       await cu.apps.open(bundleId)
+    },
+
+    async unbindApp(): Promise<void> {
+      if (process.platform !== 'win32') return
+      const { unbindWindow } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      unbindWindow()
     },
   }
 }

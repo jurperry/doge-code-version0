@@ -2,6 +2,12 @@
 
 仅保留最近 10 条，每条三行：问题 / 解决 / 位置与验证。历史实现以 git 记录为准，测试统一遵守 [test_specification.md](test_specification.md)。
 
+## 2026-11-13 Windows 全屏与绑定窗口双坐标空间修复（2.1.329）
+
+1. 问题：`open_application` 后 HWND 永久接管截图与坐标，`switch_display` 不能回到全局；无绑定时键盘、文本、拖拽和按下/释放直接报错，全屏截图前同步枚举显示器还会间歇性 PowerShell 超时，导致全屏 Computer Use 与批处理不可用。
+2. 解决：`switch_display` 显式解绑并选择全屏，补齐全局真实输入；切换与活动调用互斥、目标代际阻止迟到截图、部分失败也清坐标锚点，换绑前释放按钮。捕获后统一缩放并携带显示器数量，像素输入复用截图几何；授权身份统一路径规范化与 shell/exe 别名证据，deny 双向优先且未知前台仍 fail-closed。安装版补丁用 `QueryFullProcessImageName` 恢复 MainModule 不可读进程的真实 exe，完整路径精确匹配优先于显示名宽松匹配；本地 exe 文件存在即可授权且保留原应用 tier，静态应用项缓存与每次实时窗口枚举分离，避免授权被注册表 GUID 抢占。
+3. 位置：`packages/@ant/computer-use-mcp/src/`、`src/utils/computerUse/{executor,wrapper.tsx,setup.ts,platforms/,win32/processImage.ts}`、相关单测与 `tools/computer-use-{e2e,input-fixture-e2e}.ts`、专项文档。按要求仅做相关回归：定向单测 109/109、真实 WinForms 绑定及全局输入和批次全通过、连续 10 次全屏截图通过；独立多轮 review 最终 Approve，无剩余问题。开发版黑盒与安装版结果见邻仓 App 日志，未跑全量回归。
+
 ## 2026-11-13 Windows 便携应用与 Computer Use 稳定性修复（2.1.326）
 
 1. 问题：未注册便携应用经 `open_application` 冷启动反复失败，中文路径已授权仍被判未授权，截图与 `computer_batch` 偶发 PowerShell 超时并诱导模型绕圈。实测分别发现 PowerShell 非 UTF-8 输出破坏中文路径、exe 继承 CLI 工作目录导致 PvZ `FATAL ERROR`、Unicode 进程名被过滤、装饰性 DWM 边框可否决打开、授权别名重复、`shell:AppsFolder` 覆盖真实 exe，以及 Windows 授权路径斜杠/大小写不一致。
@@ -61,9 +67,3 @@
 1. 问题：欢迎导航、消息与底部输入共用渲染流，多步调用后布局错位；外部用户没有独立消息视口和可见滚动条。
 2. 解决：默认 alternate-screen 三区布局，头部固定、短终端 compact、极短隐藏；消息区独立 ScrollBox/VirtualMessageList 和可拖拽滚动条，Ink 增加鼠标捕获分发。
 3. 位置：`src/components/{FullscreenLayout,Messages,LogoHeader,ScrollBar}.tsx`、`src/screens/REPL.tsx`、`src/utils/fullscreen.ts`、`src/ink/`。专项 34 项、逐文件 130 文件 988 测试、CLI 与 worktree e2e 通过，已授权合并。
-
-## 2026-10-27 Auto 仅在 Plan 中提问（2.1.314 / App 0.2.172）
-
-1. 问题：Auto 执行和收尾允许五分钟人工询问，自动 Plan 却禁止讨论；队友问题沿用强制选择且切回 Auto 后未撤销。
-2. 解决：Auto 执行禁止提问，自动 Plan 保留有界讨论；共享自动推荐、展示起钟、首赢清理和迟到回复隔离，ExitPlan 自动回 Auto，不伪造提交/合并同意。
-3. 位置：`src/utils/permissions/`、`src/tools/{AskUserQuestionTool,EnterPlanModeTool}/`、`src/hooks/toolPermission/`、`src/cli/`、Auto 测试脚本。隔离 125 文件 954 测试、三协议与 IM/elicitation 验证通过。

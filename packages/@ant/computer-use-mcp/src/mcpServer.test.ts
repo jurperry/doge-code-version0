@@ -164,4 +164,132 @@ describe('bindSessionContext request cancellation', () => {
     await expect(dispatch('screenshot', {}, controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
     expect(captures).toBe(0)
   })
+
+  test('open_application and switch_display invalidate the old coordinate anchor', async () => {
+    const events: Array<number | string> = []
+    let unbinds = 0
+    const dispatch = bindSessionContext(adapter({
+      screenshot: async () => ({
+        base64: Buffer.alloc(2048, 1).toString('base64'),
+        width: 100, height: 100, displayWidth: 100, displayHeight: 100,
+        originX: 0, originY: 0, displayId: 0,
+      }),
+      unbindApp: async () => { unbinds++ },
+    }), 'pixels', context({
+      onDisplayPinned: () => {},
+      onScreenshotCaptured: dims => events.push(dims.width),
+      onScreenshotCleared: () => events.push('cleared'),
+    }))
+    await dispatch('screenshot', {})
+    await dispatch('open_application', { app: 'app.test' })
+    await dispatch('switch_display', { display: 'auto' })
+    await dispatch('screenshot', {})
+    expect(events).toEqual([100, 'cleared', 'cleared', 100])
+    expect(unbinds).toBe(1)
+  })
+
+  test('an older capture cannot overwrite the anchor after a target change', async () => {
+    const events: Array<number | string> = []
+    let captureCalls = 0
+    let finishCapture: (() => void) | undefined
+    let finishSwitch: (() => void) | undefined
+    const makeShot = (size: number) => ({
+      base64: Buffer.alloc(2048, 1).toString('base64'),
+      width: size, height: size, displayWidth: size, displayHeight: size,
+      originX: 0, originY: 0, displayId: 0,
+    })
+    const dispatch = bindSessionContext(adapter({
+      screenshot: () => {
+        captureCalls++
+        if (captureCalls === 1) return new Promise(resolve => { finishCapture = () => resolve(makeShot(100)) })
+        return Promise.resolve(makeShot(200))
+      },
+      unbindApp: () => new Promise<void>(resolve => { finishSwitch = resolve }),
+    }), 'pixels', context({
+      onDisplayPinned: () => {},
+      onScreenshotCaptured: dims => events.push(dims.width),
+      onScreenshotCleared: () => events.push('cleared'),
+    }))
+    const oldCapture = dispatch('screenshot', {})
+    for (let i = 0; i < 100 && !finishCapture; i++) await new Promise(resolve => setTimeout(resolve, 1))
+    const blockedSwitch = await dispatch('switch_display', { display: 'auto' })
+    expect(blockedSwitch.telemetry?.error_kind).toBe('state_conflict')
+    expect(events).toEqual([])
+    finishCapture!()
+    await oldCapture
+    expect(events).toEqual([])
+
+    const switching = dispatch('switch_display', { display: 'auto' })
+    for (let i = 0; i < 100 && !finishSwitch; i++) await new Promise(resolve => setTimeout(resolve, 1))
+    const duringSwitch = await dispatch('screenshot', {})
+    expect(duringSwitch.isError).toBe(true)
+    expect(duringSwitch.telemetry?.error_kind).toBe('state_conflict')
+    expect(captureCalls).toBe(1)
+    finishSwitch!()
+    await switching
+    expect(events).toEqual(['cleared'])
+    const fresh = await dispatch('screenshot', {})
+    expect(fresh.isError).toBeUndefined()
+    expect(events).toEqual(['cleared', 200])
+  })
+
+  test('an in-flight input blocks a target change instead of using stale coordinates', async () => {
+    let finishGate: (() => void) | undefined
+    let unbinds = 0
+    const dispatch = bindSessionContext(adapter({
+      getFrontmostApp: () => new Promise(resolve => {
+        finishGate = () => resolve({ bundleId: 'app.test', displayName: 'Test' })
+      }),
+      unbindApp: async () => { unbinds++ },
+    }), 'pixels', context({ onDisplayPinned: () => {} }))
+    const input = dispatch('mouse_move', { coordinate: [1, 1] })
+    for (let i = 0; i < 100 && !finishGate; i++) await new Promise(resolve => setTimeout(resolve, 1))
+    const blocked = await dispatch('switch_display', { display: 'auto' })
+    expect(blocked.telemetry?.error_kind).toBe('state_conflict')
+    expect(unbinds).toBe(0)
+    finishGate!()
+    expect((await input).isError).toBeUndefined()
+    const switched = await dispatch('switch_display', { display: 'auto' })
+    expect(switched.isError).toBeUndefined()
+    expect(unbinds).toBe(1)
+  })
+
+  test('open_application failure still invalidates the previous target anchor', async () => {
+    const events: Array<number | string> = []
+    const dispatch = bindSessionContext(adapter({
+      screenshot: async () => ({
+        base64: Buffer.alloc(2048, 1).toString('base64'),
+        width: 100, height: 100, displayWidth: 100, displayHeight: 100,
+        originX: 0, originY: 0, displayId: 0,
+      }),
+      openApp: async () => { throw new Error('bound, but foreground activation failed') },
+    }), 'pixels', context({
+      onScreenshotCaptured: dims => events.push(dims.width),
+      onScreenshotCleared: () => events.push('cleared'),
+    }))
+    await dispatch('screenshot', {})
+    const result = await dispatch('open_application', { app: 'app.test' })
+    expect(result.isError).toBe(true)
+    expect(events).toEqual([100, 'cleared'])
+  })
+
+  test('a host cleanup failure cannot leave target changes latched', async () => {
+    let captures = 0
+    const dispatch = bindSessionContext(adapter({
+      screenshot: async () => {
+        captures++
+        return {
+          base64: Buffer.alloc(2048, 1).toString('base64'),
+          width: 100, height: 100, displayWidth: 100, displayHeight: 100,
+          originX: 0, originY: 0, displayId: 0,
+        }
+      },
+    }), 'pixels', context({
+      onDisplayPinned: () => {},
+      onScreenshotCleared: () => { throw new Error('host cleanup failed') },
+    }))
+    await expect(dispatch('switch_display', { display: 'auto' })).rejects.toThrow('host cleanup failed')
+    expect((await dispatch('screenshot', {})).isError).toBeUndefined()
+    expect(captures).toBe(1)
+  })
 })

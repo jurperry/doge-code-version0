@@ -169,7 +169,11 @@ next.customApiEndpoint = undefined
 - 组合键按下与释放；
 - 双/三击与 Windows 点击序列；
 - 中键、后台 mouse-down/up 通道；
-- 四向滚动。
+- 四向滚动；
+- `switch_display("auto")` 解除绑定、全屏捕获不额外枚举显示器、真实 `(0,0)` 移动与全局点击/DPI 映射；
+- 无 HWND 的 mouse-down/up、拖拽、滚轮、Unicode、组合键、holdKey、只读剪贴板访问和完整 `computer_batch`；不得为验证全屏剪贴板而覆盖用户原文；
+- 工具层用可控 Promise 覆盖活动输入/截图与换目标互斥、open 部分失败清锚点、宿主清理异常后计数恢复，以及 shell/exe 双向 allow/deny 反例；
+- 原生 `QueryFullProcessImageName` 当前进程路径读取、注册表 GUID 与运行 exe 并存时完整路径授权和打开仍选择真实 exe；本地 portable exe 不依赖枚举缓存且不提升原应用 tier。
 
 ### 不能只验证“有结果”
 

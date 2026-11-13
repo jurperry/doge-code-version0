@@ -36,6 +36,7 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 
 import { getDefaultTierForApp, getDeniedCategoryForApp, isPolicyDenied } from "./deniedApps.js";
 import { MAX_BATCH_ACTIONS, MAX_BATCH_IMAGE_BYTES, MAX_BATCH_SCREENSHOTS, MAX_TYPE_TEXT_LENGTH } from "./limits.js";
@@ -295,6 +296,24 @@ function scaleCoord(
   };
 }
 
+async function coordinateDisplay(
+  adapter: ComputerUseHostAdapter,
+  overrides: ComputerUseOverrides,
+): Promise<DisplayGeometry> {
+  const shot = overrides.lastScreenshot;
+  if (overrides.coordinateMode === "pixels" && shot) {
+    return {
+      width: shot.displayWidth,
+      height: shot.displayHeight,
+      scaleFactor: 1,
+      displayId: shot.displayId ?? overrides.selectedDisplayId ?? 0,
+      originX: shot.originX,
+      originY: shot.originY,
+    };
+  }
+  return adapter.executor.getDisplaySize(overrides.selectedDisplayId);
+}
+
 /**
  * Convert model-space coordinates to the 0–100 percentage that
  * pixelCompare.ts works in. The staleness check operates in screenshot-image
@@ -449,6 +468,35 @@ async function syncClipboardStash(
   }
 }
 
+function normalizeAppId(platform: "darwin" | "win32", id: string): string {
+  return platform === "win32" ? id.replace(/\//g, "\\").toLowerCase() : id;
+}
+
+async function resolveAppTier(
+  adapter: ComputerUseHostAdapter,
+  overrides: ComputerUseOverrides,
+  frontmost: { bundleId: string },
+): Promise<CuAppPermTier | undefined> {
+  const platform = adapter.executor.capabilities.platform;
+  const tierById = new Map(overrides.allowedApps.map(app => [normalizeAppId(platform, app.bundleId), app.tier] as const));
+  const frontmostId = normalizeAppId(platform, frontmost.bundleId);
+  const direct = tierById.get(frontmostId);
+  if (platform !== "win32" || !frontmostId) return direct;
+  const deniedIds = new Set(overrides.userDeniedBundleIds.map(id => normalizeAppId(platform, id)));
+  if (direct !== undefined && deniedIds.size === 0) return direct;
+
+  const installed = await adapter.executor.listInstalledApps();
+  for (const app of installed) {
+    const aliases = [app.bundleId, app.path, ...(app.extraPaths ?? [])]
+      .map(alias => normalizeAppId(platform, alias));
+    if (!aliases.includes(frontmostId)) continue;
+    if (aliases.some(alias => deniedIds.has(alias))) return undefined;
+    const tier = aliases.map(alias => tierById.get(alias)).find(tier => tier !== undefined);
+    if (tier !== undefined) return tier;
+  }
+  return direct;
+}
+
 /** Every click/type/key/scroll/drag/move_mouse runs through this before
  * touching the executor. Returns null on pass, error-result on block.
  * Any throw inside → caught by handleToolCall's outer try → tool error. */
@@ -494,14 +542,9 @@ async function runInputActionGates(
   const frontmost = await adapter.executor.getFrontmostApp();
   throwIfActionAborted(overrides);
 
-  const tierByBundleId = new Map(
-    overrides.allowedApps.map((a) => [a.bundleId, a.tier] as const),
-  );
-
-  // After handleToolCall's tier backfill, every grant has a concrete tier —
-  // .get() returning undefined means the app is not in the allowlist at all.
+  // After handleToolCall's tier backfill, every grant has a concrete tier.
   const frontmostTier = frontmost
-    ? tierByBundleId.get(frontmost.bundleId)
+    ? await resolveAppTier(adapter, overrides, frontmost)
     : undefined;
 
   // Clipboard guard. Per-action, not per-tool-call — runs for every sub-action
@@ -638,11 +681,13 @@ async function runHitTestGate(
   // runInputActionGates. Our own overlay is filtered by Swift (pid != self).
   if (target.bundleId === FINDER_BUNDLE_ID) return null;
 
+  const platform = adapter.executor.capabilities.platform;
   const tierByBundleId = new Map(
-    overrides.allowedApps.map((a) => [a.bundleId, a.tier] as const),
+    overrides.allowedApps.map((a) => [normalizeAppId(platform, a.bundleId), a.tier] as const),
   );
+  const targetId = normalizeAppId(platform, target.bundleId);
 
-  if (!tierByBundleId.has(target.bundleId)) {
+  if (!tierByBundleId.has(targetId)) {
     // Not in the allowlist at all. The frontmost check would catch this if
     // the target were frontmost, but here a different app is in front. This
     // is the "something popped up" edge case — a new window appeared between
@@ -655,7 +700,7 @@ async function runHitTestGate(
     );
   }
 
-  const targetTier = tierByBundleId.get(target.bundleId);
+  const targetTier = tierByBundleId.get(targetId);
 
   // Frontmost-based sync (runInputActionGates) misses the case where
   // the click lands on a NON-FRONTMOST click-tier window. Re-sync by
@@ -930,6 +975,24 @@ function looksLikeBundleId(s: string): boolean {
   return REVERSE_DNS_RE.test(s) && !s.includes(" ");
 }
 
+function isExactAppPathMatch(requested: string, app: InstalledApp): boolean {
+  const normalize = (value: string) => value.replace(/\//g, "\\").toLowerCase();
+  const wanted = normalize(requested);
+  return [app.bundleId, app.path, ...(app.extraPaths ?? [])]
+    .some(candidate => normalize(candidate) === wanted);
+}
+
+function resolvePortableExecutable(requested: string): InstalledApp | undefined {
+  if (process.platform !== "win32" || !/^[a-z]:[\\/].+\.exe$/i.test(requested)) return undefined;
+  try {
+    if (!statSync(requested).isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+  const displayName = requested.split(/[\\/]/).pop()!.replace(/\.exe$/i, "");
+  return { bundleId: requested, displayName, path: requested };
+}
+
 function resolveRequestedApps(
   requestedNames: string[],
   installed: InstalledApp[],
@@ -947,12 +1010,16 @@ function resolveRequestedApps(
   }
 
   return requestedNames.map((requested): ResolvedAppRequest => {
+    const portable = resolvePortableExecutable(requested);
     let resolved: InstalledApp | undefined;
     if (looksLikeBundleId(requested)) {
       resolved = byBundleId.get(requested);
     }
     if (!resolved) {
       resolved = byLowerDisplayName.get(requested.toLowerCase());
+    }
+    if (!resolved) {
+      resolved = installed.find(app => isExactAppPathMatch(requested, app));
     }
     // Normalized match: strip spaces/dashes/hyphens for comparison.
     // Handles cases like "OPPO互联" vs "OPPO 互联" or "VisualStudio" vs "Visual Studio".
@@ -1045,6 +1112,16 @@ function resolveRequestedApps(
         resolved = bestApp;
       }
     }
+    if (portable && !resolved) {
+      const executableName = requested.split(/[\\/]/).pop()!;
+      resolved = resolveRequestedApps([executableName], installed, alreadyGrantedBundleIds)[0]?.resolved;
+    }
+    if (!resolved) {
+      resolved = portable;
+    }
+    if (portable && resolved && resolved.bundleId !== portable.bundleId) {
+      resolved = { ...portable, displayName: resolved.displayName };
+    }
     const bundleId = resolved?.bundleId;
     // When unresolved AND the requested string looks like a bundle ID, use it
     // directly for tier lookup (e.g. "company.thebrowser.Browser" with Arc not
@@ -1058,7 +1135,7 @@ function resolveRequestedApps(
       alreadyGranted: bundleId ? alreadyGrantedBundleIds.has(bundleId) : false,
       proposedTier: getDefaultTierForApp(
         bundleIdCandidate,
-        resolved?.displayName ?? requested,
+        resolved === portable ? requested : resolved?.displayName ?? requested,
       ),
     };
   });
@@ -1176,7 +1253,7 @@ async function handleRequestAccess(
     adapter,
     apps,
     overrides.allowedApps,
-    new Set(overrides.userDeniedBundleIds),
+    new Set(overrides.userDeniedBundleIds.map(id => normalizeAppId(adapter.executor.capabilities.platform, id))),
     overrides.selectedDisplayId,
   );
 
@@ -1393,7 +1470,7 @@ async function buildAccessRequest(
   const userDenied: Array<{ requestedName: string; displayName: string }> = [];
   const surviving: typeof afterPolicy = [];
   for (const r of afterPolicy) {
-    if (r.resolved && userDeniedBundleIds.has(r.resolved.bundleId)) {
+    if (r.resolved && userDeniedBundleIds.has(normalizeAppId(adapter.executor.capabilities.platform, r.resolved.bundleId))) {
       userDenied.push({
         requestedName: r.requestedName,
         displayName: r.resolved.displayName,
@@ -1703,7 +1780,7 @@ async function handleRequestTeachAccess(
     adapter,
     apps,
     overrides.allowedApps,
-    new Set(overrides.userDeniedBundleIds),
+    new Set(overrides.userDeniedBundleIds.map(id => normalizeAppId(adapter.executor.capabilities.platform, id))),
     overrides.selectedDisplayId,
   );
 
@@ -1876,9 +1953,7 @@ async function validateTeachStepArgs(
         `${label}: "anchor" must be a [x, y] number tuple or omitted.`,
       );
     }
-    const display = await adapter.executor.getDisplaySize(
-      overrides.selectedDisplayId,
-    );
+    const display = await coordinateDisplay(adapter, overrides);
     anchorLogical = scaleCoord(
       anchor[0],
       anchor[1],
@@ -2252,7 +2327,9 @@ async function buildMonitorNote(
   shotDisplayId: number,
   lastDisplayId: number | undefined,
   canSwitchDisplay: boolean,
+  displayCount?: number,
 ): Promise<string | undefined> {
+  if (displayCount === 1) return undefined;
   // listDisplays failure (e.g. Swift returns zero screens during monitor
   // hot-unplug) must not tank the screenshot — this note is optional context.
   let displays;
@@ -2409,6 +2486,7 @@ async function handleScreenshot(
       displayId: result.displayId,
       originX: result.originX,
       originY: result.originY,
+      displayCount: result.displayCount,
     };
 
     const monitorNote = await buildMonitorNote(
@@ -2416,6 +2494,7 @@ async function handleScreenshot(
       shot.displayId,
       overrides.lastScreenshot?.displayId,
       overrides.onDisplayPinned !== undefined,
+      shot.displayCount,
     );
 
     return {
@@ -2501,6 +2580,7 @@ async function handleScreenshot(
     shot.displayId,
     overrides.lastScreenshot?.displayId,
     overrides.onDisplayPinned !== undefined,
+    shot.displayCount,
   );
 
   return {
@@ -2667,9 +2747,7 @@ async function handleClickVariant(
   );
   if (gate) return gate;
 
-  const display = await adapter.executor.getDisplaySize(
-    overrides.selectedDisplayId,
-  );
+  const display = await coordinateDisplay(adapter, overrides);
 
   // §6 item P — pixel-validation staleness check. Sub-gated.
   // Runs AFTER the gates (no point validating if we're about to refuse
@@ -2898,9 +2976,7 @@ async function handleScroll(
   const gate = await runInputActionGates(adapter, overrides, subGates, "mouse");
   if (gate) return gate;
 
-  const display = await adapter.executor.getDisplaySize(
-    overrides.selectedDisplayId,
-  );
+  const display = await coordinateDisplay(adapter, overrides);
   const { x, y } = scaleCoord(
     rawX,
     rawY,
@@ -2969,9 +3045,7 @@ async function handleDrag(
   const gate = await runInputActionGates(adapter, overrides, subGates, "mouse");
   if (gate) return gate;
 
-  const display = await adapter.executor.getDisplaySize(
-    overrides.selectedDisplayId,
-  );
+  const display = await coordinateDisplay(adapter, overrides);
   const from =
     rawFrom === undefined
       ? undefined
@@ -3050,9 +3124,7 @@ async function handleMoveMouse(
   );
   if (gate) return gate;
 
-  const display = await adapter.executor.getDisplaySize(
-    overrides.selectedDisplayId,
-  );
+  const display = await coordinateDisplay(adapter, overrides);
   const { x, y } = scaleCoord(
     rawX,
     rawY,
@@ -3092,14 +3164,11 @@ async function handleOpenApplication(
   if (app instanceof Error) return errorResult(app.message, "bad_args");
 
   // Resolve display-name → bundle ID. Same logic as request_access.
-  const normalizeAppId = (id: string): string =>
-    adapter.executor.capabilities.platform === "win32"
-      ? id.replace(/\//g, "\\").toLowerCase()
-      : id;
+  const platform = adapter.executor.capabilities.platform;
   const allowedById = new Map(
-    overrides.allowedApps.map((g) => [normalizeAppId(g.bundleId), g.bundleId]),
+    overrides.allowedApps.map((g) => [normalizeAppId(platform, g.bundleId), g.bundleId]),
   );
-  let targetBundleId = allowedById.get(normalizeAppId(app));
+  let targetBundleId = allowedById.get(normalizeAppId(platform, app));
 
   if (!targetBundleId) {
     // Try display name → bundle ID, but ONLY against the allowlist itself.
@@ -3124,6 +3193,7 @@ async function handleOpenApplication(
   // tier gates on click/type catch any follow-up interaction.
 
   throwIfActionAborted(overrides);
+  await releaseHeldMouse(adapter);
   await adapter.executor.openApp(targetBundleId);
 
   // On multi-monitor setups, macOS may place the opened window on a monitor
@@ -3165,9 +3235,12 @@ async function handleSwitchDisplay(
   }
 
   if (display.toLowerCase() === "auto") {
+    throwIfActionAborted(overrides);
+    await releaseHeldMouse(adapter);
+    await adapter.executor.unbindApp?.();
     overrides.onDisplayPinned(undefined);
     return okText(
-      "Returned to automatic monitor selection. Call screenshot to continue.",
+      "Returned to automatic full-display capture and global input. Call screenshot before acting.",
     );
   }
 
@@ -3180,13 +3253,6 @@ async function handleSwitchDisplay(
     return errorResult(
       `Failed to enumerate displays: ${String(e)}`,
       "display_error",
-    );
-  }
-
-  if (displays.length < 2) {
-    return errorResult(
-      "Only one monitor is connected. There is nothing to switch to.",
-      "bad_args",
     );
   }
 
@@ -3205,9 +3271,12 @@ async function handleSwitchDisplay(
     );
   }
 
+  throwIfActionAborted(overrides);
+  await releaseHeldMouse(adapter);
+  await adapter.executor.unbindApp?.();
   overrides.onDisplayPinned(target.displayId);
   return okText(
-    `Switched to monitor "${labels.get(target.displayId)}". Call screenshot to see it.`,
+    `Switched to full-display capture and global input on monitor "${labels.get(target.displayId)}". Call screenshot before acting.`,
   );
 }
 
@@ -3237,11 +3306,8 @@ async function handleReadClipboard(
   // (same as what the app's own Paste would see).
   if (subGates.clipboardGuard) {
     const frontmost = await adapter.executor.getFrontmostApp();
-    const tierByBundleId = new Map(
-      overrides.allowedApps.map((a) => [a.bundleId, a.tier] as const),
-    );
     const frontmostTier = frontmost
-      ? tierByBundleId.get(frontmost.bundleId)
+      ? await resolveAppTier(adapter, overrides, frontmost)
       : undefined;
     await syncClipboardStash(adapter, overrides, frontmostTier === "click");
   }
@@ -3269,11 +3335,8 @@ async function handleWriteClipboard(
 
   if (subGates.clipboardGuard) {
     const frontmost = await adapter.executor.getFrontmostApp();
-    const tierByBundleId = new Map(
-      overrides.allowedApps.map((a) => [a.bundleId, a.tier] as const),
-    );
     const frontmostTier = frontmost
-      ? tierByBundleId.get(frontmost.bundleId)
+      ? await resolveAppTier(adapter, overrides, frontmost)
       : undefined;
 
     // Defense-in-depth for the clipboardGuard bypass: write_clipboard +
@@ -3979,17 +4042,18 @@ export async function handleToolCall(
   //
   // `.some()` guard keeps the hot path (empty deny list, no legacy grants)
   // zero-alloc.
-  const userDeniedSet = new Set(rawOverrides.userDeniedBundleIds);
+  const platform = adapter.executor.capabilities.platform;
+  const userDeniedSet = new Set(rawOverrides.userDeniedBundleIds.map(id => normalizeAppId(platform, id)));
   const overrides: ComputerUseOverrides = rawOverrides.allowedApps.some(
     (a) =>
       a.tier === undefined ||
-      userDeniedSet.has(a.bundleId) ||
+      userDeniedSet.has(normalizeAppId(platform, a.bundleId)) ||
       isPolicyDenied(a.bundleId, a.displayName),
   )
     ? {
         ...rawOverrides,
         allowedApps: rawOverrides.allowedApps
-          .filter((a) => !userDeniedSet.has(a.bundleId))
+          .filter((a) => !userDeniedSet.has(normalizeAppId(platform, a.bundleId)))
           .filter((a) => !isPolicyDenied(a.bundleId, a.displayName))
           .map((a) =>
             a.tier !== undefined

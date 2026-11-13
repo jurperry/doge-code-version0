@@ -341,6 +341,8 @@ export interface ComputerUseSessionContext {
   onDisplayResolvedForApps?(sortedBundleIdsKey: string): void;
   /** Called after each screenshot. Host persists for respawn survival. */
   onScreenshotCaptured?(dims: ScreenshotDims): void;
+  /** Invalidate coordinates when the capture target changes. */
+  onScreenshotCleared?(): void;
   onTeachModeActivated?(): void;
   onTeachStep?(req: TeachStepRequest): Promise<TeachStepResult>;
   onTeachWorking?(): void;

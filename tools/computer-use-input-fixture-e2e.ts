@@ -11,6 +11,9 @@ const TMP_DIR = join(process.cwd(), 'test', 'tmp-cu-input-fixture')
 const LOG_FILE = join(TMP_DIR, 'events.jsonl')
 const HWND_FILE = join(TMP_DIR, 'hwnd.txt')
 process.env.CLAUDE_CONFIG_DIR = join(TMP_DIR, 'config')
+process.env.CLAUDE_CODE_TMPDIR = TMP_DIR
+process.env.TEMP = TMP_DIR
+process.env.TMP = TMP_DIR
 process.env.CU_FIXTURE_LOG = LOG_FILE
 process.env.CU_FIXTURE_HWND = HWND_FILE
 
@@ -40,6 +43,7 @@ public class CuInputControl : UserControl {
         KeyUp += (sender, e) => CuLog.Write("keyup", "key=" + e.KeyCode + ";ctrl=" + ((ModifierKeys & Keys.Control) != 0));
         MouseDown += (sender, e) => CuLog.Write("mousedown", "button=" + e.Button + ";clicks=" + e.Clicks + ";x=" + e.X + ";y=" + e.Y);
         MouseUp += (sender, e) => CuLog.Write("mouseup", "button=" + e.Button);
+        MouseWheel += (sender, e) => CuLog.Write("wheel", "delta=" + e.Delta);
     }
 }
 public class CuFixtureForm : Form {
@@ -99,13 +103,13 @@ try {
   mkdirSync(TMP_DIR, { recursive: true })
   clearEvents()
   proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-STA', '-Command', fixtureScript], {
-    stdout: 'pipe',
-    stderr: 'pipe',
+    stdout: 'inherit',
+    stderr: 'inherit',
     env: { ...process.env },
   })
   await waitFor(() => existsSync(HWND_FILE) && readFileSync(HWND_FILE, 'utf8').trim().length > 0, 'fixture HWND')
 
-  const { bindWindow, unbindWindow } = await import('../src/utils/computerUse/platforms/win32.js')
+  const { bindWindow, unbindWindow, getBoundHwnd, platform } = await import('../src/utils/computerUse/platforms/win32.js')
   const { ensureWindow } = await import('../src/utils/computerUse/win32/windowGuard.js')
   const { runPowerShellSync } = await import('../src/utils/computerUse/win32/powerShell.js')
   const { createCliExecutor } = await import('../src/utils/computerUse/executor.js')
@@ -116,7 +120,6 @@ try {
     getMouseAnimationEnabled: () => false,
     getHideBeforeActionEnabled: () => false,
   })
-
   const boundShot = await executor.screenshot({ allowedBundleIds: ['fixture.app'] })
   check('bound-window PrintWindow returns valid local-space dimensions', boundShot.base64.length > 0
     && boundShot.width > 0 && boundShot.height > 0 && boundShot.originX === 0 && boundShot.originY === 0)
@@ -308,6 +311,147 @@ public class CuFixtureMin {
     const actual = events().find(e => e.kind === 'scroll')!.detail
     check(`scroll ${label} uses the native direction`, actual === `msg=${msg};param=${param}`, actual)
   }
+
+  const { handleToolCall, DEFAULT_GRANT_FLAGS } = await import('@ant/computer-use-mcp')
+  const { getComputerUseHostAdapter } = await import('../src/utils/computerUse/hostAdapter.js')
+  const adapter = getComputerUseHostAdapter()
+  const switched = await handleToolCall(adapter, 'switch_display', { display: 'auto' }, {
+    allowedApps: [{ bundleId: 'fixture.app', displayName: 'Native fixture', grantedAt: 1, tier: 'full' }],
+    grantFlags: { ...DEFAULT_GRANT_FLAGS },
+    userDeniedBundleIds: [],
+    coordinateMode: 'pixels',
+    lastScreenshot: boundShot,
+    onDisplayPinned: () => {},
+  })
+  check('switch_display(auto) leaves window mode through the real tool handler', !switched.isError && getBoundHwnd() === null)
+
+  const originalListAll = platform.display.listAll
+  let displayEnumerations = 0
+  platform.display.listAll = () => {
+    displayEnumerations++
+    return originalListAll()
+  }
+  let globalShot
+  try {
+    globalShot = await executor.screenshot({ allowedBundleIds: ['fixture.app'] })
+  } finally {
+    platform.display.listAll = originalListAll
+  }
+  check('full-display capture needs no separate synchronous display enumeration', displayEnumerations === 0, String(displayEnumerations))
+  check('full-display capture uses the display rather than the old window dimensions', globalShot.base64.length > 0
+    && globalShot.displayWidth! > boundShot.displayWidth! && globalShot.displayHeight! > boundShot.displayHeight!)
+
+  const rect = runPowerShellSync(`
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class CuGlobalRect {
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+    [DllImport("user32.dll")] static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")] static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")] static extern bool AreDpiAwarenessContextsEqual(IntPtr a, IntPtr b);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    public static bool SetProcessDPIAware() {
+        SetProcessDpiAwarenessContext(new IntPtr(-4));
+        if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), new IntPtr(-4))) throw new System.Exception("Per-monitor-v2 required");
+        return true;
+    }
+}
+'@
+[CuGlobalRect]::SetProcessDPIAware() | Out-Null
+$r = New-Object CuGlobalRect+RECT
+if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWindowRect failed' }
+"$($r.L),$($r.T)"
+`)
+  const [windowLeft, windowTop] = rect.split(',').map(Number)
+  const globalPoint = (x: number, y: number) => ({ x: windowLeft + x, y: windowTop + y })
+  const imageCoordinate = (point: { x: number; y: number }): [number, number] => [
+    Math.round((point.x - globalShot.originX) * globalShot.width / globalShot.displayWidth!),
+    Math.round((point.y - globalShot.originY) * globalShot.height / globalShot.displayHeight!),
+  ]
+
+  await executor.moveMouse(0, 0)
+  const corner = await executor.getCursorPosition()
+  check('global mouse_move reaches the physical screen top-left', corner.x === 0 && corner.y === 0, JSON.stringify(corner))
+
+  clearEvents()
+  const globalClick = globalPoint(90, 100)
+  await executor.click(globalClick.x, globalClick.y, 'left', 1)
+  await waitFor(() => events().some(e => e.kind === 'mousedown'), 'global click')
+  const globalDown = events().find(e => e.kind === 'mousedown')
+  const globalClient = globalDown
+    ? { x: Number(globalDown.detail.match(/;x=(\d+)/)?.[1]), y: Number(globalDown.detail.match(/;y=(\d+)/)?.[1]) }
+    : null
+  const expectedGlobalClient = {
+    x: Math.round((90 - clientOffsetX) * 96 / windowDpi),
+    y: Math.round((100 - clientOffsetY) * 96 / windowDpi),
+  }
+  check('global click applies no stale bound-window offset and preserves DPI mapping', JSON.stringify(globalClient) === JSON.stringify(expectedGlobalClient), `expected=${JSON.stringify(expectedGlobalClient)}, actual=${JSON.stringify(globalClient)}`)
+
+  clearEvents()
+  await executor.moveMouse(globalClick.x, globalClick.y)
+  await executor.mouseDown()
+  await executor.mouseUp()
+  await waitFor(() => events().some(e => e.kind === 'mousedown') && events().some(e => e.kind === 'mouseup'), 'global down/up')
+  check('global mouse down/up work without an HWND', events().filter(e => e.kind === 'mousedown').length === 1
+    && events().filter(e => e.kind === 'mouseup').length === 1)
+
+  clearEvents()
+  const dragEnd = globalPoint(140, 160)
+  await executor.drag(globalClick, dragEnd)
+  await waitFor(() => events().some(e => e.kind === 'mousedown') && events().some(e => e.kind === 'mouseup'), 'global drag')
+  const dragCursor = await executor.getCursorPosition()
+  check('global drag reaches its destination and releases the button', events().filter(e => e.kind === 'mousedown').length === 1
+    && events().filter(e => e.kind === 'mouseup').length === 1 && dragCursor.x === dragEnd.x && dragCursor.y === dragEnd.y, JSON.stringify(dragCursor))
+
+  clearEvents()
+  await executor.scroll(globalClick.x, globalClick.y, 0, 1)
+  await waitFor(() => events().some(e => e.kind === 'wheel'), 'global wheel')
+  check('global scroll reaches the foreground control', events().some(e => e.kind === 'wheel' && e.detail === 'delta=-120'), JSON.stringify(events()))
+
+  clearEvents()
+  await executor.type('G全😀', { viaClipboard: false })
+  await waitFor(() => events().filter(e => e.kind === 'keypress').length >= 4, 'global Unicode input')
+  const globalChars = String.fromCharCode(...events().filter(e => e.kind === 'keypress').map(e => Number(e.detail.slice('code='.length))))
+  check('global Unicode input works without a bound HWND', globalChars === 'G全😀', JSON.stringify(globalChars))
+
+  clearEvents()
+  await executor.key('ctrl+a')
+  await waitFor(() => events().some(e => e.kind === 'keydown' && e.detail === 'key=A;ctrl=True')
+    && events().some(e => e.kind === 'keyup' && e.detail === 'key=ControlKey;ctrl=False'), 'global Ctrl+A')
+  check('global key chords reach the foreground control and release modifiers', true)
+
+  clearEvents()
+  await executor.holdKey(['ctrl', 'a'], 60)
+  await waitFor(() => events().some(e => e.kind === 'keydown' && e.detail === 'key=A;ctrl=True')
+    && events().some(e => e.kind === 'keyup' && e.detail === 'key=ControlKey;ctrl=False'), 'global key hold')
+  check('global holdKey uses the same unbound press/release channel', true)
+
+  check('global clipboard read does not require a bound HWND or modify its contents', typeof (await executor.readClipboard()) === 'string')
+
+  const frontmost = await executor.getFrontmostApp()
+  if (!frontmost) throw new Error('Fixture foreground identity was not available for global batch')
+  const batchClick = globalPoint(100, 110)
+  clearEvents()
+  const batch = await handleToolCall(adapter, 'computer_batch', {
+    actions: [
+      { action: 'left_click', coordinate: imageCoordinate(batchClick) },
+      { action: 'type', text: '批😀' },
+      { action: 'key', text: 'ctrl+a' },
+      { action: 'screenshot' },
+    ],
+  }, {
+    allowedApps: [{ bundleId: frontmost.bundleId, displayName: frontmost.displayName, grantedAt: 1, tier: 'full' }],
+    grantFlags: { ...DEFAULT_GRANT_FLAGS },
+    userDeniedBundleIds: [],
+    coordinateMode: 'pixels',
+    lastScreenshot: globalShot,
+  })
+  const batchChars = String.fromCharCode(...events().filter(e => e.kind === 'keypress').map(e => Number(e.detail.slice('code='.length))))
+  check('computer_batch executes global click, type, key and screenshot in one call', !batch.isError
+    && batchChars.startsWith('批😀')
+    && events().some(e => e.kind === 'keydown' && e.detail === 'key=A;ctrl=True')
+    && events().some(e => e.kind === 'keyup' && e.detail === 'key=ControlKey;ctrl=False')
+    && batch.content.some(item => item.type === 'image'), JSON.stringify({ text: batchChars, events: events(), result: batch.content[0] }))
 } catch (error) {
   failures++
   console.error('[FAIL] fixture e2e threw:', error)

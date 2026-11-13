@@ -25,6 +25,11 @@ How to work with them:
 3. Act with the precise tools (left_click, type, key, scroll, left_click_drag, ...) using pixel coordinates taken from the screenshot image you received; the origin is the top-left corner of that image.
 4. Take another screenshot to verify the effect, then iterate. Treat every step as screenshot → observe → act → verify.
 
+Choose the coordinate space before acting:
+- open_application selects a bound window; screenshots and coordinates are window-local.
+- switch_display("auto") selects full-screen capture and global input, even if an application was previously opened. Use it whenever the user asks for desktop-wide control rather than a specific bound window.
+- Changing the target invalidates previous image coordinates. Always take a fresh screenshot before further input.
+
 Guidance:
 - Use zoom to magnify a region when text is small or you need exact coordinates; it returns the cropped region at full resolution.
 - Use computer_batch to replay several already-verified steps in a single call.

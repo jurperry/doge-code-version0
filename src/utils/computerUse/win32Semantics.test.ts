@@ -31,6 +31,15 @@ describe('Windows input planning', () => {
     expect(script).toContain('[FieldOffset(8)] public CuInputUnion union')
   })
 
+  test('Unicode foreground guard is exclusive to bound-window input', () => {
+    const global = inputSemantics.unicodePowerShellScript('global')
+    expect(global).not.toContain('CuGuard')
+    expect(global).not.toContain('SetCursorPos')
+    const bound = inputSemantics.unicodePowerShellScript('bound', 123)
+    expect(bound).toContain('CuGuard')
+    expect(bound).toContain('[IntPtr]123')
+  })
+
   test('multi-click stays in one script and middle-click uses middle flags/messages', () => {
     const script = inputSemantics.clickPowerShellScript(123, 10, 20, 'middle', 3)
     expect(script).toContain('for ($i = 0; $i -lt 3; $i++)')

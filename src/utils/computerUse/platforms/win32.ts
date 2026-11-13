@@ -12,6 +12,7 @@
  * CRITICAL: All screenshots output JPEG (ImageFormat::Jpeg), not PNG.
  */
 
+import { API_RESIZE_PARAMS, targetImageSize } from '@ant/computer-use-mcp'
 import type { Platform } from './index.js'
 import type {
   InputPlatform,
@@ -38,6 +39,7 @@ import { listInstalledAppsWin32 } from '../win32/installedApps.js'
 import { buildPortableAppLaunchBlock } from '../win32/appLaunch.js'
 import { classifyWindowClasses } from '../win32/windowClassify.js'
 import { runPowerShell, runPowerShellSync } from '../win32/powerShell.js'
+import { PROCESS_IMAGE_PS } from '../win32/processImage.js'
 
 // ---------------------------------------------------------------------------
 // Screenshot cache for zoom — avoids re-capturing via PrintWindow on every zoom
@@ -594,7 +596,7 @@ if (-not [CuWin32]::SetCursorPos(${rx} + \$r.L, ${ry} + \$r.T)) { throw 'SetCurs
  * stays held between invocations, unlike sendInputClick.
  */
 function sendInputButton(
-  hwnd: number,
+  hwnd: number | undefined,
   x: number,
   y: number,
   button: 'left' | 'right' | 'middle',
@@ -611,10 +613,8 @@ function sendInputButton(
     ps(`${WIN32_TYPES}; [CuWin32]::mouse_event(${flag}, 0, 0, 0, [IntPtr]::Zero)`)
     return
   }
-  const guard = requireForegroundScript(hwnd)
-  ps(`${WIN32_TYPES}
-${guard}
-[CuWin32]::SetProcessDPIAware() | Out-Null
+  const guard = hwnd === undefined ? '' : requireForegroundScript(hwnd)
+  const origin = hwnd === undefined ? '\$ox = 0; \$oy = 0;' : `
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public class CuBtnRect {
@@ -624,7 +624,14 @@ public class CuBtnRect {
 '@
 \$r = New-Object CuBtnRect+RECT
 if (-not [CuBtnRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before mouse button event' }
-if (-not [CuWin32]::SetCursorPos(${rx} + \$r.L, ${ry} + \$r.T)) { throw 'SetCursorPos failed before mouse button event' }
+\$ox = \$r.L
+\$oy = \$r.T
+`
+  ps(`${WIN32_TYPES}
+${guard}
+[CuWin32]::SetProcessDPIAware() | Out-Null
+${origin}
+if (-not [CuWin32]::SetCursorPos(${rx} + \$ox, ${ry} + \$oy)) { throw 'SetCursorPos failed before mouse button event' }
 Start-Sleep -Milliseconds 20
 [CuWin32]::mouse_event(${flag}, 0, 0, 0, [IntPtr]::Zero)
 `)
@@ -639,7 +646,7 @@ Start-Sleep -Milliseconds 20
  * Ease-out cubic, 40 fps, mirroring executor.ts animatedMove.
  */
 function sendInputDrag(
-  hwnd: number,
+  hwnd: number | undefined,
   fromX: number,
   fromY: number,
   toX: number,
@@ -652,10 +659,8 @@ function sendInputDrag(
   const ty = Math.round(toY)
   const frames = Math.max(2, Math.min(40, Math.round(durationMs / 25)))
   const frameMs = Math.max(10, Math.round(durationMs / frames))
-  // Interpolation is computed PowerShell-side (single process).
-  ps(`${WIN32_TYPES}
-${requireForegroundScript(hwnd)}
-[CuWin32]::SetProcessDPIAware() | Out-Null
+  const guard = hwnd === undefined ? '' : requireForegroundScript(hwnd)
+  const origin = hwnd === undefined ? '\$ox = 0; \$oy = 0;' : `
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public class CuDragRect {
@@ -667,9 +672,17 @@ public class CuDragRect {
 if (-not [CuDragRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before drag' }
 \$ox = \$r.L
 \$oy = \$r.T
+`
+  const beforePress = hwnd === undefined ? '' : `if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw 'Foreground changed before drag press' }`
+  const duringDrag = hwnd === undefined ? '' : `if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw "Foreground changed during drag frame \$i; the drag may be partial" }`
+  // Interpolation is computed PowerShell-side (single process).
+  ps(`${WIN32_TYPES}
+${guard}
+[CuWin32]::SetProcessDPIAware() | Out-Null
+${origin}
 if (-not [CuWin32]::SetCursorPos(${fx} + \$ox, ${fy} + \$oy)) { throw 'SetCursorPos failed at drag start' }
 Start-Sleep -Milliseconds 40
-if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw 'Foreground changed before drag press' }
+${beforePress}
 [CuWin32]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
 Start-Sleep -Milliseconds 60
 try {
@@ -679,7 +692,7 @@ try {
         \$eased = 1 - [math]::Pow(1 - \$t, 3)
         \$x = [math]::Round(${fx} + (${tx} - ${fx}) * \$eased) + \$ox
         \$y = [math]::Round(${fy} + (${ty} - ${fy}) * \$eased) + \$oy
-        if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw "Foreground changed during drag frame \$i; the drag may be partial" }
+        ${duringDrag}
         if (-not [CuWin32]::SetCursorPos(\$x, \$y)) { throw 'SetCursorPos failed during drag' }
         Start-Sleep -Milliseconds ${frameMs}
     }
@@ -808,12 +821,12 @@ function planKeyChord(parts: string[]): { modifiers: number[]; keys: number[] } 
   return { modifiers, keys }
 }
 
-function sendInputChord(parts: string[]): void {
+function sendInputChord(parts: string[], hwnd?: number): void {
   const { modifiers, keys } = planKeyChord(parts)
   const modifierArgs = `@(${modifiers.join(',')})`
   const keyArgs = `@(${keys.join(',')})`
   ps(`${KEYBOARD_TYPES}
-${requireForegroundScript(boundHwnd!)}
+${hwnd === undefined ? '' : requireForegroundScript(hwnd)}
 [CuKeyboard]::Chord([int[]]${modifierArgs}, [int[]]${keyArgs})
 `)
 }
@@ -827,9 +840,9 @@ ${hwnd === undefined ? '' : requireForegroundScript(hwnd)}
 `
 }
 
-async function sendInputUnicode(text: string): Promise<void> {
+async function sendInputUnicode(text: string, hwnd?: number): Promise<void> {
   const encoded = Buffer.from(text, 'utf8').toString('base64')
-  await runPowerShell(unicodePowerShellScript(text, boundHwnd!), 15_000, encoded)
+  await runPowerShell(unicodePowerShellScript(text, hwnd), 15_000, encoded)
 }
 
 function wheelDelta(amount: number, direction: 'vertical' | 'horizontal'): number {
@@ -910,7 +923,11 @@ const input: InputPlatform = {
   },
 
   async mouseDown(x, y) {
-    if (!boundHwnd) throw new Error('mouseDown requires a bound window HWND. Call open() first.')
+    if (!boundHwnd) {
+      mouseDownUsedRealInput = true
+      sendInputButton(undefined, x, y, 'left', 'down')
+      return
+    }
     const realInput = realMouseChannel() || !ensureSendAccess()
     guardBoundWindow(realInput)
     // Record only after any replacement-window rebind has completed; bindWindow
@@ -926,7 +943,11 @@ const input: InputPlatform = {
   },
 
   async mouseUp(x, y) {
-    if (!boundHwnd) throw new Error('mouseUp requires a bound window HWND. Call open() first.')
+    if (!boundHwnd) {
+      sendInputButton(undefined, x, y, 'left', 'up')
+      mouseDownUsedRealInput = null
+      return
+    }
     const realInput = mouseDownUsedRealInput ?? realMouseChannel()
     if (realInput) {
       // Physical release is cleanup: no foreground or window-rect check.
@@ -938,7 +959,10 @@ const input: InputPlatform = {
   },
 
   async drag(from, to, durationMs) {
-    if (!boundHwnd) throw new Error('drag requires a bound window HWND. Call open() first.')
+    if (!boundHwnd) {
+      sendInputDrag(undefined, from.x, from.y, to.x, to.y, durationMs)
+      return
+    }
     const realInput = realMouseChannel() || !ensureSendAccess()
     guardBoundWindow(realInput)
     if (realInput) {
@@ -964,10 +988,10 @@ const input: InputPlatform = {
     // Use the same verified SendInput path for every bound window.
     if (boundHwnd) {
       guardBoundWindow(true)
-      await sendInputUnicode(text)
+      await sendInputUnicode(text, boundHwnd)
       return
     }
-    throw new Error('typeText requires a bound window or file. Call open() first.')
+    await sendInputUnicode(text)
   },
 
   async key(name, action) {
@@ -997,7 +1021,8 @@ ${requireForegroundScript(boundHwnd)}
 [CuWin32]::keybd_event([byte]${vk}, 0, ${flag}, [UIntPtr]::Zero)`)
       return
     }
-    throw new Error('key requires a bound window HWND. Call open() first.')
+    const flag = action === 'release' ? '2' : '0'
+    ps(`${WIN32_TYPES}; [CuWin32]::keybd_event([byte]${vk}, 0, ${flag}, [UIntPtr]::Zero)`)
   },
 
   async keys(parts) {
@@ -1012,10 +1037,10 @@ ${requireForegroundScript(boundHwnd)}
         return
       }
       guardBoundWindow(true)
-      sendInputChord(parts)
+      sendInputChord(parts, boundHwnd)
       return
     }
-    throw new Error('keys requires a bound window HWND. Call open() first.')
+    sendInputChord(parts)
   },
 
   async scroll(amount, direction, x, y) {
@@ -1121,6 +1146,7 @@ $resized.Dispose()
       originX: src.originX,
       originY: src.originY,
       displayId: src.displayId,
+      displayCount: src.displayCount,
     }
   } catch (error) {
     throw new Error(`Screenshot downscale failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -1178,7 +1204,8 @@ $bmp = $resized
 ${DPI_AWARE_PS}
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$screen = if (${displayId ?? -1} -ge 0) { [System.Windows.Forms.Screen]::AllScreens[${displayId ?? 0}] } else { [System.Windows.Forms.Screen]::PrimaryScreen }
+$screens = [System.Windows.Forms.Screen]::AllScreens
+$screen = if (${displayId ?? -1} -ge 0) { $screens[${displayId ?? 0}] } else { [System.Windows.Forms.Screen]::PrimaryScreen }
 $bounds = $screen.Bounds
 $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -1187,14 +1214,14 @@ $g.Dispose()
 ${resizeBlock}
 $bmp.Save('${tmpFile}', [System.Drawing.Imaging.ImageFormat]::Jpeg)
 $bmp.Dispose()
-"$($bounds.Width),$($bounds.Height),$($bounds.X),$($bounds.Y)"
+"$($bounds.Width),$($bounds.Height),$($bounds.X),$($bounds.Y),$($screens.Length)"
 `)
-    const [wStr, hStr, xStr, yStr] = (raw || '').split(',')
+    const [wStr, hStr, xStr, yStr, countStr] = (raw || '').split(',')
     try {
       const fs = require('fs')
       const buf = fs.readFileSync(tmpFile.replace(/\\\\/g, '\\'))
       try { fs.unlinkSync(tmpFile.replace(/\\\\/g, '\\')) } catch {}
-      if (![wStr, hStr, xStr, yStr].every(value => Number.isFinite(Number(value)))) {
+      if (![wStr, hStr, xStr, yStr, countStr].every(value => Number.isFinite(Number(value)))) {
         throw new Error(`Invalid capture metadata: ${JSON.stringify(raw).slice(0, 200)}`)
       }
       return {
@@ -1206,6 +1233,7 @@ $bmp.Dispose()
         originX: Number(xStr),
         originY: Number(yStr),
         displayId: displayId ?? 0,
+        displayCount: Number(countStr),
       }
     } catch (error) {
       try { require('fs').unlinkSync(tmpFile.replace(/\\\\/g, '\\')) } catch {}
@@ -1264,6 +1292,24 @@ $bmp.Dispose()
     // PrintWindow via win32/windowCapture.ts — now outputs JPEG directly via temp file
     return captureWindowByHwnd(Number(hwnd), expectedPid)
   },
+}
+
+export async function captureScreenForApi(displayId?: number): Promise<ScreenshotResult> {
+  const shot = await screenshot.captureScreen(displayId)
+  const displayWidth = shot.displayWidth ?? shot.width
+  const displayHeight = shot.displayHeight ?? shot.height
+  const [width, height] = targetImageSize(displayWidth, displayHeight, API_RESIZE_PARAMS)
+  const resized = shot.width === width && shot.height === height
+    ? shot
+    : downscaleCapture(shot, width, height)
+  return {
+    ...resized,
+    displayWidth,
+    displayHeight,
+    originX: resized.originX ?? shot.originX ?? 0,
+    originY: resized.originY ?? shot.originY ?? 0,
+    displayId: resized.displayId ?? shot.displayId ?? displayId ?? 0,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1587,14 +1633,19 @@ Write-Host "$hwnd|$hwndPid|$exePath"
   getFrontmostApp(): FrontmostAppInfo | null {
     try {
       const out = ps(`${WIN32_TYPES}
+${PROCESS_IMAGE_PS}
 $hwnd = [CuWin32]::GetForegroundWindow()
 $procId = [uint32]0
 [CuWin32]::GetWindowThreadProcessId($hwnd, [ref]$procId) | Out-Null
 $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
-"$($proc.MainModule.FileName)|$($proc.ProcessName)"`)
+$exePath = [CuProcessImage]::Get($procId)
+if (-not $exePath) { try { $exePath = $proc.MainModule.FileName } catch {} }
+$appName = if ($proc) { $proc.ProcessName } elseif ($exePath) { [IO.Path]::GetFileNameWithoutExtension($exePath) } else { '' }
+"$exePath|$appName"`)
       if (!out || !out.includes('|')) return null
       const [exePath, appName] = out.split('|', 2)
-      return { id: exePath!, appName: appName! }
+      if (!exePath && !appName) return null
+      return { id: exePath || appName!, appName: appName! }
     } catch {
       return null
     }

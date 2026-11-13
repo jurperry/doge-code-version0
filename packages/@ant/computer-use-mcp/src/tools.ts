@@ -156,7 +156,7 @@ export function buildComputerUseTools(
   const screenshotDesc =
     caps.screenshotFiltering === "native"
       ? "Take a screenshot of the primary display. Applications not in the session allowlist are excluded at the compositor level — only granted apps and the desktop are visible."
-      : "Take a screenshot of the current target display or bound application window. On this platform, screenshots are NOT filtered — all captured windows are visible. Input actions targeting apps not in the session allowlist are rejected.";
+      : "Take a screenshot of the current target display or bound application window. open_application selects the bound window; switch_display selects a full display. On this platform, screenshots are NOT filtered — all captured windows are visible. Input actions targeting apps not in the session allowlist are rejected.";
 
   return [
     {
@@ -419,12 +419,10 @@ export function buildComputerUseTools(
     {
       name: "switch_display",
       description:
-        "Switch which monitor subsequent screenshots capture. Use this when the " +
-        "application you need is on a different monitor than the one shown. " +
-        "The screenshot tool tells you which monitor it captured and lists " +
-        "other attached monitors by name — pass one of those names here. " +
-        "After switching, call screenshot to see the new monitor. " +
-        'Pass "auto" to return to automatic monitor selection.',
+        "Leave bound-window mode and select full-display capture with global input coordinates. " +
+        "Use this for desktop-wide work instead of open_application, including work on the current monitor. " +
+        'Pass "auto" for automatic monitor selection, or a monitor name from the screenshot note to pin that display. ' +
+        "Always call screenshot after switching; previous image coordinates are no longer valid.",
       inputSchema: {
         type: "object" as const,
         properties: {

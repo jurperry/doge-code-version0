@@ -18,6 +18,8 @@ export interface ScreenshotResult {
   originX: number
   originY: number
   displayId?: number
+  /** Avoid a second native enumeration just for screenshot notes. */
+  displayCount?: number
 }
 
 export interface FrontmostApp {
@@ -114,4 +116,6 @@ export interface ComputerExecutor {
   getAppIcon(path: string): Promise<string | undefined>
   listRunningApps(): Promise<RunningApp[]>
   openApp(bundleId: string): Promise<void>
+  /** Windows: leave HWND-bound mode and use display/global coordinates. */
+  unbindApp?(): Promise<void>
 }

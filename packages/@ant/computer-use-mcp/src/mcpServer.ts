@@ -103,6 +103,9 @@ export function bindSessionContext(
   // onto the returned dispatcher; that's the identity that matters.
   let lastScreenshot: ScreenshotResult | undefined;
   let callGeneration = 0;
+  let targetGeneration = 0;
+  let targetChangesPending = 0;
+  let activeCalls = 0;
 
   const wrapPermission = ctx.onPermissionRequest
     ? async (
@@ -260,11 +263,25 @@ export function bindSessionContext(
     );
 
     // ─── Dispatch ────────────────────────────────────────────────────────
+    const changesTarget = name === "open_application" || name === "switch_display";
+    if (targetChangesPending > 0 || (changesTarget && activeCalls > 0)) {
+      return {
+        content: [{ type: "text", text: "The capture target is changing or an action is still running. Wait for the current call to finish, then take a fresh screenshot before acting." }],
+        isError: true,
+        telemetry: { error_kind: "state_conflict" },
+      };
+    }
+    if (changesTarget) {
+      targetGeneration++;
+      targetChangesPending++;
+    }
+    const callTargetGeneration = targetGeneration;
+    activeCalls++;
     try {
       throwIfAborted();
       const result = await handleToolCall(adapter, name, args, overrides);
 
-      if (result.screenshot && ticket === callGeneration && !requestSignal?.aborted && !ctx.isAborted?.()) {
+      if (result.screenshot && ticket === callGeneration && callTargetGeneration === targetGeneration && targetChangesPending === 0 && !requestSignal?.aborted && !ctx.isAborted?.()) {
         lastScreenshot = result.screenshot;
         const { base64: _blob, ...dims } = result.screenshot;
         logger.debug(`[${serverName}] screenshot dims: ${JSON.stringify(dims)}`);
@@ -273,8 +290,17 @@ export function bindSessionContext(
 
       return result;
     } finally {
-      requestSignal?.removeEventListener("abort", abortDialog);
-      dialogAbort.abort();
+      try {
+        if (changesTarget) {
+          lastScreenshot = undefined;
+          ctx.onScreenshotCleared?.();
+        }
+      } finally {
+        if (changesTarget) targetChangesPending--;
+        activeCalls--;
+        requestSignal?.removeEventListener("abort", abortDialog);
+        dialogAbort.abort();
+      }
     }
   };
 }

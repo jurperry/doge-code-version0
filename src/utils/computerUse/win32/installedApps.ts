@@ -9,19 +9,20 @@
  *    开始菜单几百个快捷方式时仅此一项就是数秒。
  *
  * 新实现：
- *  - 五个独立阶段并行（Promise.allSettled），各自带独立超时，一段慢/挂
- *    不拖垮其余阶段；
+ *  - 静态阶段并行（Promise.allSettled），各自带独立超时，一段慢/挂
+ *    不拖垮其余阶段；运行中窗口每次请求重新枚举，不沿用启动时缓存；
  *  - 快捷方式阶段 hoist 单个 COM 对象；
  *  - Get-AppxPackage（慢）删除，UWP 用 Get-StartApps（快且 AppID 可直接
  *    shell:AppsFolder 启动）；
  *  - 新增 App Paths 注册表段与「运行中窗口」段 —— 模拟器 / Android Studio
  *    这类常以运行态存在、注册表 DisplayName 又对不上的应用，靠窗口标题
  *    （放进 extraPaths 参与包内路径匹配）也能被 request_access 解析到；
- *  - 单飞（in-flight 去重）+ 60s TTL 缓存：ListTools 的 1s 提示超时与
- *    request_access 的完整枚举共享同一次后台枚举，不重复花钱。
+ *  - 静态阶段单飞（in-flight 去重）+ 60s TTL 缓存；运行中进程与窗口
+ *    在每次授权时重新读取，避免启动阶段的陈旧身份进入授权。
  */
 
 import type { InstalledApp } from '../platforms/types.js'
+import { PROCESS_IMAGE_PS } from './processImage.js'
 
 export interface RawAppEntry {
   displayName: string
@@ -257,9 +258,10 @@ ${ENUM_WINDOWS_PS}
   const pidList = [...byPid.keys()].join(',')
   const procRaw = await psStage(
     `${UTF8_PREFIX}
+${PROCESS_IMAGE_PS}
 Get-Process -Id ${pidList} -ErrorAction SilentlyContinue | ForEach-Object {
-  $path = $null
-  try { $path = $_.Path } catch {}
+  $path = [CuProcessImage]::Get($_.Id)
+  if (-not $path) { try { $path = $_.Path } catch {} }
   "$($_.Id)|$($_.ProcessName)|$path"
 }
 `,
@@ -362,30 +364,23 @@ export function mergeInstalledEntries(entries: readonly RawAppEntry[]): Installe
 // ── Cached entry point ──────────────────────────────────────────────────────
 
 const CACHE_TTL_MS = 60_000
-let cached: { apps: InstalledApp[]; ts: number } | undefined
-let inFlight: Promise<InstalledApp[]> | undefined
+let cached: { apps: RawAppEntry[]; ts: number } | undefined
+let inFlight: Promise<RawAppEntry[]> | undefined
 
-/**
- * Enumerate installed + running apps on Windows. Parallel stages, each with
- * its own timeout; single-flight + 60s TTL so the ListTools hint timeout and
- * request_access resolution share one enumeration.
- */
-export async function listInstalledAppsWin32(): Promise<InstalledApp[]> {
+async function listStaticApps(): Promise<RawAppEntry[]> {
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.apps
-  if (inFlight) return inFlight
-  inFlight = (async () => {
+  inFlight ??= (async () => {
     const settled = await Promise.allSettled([
       stageRegistry(),
       stageAppPaths(),
       stageShortcuts(),
       stageStartApps(),
-      stageRunning(),
     ])
     const all: RawAppEntry[] = []
     for (const r of settled) {
       if (r.status === 'fulfilled') all.push(...r.value)
     }
-    return mergeInstalledEntries(all)
+    return all
   })()
   try {
     const apps = await inFlight
@@ -394,4 +389,13 @@ export async function listInstalledAppsWin32(): Promise<InstalledApp[]> {
   } finally {
     inFlight = undefined
   }
+}
+
+/** Static install metadata is cached; live windows are refreshed per request. */
+export async function listInstalledAppsWin32(): Promise<InstalledApp[]> {
+  const [staticApps, runningApps] = await Promise.all([
+    listStaticApps(),
+    stageRunning().catch(() => []),
+  ])
+  return mergeInstalledEntries([...staticApps, ...runningApps])
 }

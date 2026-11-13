@@ -3,6 +3,8 @@ import {
   mergeInstalledEntries,
   parseAppLines,
 } from './installedApps.js'
+import { PROCESS_IMAGE_PS } from './processImage.js'
+import { runPowerShellSync } from './powerShell.js'
 
 // ── parseAppLines ───────────────────────────────────────────────────────────
 
@@ -111,6 +113,13 @@ test('exe entry arriving after exe entry accumulates extra paths', () => {
 
 test('empty input merges to empty output', () => {
   expect(mergeInstalledEntries([])).toEqual([])
+})
+
+const windowsTest = process.platform === 'win32' ? test : test.skip
+
+windowsTest('native process image query returns the real executable path', () => {
+  const path = runPowerShellSync(`${PROCESS_IMAGE_PS}\n[CuProcessImage]::Get(${process.pid})`)
+  expect(path.toLowerCase()).toBe(process.execPath.toLowerCase())
 })
 
 test('display-name matching is case-insensitive', () => {

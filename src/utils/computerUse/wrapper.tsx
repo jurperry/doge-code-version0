@@ -184,13 +184,23 @@ export function buildSessionContext(): ComputerUseSessionContext {
     }),
     onScreenshotCaptured: dims => tuc().setAppState(prev => {
       const cu = prev.computerUseMcpState;
-      const p = cu?.lastScreenshotDims;
-      return p?.width === dims.width && p?.height === dims.height && p?.displayWidth === dims.displayWidth && p?.displayHeight === dims.displayHeight && p?.displayId === dims.displayId && p?.originX === dims.originX && p?.originY === dims.originY ? prev : {
+      const p = cu?.lastScreenshotDims as ScreenshotDims | undefined;
+      return p?.width === dims.width && p?.height === dims.height && p?.displayWidth === dims.displayWidth && p?.displayHeight === dims.displayHeight && p?.displayId === dims.displayId && p?.displayCount === dims.displayCount && p?.originX === dims.originX && p?.originY === dims.originY ? prev : {
         ...prev,
         computerUseMcpState: {
           ...cu,
           lastScreenshotDims: dims
         }
+      };
+    }),
+    onScreenshotCleared: () => tuc().setAppState(prev => {
+      if (prev.computerUseMcpState?.lastScreenshotDims === undefined) return prev;
+      return {
+        ...prev,
+        computerUseMcpState: {
+          ...prev.computerUseMcpState,
+          lastScreenshotDims: undefined,
+        },
       };
     }),
     // ── Lock — async, direct file-lock calls ───────────────────────────────

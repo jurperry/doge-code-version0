@@ -26,6 +26,7 @@ export interface ScreenshotResult {
   originX?: number
   originY?: number
   displayId?: number
+  displayCount?: number
 }
 
 export interface DisplayInfo {

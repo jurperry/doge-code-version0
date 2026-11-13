@@ -19,6 +19,9 @@ const { mkdirSync, rmSync, writeFileSync, readFileSync } = await import('fs')
 const { join } = await import('path')
 
 const TMP_DIR = process.env.CLAUDE_CONFIG_DIR
+process.env.CLAUDE_CODE_TMPDIR = TMP_DIR
+process.env.TEMP = TMP_DIR
+process.env.TMP = TMP_DIR
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {
@@ -150,7 +153,16 @@ try {
     cursorText.slice(0, 120),
   )
 
-  // ── 5. 锁释放：回合结束 cleanup.ts 的路径 ───────────────────────────
+  // ── 5. 连续全屏捕获：不得被冗余显示器枚举或旧窗口绑定阻断 ──────────
+  const captureStart = Date.now()
+  let capturesStable = true
+  for (let i = 0; i < 10; i++) {
+    const repeated = await dispatch('screenshot', {})
+    capturesStable &&= !repeated.isError && repeated.content.some(item => item.type === 'image')
+  }
+  check('10 consecutive full-display screenshots remain stable', capturesStable, `${Date.now() - captureStart}ms`)
+
+  // ── 6. 锁释放：回合结束 cleanup.ts 的路径 ───────────────────────────
   const released = await releaseComputerUseLock()
   check('computer-use lock released after turn', released, '')
 } catch (e) {

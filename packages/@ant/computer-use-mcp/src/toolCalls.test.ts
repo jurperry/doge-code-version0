@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 import type { ComputerExecutor } from './executor.js'
 import {
   handleToolCall,
   resetMouseButtonHeld,
+  _test,
 } from './toolCalls.js'
 import {
   DEFAULT_GRANT_FLAGS,
@@ -141,6 +144,20 @@ describe('screenshot validity and persistence', () => {
     expect(failed.isError).toBe(true)
     expect(failed.telemetry?.error_kind).toBe('capture_failed')
     expect(failed.content[0]).toMatchObject({ type: 'text', text: expect.stringMatching(/capture unavailable.*Recovery:.*Do not click using stale coordinates/) })
+  })
+
+  test('single-display capture metadata avoids a second enumeration for monitor notes', async () => {
+    let enumerations = 0
+    const adapter = makeAdapter({
+      resolvePrepareCapture: async () => ({ ...shot(), displayCount: 1, hidden: [] }),
+      listDisplays: async () => { enumerations++; return [] },
+    })
+    const gates = adapter.getSubGates()
+    adapter.getSubGates = () => ({ ...gates, autoTargetDisplay: true })
+    const result = await handleToolCall(adapter, 'screenshot', {}, makeOverrides())
+    expect(result.isError).toBeUndefined()
+    expect(result.screenshot?.displayCount).toBe(1)
+    expect(enumerations).toBe(0)
   })
 
   test('a valid but very small bound-window image is not rejected by the retry heuristic', async () => {
@@ -950,6 +967,257 @@ describe('request_access denial feedback', () => {
     }))
     expect(retry.isError).toBe(true)
     expect(retry.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('call request_access again') })
+  })
+})
+
+describe('Windows display and window coordinate spaces', () => {
+  test('pixel input reuses capture geometry without a redundant display enumeration', async () => {
+    let enumerations = 0
+    const moves: Array<[number, number]> = []
+    const adapter = makeAdapter({
+      getDisplaySize: async () => { enumerations++; throw new Error('must not enumerate') },
+      moveMouse: async (x, y) => { moves.push([x, y]) },
+    })
+    const result = await handleToolCall(adapter, 'mouse_move', { coordinate: [50, 25] }, makeOverrides({
+      lastScreenshot: { ...shot(1000, 500), width: 500, height: 250, originX: -100, originY: -50 },
+    }))
+    expect(result.isError).toBeUndefined()
+    expect(moves).toEqual([[0, 0]])
+    expect(enumerations).toBe(0)
+  })
+
+  test('normalized input still resolves the current display or bound input surface', async () => {
+    let enumerations = 0
+    const moves: Array<[number, number]> = []
+    const adapter = makeAdapter({
+      getDisplaySize: async () => {
+        enumerations++
+        return { width: 200, height: 100, scaleFactor: 1, displayId: 1, originX: -200, originY: 10 }
+      },
+      moveMouse: async (x, y) => { moves.push([x, y]) },
+    })
+    const result = await handleToolCall(adapter, 'mouse_move', { coordinate: [50, 50] }, makeOverrides({ coordinateMode: 'normalized_0_100' }))
+    expect(result.isError).toBeUndefined()
+    expect(moves).toEqual([[-100, 60]])
+    expect(enumerations).toBe(1)
+  })
+
+  test('switch_display(auto) exits window mode and requires a fresh screenshot', async () => {
+    let unbinds = 0
+    let pinned: number | undefined | 'unset' = 'unset'
+    const result = await handleToolCall(makeAdapter({
+      unbindApp: async () => { unbinds++ },
+    }), 'switch_display', { display: 'auto' }, makeOverrides({
+      onDisplayPinned: id => { pinned = id },
+    }))
+    expect(result.isError).toBeUndefined()
+    expect(unbinds).toBe(1)
+    expect(pinned).toBeUndefined()
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('Call screenshot before acting') })
+  })
+
+  test('switching a display releases a held button before leaving window mode', async () => {
+    const calls: string[] = []
+    await handleToolCall(makeAdapter({
+      mouseUp: async () => { calls.push('release') },
+      unbindApp: async () => { calls.push('unbind') },
+    }), 'left_mouse_down', {}, makeOverrides())
+    const result = await handleToolCall(makeAdapter({
+      mouseUp: async () => { calls.push('release') },
+      unbindApp: async () => { calls.push('unbind') },
+    }), 'switch_display', { display: 'auto' }, makeOverrides({ onDisplayPinned: () => {} }))
+    expect(result.isError).toBeUndefined()
+    expect(calls).toEqual(['release', 'unbind'])
+  })
+
+  test('open_application releases a held button before rebinding', async () => {
+    const calls: string[] = []
+    const adapter = makeAdapter({
+      mouseUp: async () => { calls.push('release') },
+      openApp: async () => { calls.push('open') },
+    })
+    await handleToolCall(adapter, 'left_mouse_down', {}, makeOverrides())
+    const result = await handleToolCall(adapter, 'open_application', { app: 'app.test' }, makeOverrides())
+    expect(result.isError).toBeUndefined()
+    expect(calls).toEqual(['release', 'open'])
+  })
+
+  test('a single named display can leave window mode', async () => {
+    let unbinds = 0
+    let pinned: number | undefined
+    const result = await handleToolCall(makeAdapter({
+      listDisplays: async () => [{ width: 100, height: 100, scaleFactor: 1, displayId: 0, originX: 0, originY: 0, label: 'Only display' }],
+      unbindApp: async () => { unbinds++ },
+    }), 'switch_display', { display: 'Only display' }, makeOverrides({
+      onDisplayPinned: id => { pinned = id },
+    }))
+    expect(result.isError).toBeUndefined()
+    expect(pinned).toBe(0)
+    expect(unbinds).toBe(1)
+  })
+
+  test('Windows foreground path comparison ignores separator and case variants', async () => {
+    let clicks = 0
+    const adapter = makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      getFrontmostApp: async () => ({ bundleId: 'E:/Apps/Game.exe', displayName: 'Game' }),
+      click: async () => { clicks++ },
+    })
+    const result = await handleToolCall(adapter, 'left_click', { coordinate: [10, 10] }, makeOverrides({
+      allowedApps: [{ bundleId: 'e:\\apps\\game.exe', displayName: 'Game', grantedAt: 1, tier: 'full' }],
+    }))
+    expect(result.isError).toBeUndefined()
+    expect(clicks).toBe(1)
+  })
+
+  test('an authorized shell alias resolves its real foreground executable path', async () => {
+    let typed = 0
+    const adapter = makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      getFrontmostApp: async () => ({ bundleId: 'C:\\Apps\\Game.exe', displayName: 'Game' }),
+      listInstalledApps: async () => [{
+        bundleId: 'C:\\Apps\\Game.exe', displayName: 'Game',
+        path: 'C:\\Apps\\Game.exe', extraPaths: ['shell:AppsFolder\\Vendor.Game!App'],
+      }],
+      type: async () => { typed++ },
+    })
+    const result = await handleToolCall(adapter, 'type', { text: 'x' }, makeOverrides({
+      allowedApps: [{ bundleId: 'shell:AppsFolder\\Vendor.Game!App', displayName: 'Game', grantedAt: 1, tier: 'full' }],
+    }))
+    expect(result.isError).toBeUndefined()
+    expect(typed).toBe(1)
+  })
+
+  test('an unrelated foreground app remains rejected after alias resolution', async () => {
+    let typed = 0
+    const adapter = makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      getFrontmostApp: async () => ({ bundleId: 'C:\\Apps\\Other.exe', displayName: 'Other' }),
+      listInstalledApps: async () => [{
+        bundleId: 'shell:AppsFolder\\Vendor.Game!App', displayName: 'Game',
+        path: 'shell:AppsFolder\\Vendor.Game!App', extraPaths: ['c:/apps/game.exe'],
+      }],
+      type: async () => { typed++ },
+    })
+    const result = await handleToolCall(adapter, 'type', { text: 'x' }, makeOverrides({
+      allowedApps: [{ bundleId: 'shell:AppsFolder\\Vendor.Game!App', displayName: 'Game', grantedAt: 1, tier: 'full' }],
+    }))
+    expect(result.telemetry?.error_kind).toBe('app_not_granted')
+    expect(typed).toBe(0)
+  })
+
+  test('deny list path variants remove the normalized grant before input', async () => {
+    let typed = 0
+    const adapter = makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      getFrontmostApp: async () => ({ bundleId: 'E:\\Apps\\Game.exe', displayName: 'Game' }),
+      type: async () => { typed++ },
+    })
+    const result = await handleToolCall(adapter, 'type', { text: 'x' }, makeOverrides({
+      allowedApps: [{ bundleId: 'E:\\Apps\\Game.exe', displayName: 'Game', grantedAt: 1, tier: 'full' }],
+      userDeniedBundleIds: ['e:/apps/game.exe'],
+    }))
+    expect(result.telemetry?.error_kind).toBe('allowlist_empty')
+    expect(typed).toBe(0)
+  })
+
+  test('deny list real executable also rejects its authorized shell alias', async () => {
+    let typed = 0
+    const adapter = makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      getFrontmostApp: async () => ({ bundleId: 'C:\\Apps\\Game.exe', displayName: 'Game' }),
+      listInstalledApps: async () => [{
+        bundleId: 'C:\\Apps\\Game.exe', displayName: 'Game',
+        path: 'C:\\Apps\\Game.exe', extraPaths: ['shell:AppsFolder\\Vendor.Game!App'],
+      }],
+      type: async () => { typed++ },
+    })
+    const result = await handleToolCall(adapter, 'type', { text: 'x' }, makeOverrides({
+      allowedApps: [{ bundleId: 'shell:AppsFolder\\Vendor.Game!App', displayName: 'Game', grantedAt: 1, tier: 'full' }],
+      userDeniedBundleIds: ['c:/apps/game.exe'],
+    }))
+    expect(result.telemetry?.error_kind).toBe('app_not_granted')
+    expect(typed).toBe(0)
+  })
+
+  test('deny list shell alias also rejects its authorized real executable', async () => {
+    let typed = 0
+    const adapter = makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      getFrontmostApp: async () => ({ bundleId: 'C:\\Apps\\Game.exe', displayName: 'Game' }),
+      listInstalledApps: async () => [{
+        bundleId: 'C:\\Apps\\Game.exe', displayName: 'Game',
+        path: 'C:\\Apps\\Game.exe', extraPaths: ['shell:AppsFolder\\Vendor.Game!App'],
+      }],
+      type: async () => { typed++ },
+    })
+    const result = await handleToolCall(adapter, 'type', { text: 'x' }, makeOverrides({
+      allowedApps: [{ bundleId: 'C:\\Apps\\Game.exe', displayName: 'Game', grantedAt: 1, tier: 'full' }],
+      userDeniedBundleIds: ['shell:AppsFolder\\Vendor.Game!App'],
+    }))
+    expect(result.telemetry?.error_kind).toBe('app_not_granted')
+    expect(typed).toBe(0)
+  })
+
+  test('full exe authorization and opening prefer the running exe over a registry GUID', async () => {
+    const requested = 'E:\\game\\植物大战僵尸食物版\\PlantsVsZombiesFood.exe'
+    const installed = [
+      { bundleId: '{portable-game-guid}', displayName: '植物大战僵尸食物版', path: '' },
+      { bundleId: requested, displayName: 'PlantsVsZombiesFood', path: requested },
+    ]
+    let opened = ''
+    const adapter = makeAdapter({
+      listInstalledApps: async () => installed,
+      openApp: async id => { opened = id },
+    })
+    const access = await handleToolCall(adapter, 'request_access', {
+      apps: [requested], reason: 'test',
+    }, makeOverrides({
+      allowedApps: [],
+      onPermissionRequest: async request => ({
+        granted: request.apps.map(app => ({
+          bundleId: app.resolved!.bundleId,
+          displayName: app.resolved!.displayName,
+          grantedAt: 1,
+          tier: 'full' as const,
+        })),
+        denied: [], flags: { ...DEFAULT_GRANT_FLAGS }, userConsented: true,
+      }),
+    }))
+    const grant = json(access).granted[0]
+    expect(grant.bundleId).toBe(requested)
+    const openedResult = await handleToolCall(adapter, 'open_application', { app: requested }, makeOverrides({ allowedApps: [grant] }))
+    expect(openedResult.isError).toBeUndefined()
+    expect(opened).toBe(requested)
+  })
+
+  const windowsTest = process.platform === 'win32' ? test : test.skip
+
+  windowsTest('an existing portable exe needs no registry or running-app cache', () => {
+    const [request] = _test.resolveRequestedApps([process.execPath], [], new Set())
+    expect(request?.resolved).toMatchObject({ bundleId: process.execPath, path: process.execPath })
+    const missing = _test.resolveRequestedApps(['E:\\not-present\\missing-computer-use.exe'], [], new Set())
+    expect(missing[0]?.resolved).toBeUndefined()
+  })
+
+  windowsTest('portable exe identity never upgrades a known IDE to full access', () => {
+    const box = join(process.cwd(), 'test', 'cu-portable-tier')
+    const metadataPath = join(box, 'neutral', 'Code.exe')
+    const pathOnly = join(box, 'Microsoft VS Code', 'Code.exe')
+    mkdirSync(join(box, 'neutral'), { recursive: true })
+    mkdirSync(join(box, 'Microsoft VS Code'), { recursive: true })
+    writeFileSync(metadataPath, 'fixture')
+    writeFileSync(pathOnly, 'fixture')
+    try {
+      const installed = [{ bundleId: '{vscode-guid}', displayName: 'Visual Studio Code', path: '' }]
+      const [fromMetadata, fromPath] = _test.resolveRequestedApps([metadataPath, pathOnly], installed, new Set())
+      expect(fromMetadata?.resolved?.bundleId).toBe(metadataPath)
+      expect(fromMetadata?.proposedTier).toBe('click')
+      expect(fromPath?.resolved?.bundleId).toBe(pathOnly)
+      expect(fromPath?.proposedTier).toBe('click')
+    } finally {
+      rmSync(box, { recursive: true, force: true })
+    }
   })
 })
 
