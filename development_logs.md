@@ -2,6 +2,12 @@
 
 仅保留最近 10 条，每条三行：问题 / 解决 / 位置与验证。历史实现以 git 记录为准，测试统一遵守 [test_specification.md](test_specification.md)。
 
+## 2026-11-13 Playwright 双浏览器与 Computer Use 开关（2.1.330）
+
+1. 问题：内置 Playwright 只有固定无头模式，模型和用户不能选择可见浏览器；Computer Use 没有关闭出口。审查发现模式选择提示词未从 `setup.ts` 导出，新增双服务还必须保留 `DOGE_PLAYWRIGHT_HEADLESS=0` 的旧可见行为。
+2. 解决：注册 `playwright`（无头）与 `playwright-headed`（可见）两个真实 Node stdio MCP 服务，共享工具集和 server-wide 权限，保留名与诊断覆盖两者；实际消费模块重新导出模式选择提示，legacy 环境变量保留原服务可见行为并在提示中明确。`DOGE_COMPUTER_USE_MCP` 显式 falsy 时跳过 Computer Use 注册，桌面壳的两个总开关均经真实 `system/init` 验证。
+3. 位置：`src/{main.tsx,utils/playwrightMcp/,utils/computerUse/gates.ts,services/mcp/config.ts,services/analytics/metadata.ts}`、对应单测与 `tools/e2e-playwright-mcp.ts`。按要求仅做相关回归：定向单测 26/26，提示词实际导出探针通过，两种服务各 24 个工具的握手、权限与真实浏览器导航/快照通过；App 安装版四种开关场景与双服务进程均通过，独立初审问题全部修复后复审 Approve。`bun run version`=2.1.330，未跑全量回归。
+
 ## 2026-11-13 Windows 全屏与绑定窗口双坐标空间修复（2.1.329）
 
 1. 问题：`open_application` 后 HWND 永久接管截图与坐标，`switch_display` 不能回到全局；无绑定时键盘、文本、拖拽和按下/释放直接报错，全屏截图前同步枚举显示器还会间歇性 PowerShell 超时，导致全屏 Computer Use 与批处理不可用。
@@ -55,15 +61,3 @@
 1. 问题：外部 Bun 构建移除记忆提取模块，App 回合结束无法提取；主回合 abort 与进程退出可能丢失在途记忆。
 2. 解决：统一运行时门禁，App 以 `DOGE_HEADLESS_AUTO_MEMORY=1` 显式启用；禁用仍初始化 `MEMORY.md`，提取使用独立 AbortController 并在退出前 drain。
 3. 位置：`src/cli/print.ts`、`src/query/stopHooks.ts`、`src/utils/backgroundHousekeeping.ts`、`src/memdir/`、`src/services/extractMemories/`。聚焦测试 4/4、逐文件 989 pass、独立复审通过。
-
-## 2026-10-29 Windows 终端右键复制 TUI 选择文本乱码
-
-1. 问题：中文 Windows 控制台代码页 936 下，TUI 选择文本经 `clip.exe` 复制出现中文和表情乱码，toast 还误称仅 OSC 52。
-2. 解决：Windows 原生剪贴板改用 PowerShell UTF-8 stdin/stdout，串行化并跳过过期排队写入，失败暴露日志和超时；本地 Windows 归为 native。
-3. 位置：`src/ink/termio/osc.ts`、`src/ink/termio/osc.test.ts`、`tools/verify-windows-clipboard.ts`。CP936 下 Unicode、多行、5.6 万字符及连续写入通过，逐文件 131 文件全绿。
-
-## 2026-10-29 TUI 三区固定布局与可拖动历史滚动
-
-1. 问题：欢迎导航、消息与底部输入共用渲染流，多步调用后布局错位；外部用户没有独立消息视口和可见滚动条。
-2. 解决：默认 alternate-screen 三区布局，头部固定、短终端 compact、极短隐藏；消息区独立 ScrollBox/VirtualMessageList 和可拖拽滚动条，Ink 增加鼠标捕获分发。
-3. 位置：`src/components/{FullscreenLayout,Messages,LogoHeader,ScrollBar}.tsx`、`src/screens/REPL.tsx`、`src/utils/fullscreen.ts`、`src/ink/`。专项 34 项、逐文件 130 文件 988 测试、CLI 与 worktree e2e 通过，已授权合并。

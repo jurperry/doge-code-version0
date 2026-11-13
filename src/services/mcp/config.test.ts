@@ -22,7 +22,7 @@ beforeEach(() => {
   }))
 })
 
-test('computer-use MCP server is enabled by default (always-on)', () => {
+test('computer-use MCP server is enabled by default', () => {
   // 空 project config 下不得落入 upstream 的 enabledMcpServers 显式启用
   // 门槛 —— 那会让工具默认不进模型列表，等于“默认关闭”。
   expect(isMcpServerDisabled(COMPUTER_USE_MCP_SERVER_NAME)).toBe(false)

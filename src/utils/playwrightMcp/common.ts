@@ -1,7 +1,7 @@
 import { normalizeNameForMCP } from '../../services/mcp/normalization.js'
 
 /**
- * Server name for the built-in Playwright MCP server.
+ * Server names for the built-in Playwright MCP browser modes.
  *
  * Doge fork: official Claude Code has no browser automation server of its own —
  * WebFetch/WebSearch are plain HTTP calls the model can't drive interactively
@@ -10,9 +10,11 @@ import { normalizeNameForMCP } from '../../services/mcp/normalization.js'
  * controlled through the normal MCP tool surface.
  */
 export const PLAYWRIGHT_MCP_SERVER_NAME = 'playwright'
+export const PLAYWRIGHT_HEADED_MCP_SERVER_NAME = 'playwright-headed'
 
 export function isPlaywrightMCPServer(name: string): boolean {
-  return normalizeNameForMCP(name) === PLAYWRIGHT_MCP_SERVER_NAME
+  const normalized = normalizeNameForMCP(name)
+  return normalized === PLAYWRIGHT_MCP_SERVER_NAME || normalized === PLAYWRIGHT_HEADED_MCP_SERVER_NAME
 }
 
 /**
@@ -23,7 +25,13 @@ export function isPlaywrightMCPServer(name: string): boolean {
  * exist, so without a local hint the model may never reach for the browser.
  */
 export const PLAYWRIGHT_MCP_PROMPT_HINT = `<browser-automation-availability>
-The mcp__playwright__* tools drive a real Chromium browser: navigating, clicking, typing, filling forms, reading the accessibility snapshot, taking screenshots, listing console/network activity, and managing tabs.
+The mcp__playwright__* tools drive a headless Chromium browser, while mcp__playwright-headed__* tools provide the same operations in a visible browser window. Both support navigating, clicking, typing, filling forms, reading the accessibility snapshot, taking screenshots, listing console/network activity, and managing tabs.
+
+Choose the browser mode before starting a task:
+- Use mcp__playwright__* for code tests, background automation, and when no visible window is needed.
+- Use mcp__playwright-headed__* when the user asks to open or watch a real browser, or when visible interaction matters.
+- Follow an explicit user request for headless or visible mode. The two servers have independent browser sessions; do not mix them within one task unless the user asks.
+- Legacy compatibility: when DOGE_PLAYWRIGHT_HEADLESS=0 is explicitly set, mcp__playwright__* also runs a visible browser, so both servers are visible. Unset that variable when headless operation is needed.
 
 When to use them instead of WebFetch/WebSearch:
 1. The page needs JavaScript to render, requires a login/session, or is behind a form.
@@ -40,6 +48,6 @@ How to work with them:
 Guidance:
 - Prefer browser_snapshot over browser_take_screenshot for reading text; screenshots cost far more tokens.
 - Use browser_console_messages and browser_network_requests to debug a page that isn't behaving.
-- The browser is headless by default and starts on first tool call; browser_close shuts it down when you're done.
+- The selected browser starts on the first call to its server; browser_close shuts that server's browser down when you're done.
 - Do not use these tools to bypass a site's access controls or terms of service.
 </browser-automation-availability>`

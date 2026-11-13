@@ -1,8 +1,10 @@
 import type { ScopedMcpServerConfig } from '../../services/mcp/types.js'
 
 import { logForDebugging } from '../debug.js'
-import { PLAYWRIGHT_MCP_SERVER_NAME } from './common.js'
+import { PLAYWRIGHT_HEADED_MCP_SERVER_NAME, PLAYWRIGHT_MCP_SERVER_NAME } from './common.js'
 import { buildPlaywrightMcpCommand } from './command.js'
+
+export { PLAYWRIGHT_MCP_PROMPT_HINT } from './common.js'
 
 /**
  * Server-level allow rule: `mcp__playwright__*`.
@@ -23,14 +25,14 @@ export function isPlaywrightMCPEnabled(): boolean {
 
 /**
  * Build the dynamic MCP config + allowed tool names for the built-in
- * Playwright server. Mirrors `setupComputerUseMCP`.
+ * Playwright servers. Mirrors `setupComputerUseMCP`.
  *
  * Unlike Computer Use, this one is a REAL stdio server: Playwright cannot
  * launch a browser from Bun (see command.ts for the matrix), so the CLI spawns
  * `@playwright/mcp`'s CLI as a Node child process. The browser itself is still
  * launched lazily, on the first tool call.
  *
- * A single server-level wildcard rule is used instead of enumerating tool
+ * Each server uses a server-level wildcard rule instead of enumerating tool
  * names: the upstream toolset changes between releases, and a stale hardcoded
  * list would silently leave new tools behind the permission prompt.
  * `permissions.ts` matches `mcp__<server>__*` as "all tools from server".
@@ -43,8 +45,9 @@ export function setupPlaywrightMCP(): {
     return { mcpConfig: {}, allowedTools: [] }
   }
 
-  const command = buildPlaywrightMcpCommand()
-  if (!command) {
+  const headless = buildPlaywrightMcpCommand()
+  const headed = buildPlaywrightMcpCommand({ headless: false })
+  if (!headless || !headed) {
     // No Node on this machine — better to register nothing than a server that
     // fails to start and shows up as a red entry in /mcp.
     logForDebugging(
@@ -54,18 +57,27 @@ export function setupPlaywrightMCP(): {
   }
 
   logForDebugging(
-    `[Playwright MCP] stdio server: ${command.command} ${command.args.join(' ')}`,
+    `[Playwright MCP] stdio servers: ${headless.command} (headless + visible)`,
   )
 
   return {
     mcpConfig: {
       [PLAYWRIGHT_MCP_SERVER_NAME]: {
         type: 'stdio',
-        command: command.command,
-        args: command.args,
+        command: headless.command,
+        args: headless.args,
+        scope: 'dynamic',
+      } as const,
+      [PLAYWRIGHT_HEADED_MCP_SERVER_NAME]: {
+        type: 'stdio',
+        command: headed.command,
+        args: headed.args,
         scope: 'dynamic',
       } as const,
     },
-    allowedTools: [serverWideAllowRule(PLAYWRIGHT_MCP_SERVER_NAME)],
+    allowedTools: [
+      serverWideAllowRule(PLAYWRIGHT_MCP_SERVER_NAME),
+      serverWideAllowRule(PLAYWRIGHT_HEADED_MCP_SERVER_NAME),
+    ],
   }
 }

@@ -141,13 +141,13 @@ export interface PlaywrightMcpCommand {
  * Returns undefined when there is no Node on this machine — the caller then
  * registers no server at all rather than one that would fail to start.
  */
-export function buildPlaywrightMcpCommand(): PlaywrightMcpCommand | undefined {
+export function buildPlaywrightMcpCommand(options: { headless?: boolean } = {}): PlaywrightMcpCommand | undefined {
   const command = findNodeExecutable()
   const cliPath = resolvePlaywrightCliPath()
   if (!command || !cliPath) return undefined
 
   const browser = parseBrowserName(process.env.DOGE_PLAYWRIGHT_BROWSER?.trim())
-  const headless = process.env.DOGE_PLAYWRIGHT_HEADLESS?.trim() !== '0'
+  const headless = options.headless ?? process.env.DOGE_PLAYWRIGHT_HEADLESS?.trim() !== '0'
 
   const explicitPath = process.env.DOGE_PLAYWRIGHT_EXECUTABLE_PATH?.trim()
   const systemBrowser =

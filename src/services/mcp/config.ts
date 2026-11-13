@@ -1512,9 +1512,10 @@ export function areMcpConfigsAllowedWithEnterpriseMcpConfig(
   )
 }
 
-// Doge fork: computer-use ships always-on (mirrors gates.ts hardcoding
-// getChicagoEnabled() to true). Upstream defaults this server to disabled
-// pending explicit /mcp opt-in via enabledMcpServers — keeping that gate would
+// Doge fork: computer-use ships enabled by default. The desktop shell can
+// disable registration through DOGE_COMPUTER_USE_MCP=0. Upstream defaults this
+// server to disabled pending explicit /mcp opt-in via enabledMcpServers —
+// keeping that gate would
 // leave the tools absent from the model's list until manual enablement, i.e.
 // "off by default". Treating it like any user server instead: enabled by
 // default, opt-out still available via /mcp (disabledMcpServers).

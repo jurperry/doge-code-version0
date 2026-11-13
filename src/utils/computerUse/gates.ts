@@ -2,7 +2,7 @@ import type { CoordinateMode, CuSubGates } from '@ant/computer-use-mcp/types'
 
 import { getDynamicConfig_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { getSubscriptionType } from '../auth.js'
-import { isEnvTruthy } from '../envUtils.js'
+import { isEnvDefinedFalsy } from '../envUtils.js'
 
 type ChicagoConfig = CuSubGates & {
   enabled: boolean
@@ -41,7 +41,7 @@ function hasRequiredSubscription(): boolean {
 }
 
 export function getChicagoEnabled(): boolean {
-  return true
+  return !isEnvDefinedFalsy(process.env.DOGE_COMPUTER_USE_MCP)
 }
 
 export function getChicagoSubGates(): CuSubGates {

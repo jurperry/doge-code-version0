@@ -1490,11 +1490,11 @@ async function run(): Promise<CommanderCommand> {
             reservedNameError = `Invalid MCP configuration: "${COMPUTER_USE_MCP_SERVER_NAME}" is a reserved MCP name.`;
           } else {
             const {
-              isPlaywrightMCPServer,
-              PLAYWRIGHT_MCP_SERVER_NAME
+              isPlaywrightMCPServer
             } = await import('src/utils/playwrightMcp/common.js');
-            if (nonSdkConfigNames.some(isPlaywrightMCPServer)) {
-              reservedNameError = `Invalid MCP configuration: "${PLAYWRIGHT_MCP_SERVER_NAME}" is a reserved MCP name.`;
+            const playwrightConflict = nonSdkConfigNames.find(isPlaywrightMCPServer);
+            if (playwrightConflict) {
+              reservedNameError = `Invalid MCP configuration: "${playwrightConflict}" is a reserved MCP name.`;
             }
           }
         }

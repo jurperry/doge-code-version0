@@ -74,14 +74,17 @@ test('spawns the CLI under Node with chromium + isolated + output dir', () => {
   expect(cmd.headless).toBe(true)
 })
 
-test('headless flag follows DOGE_PLAYWRIGHT_HEADLESS=0', () => {
-  const cmd = buildPlaywrightMcpCommand()!
+test('headless option controls the CLI flag for the two browser modes', () => {
+  const cmd = buildPlaywrightMcpCommand({ headless: true })!
   expect(cmd.args).toContain('--headless')
 
-  process.env.DOGE_PLAYWRIGHT_HEADLESS = '0'
-  const headed = buildPlaywrightMcpCommand()!
+  const headed = buildPlaywrightMcpCommand({ headless: false })!
   expect(headed.headless).toBe(false)
   expect(headed.args).not.toContain('--headless')
+
+  process.env.DOGE_PLAYWRIGHT_HEADLESS = '0'
+  expect(buildPlaywrightMcpCommand()!.headless).toBe(false)
+  expect(buildPlaywrightMcpCommand({ headless: true })!.headless).toBe(true)
 })
 
 test('an explicit executable path wins over auto-detection', () => {

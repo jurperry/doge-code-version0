@@ -133,6 +133,9 @@ const BUILTIN_MCP_SERVER_NAMES: ReadonlySet<string> = new Set([
   (
     require('../../utils/playwrightMcp/common.js') as typeof import('../../utils/playwrightMcp/common.js')
   ).PLAYWRIGHT_MCP_SERVER_NAME,
+  (
+    require('../../utils/playwrightMcp/common.js') as typeof import('../../utils/playwrightMcp/common.js')
+  ).PLAYWRIGHT_HEADED_MCP_SERVER_NAME,
 ])
 /* eslint-enable @typescript-eslint/no-require-imports */
 
