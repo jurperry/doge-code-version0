@@ -2,6 +2,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createCliExecutor } from '../src/utils/computerUse/executor.js'
 import { bindWindow, getBoundInputChannel, unbindWindow } from '../src/utils/computerUse/platforms/win32.js'
+import { handleToolCall } from '../packages/@ant/computer-use-mcp/src/toolCalls.js'
+import { DEFAULT_GRANT_FLAGS, type ComputerUseHostAdapter } from '../packages/@ant/computer-use-mcp/src/types.js'
 
 const box = join(process.cwd(), 'test', 'tmp-cu-win32-unicode')
 const shortText = '你好，做个自我介绍'
@@ -96,8 +98,33 @@ try {
   bindWindow(hwnd, proc.pid, undefined, 'fixture.app')
   check('fixture is not Chromium', !getBoundInputChannel().chromium)
   const executor = createCliExecutor({ getMouseAnimationEnabled: () => false, getHideBeforeActionEnabled: () => false })
-
-  await executor.type(shortText, { viaClipboard: false })
+  const adapter: ComputerUseHostAdapter = {
+    serverName: 'computer-use-batch-e2e',
+    logger: { silly() {}, debug() {}, info() {}, warn() {}, error() {} },
+    executor,
+    ensureOsPermissions: async () => ({ granted: true }),
+    isDisabled: () => false,
+    getSubGates: () => ({
+      pixelValidation: false,
+      clipboardPasteMultiline: false,
+      mouseAnimation: false,
+      hideBeforeAction: false,
+      autoTargetDisplay: false,
+      clipboardGuard: false,
+    }),
+    getAutoUnhideEnabled: () => true,
+    cropRawPatch: () => null,
+  }
+  const batch = await handleToolCall(adapter, 'computer_batch', {
+    actions: [{ action: 'type', text: shortText }, { action: 'screenshot' }],
+  }, {
+    allowedApps: [{ bundleId: 'fixture.app', displayName: 'Native EDIT fixture', grantedAt: 1, tier: 'full' }],
+    grantFlags: { ...DEFAULT_GRANT_FLAGS },
+    userDeniedBundleIds: [],
+    coordinateMode: 'pixels',
+  })
+  check('computer_batch dispatches text and returns an in-batch screenshot', !batch.isError
+    && batch.content.some(item => item.type === 'image'), JSON.stringify(batch.content[0]))
   const shortMatched = await waitForText(shortText)
   check('real Unicode input preserves the Chinese prompt in native EDIT', shortMatched, JSON.stringify(nativeText()))
   if (process.env.KEEP_CU_TEST === '1') {

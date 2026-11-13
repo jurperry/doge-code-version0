@@ -2,6 +2,12 @@
 
 仅保留最近 10 条，每条三行：问题 / 解决 / 位置与验证。历史实现以 git 记录为准，测试统一遵守 [test_specification.md](test_specification.md)。
 
+## 2026-11-13 Windows 便携应用与 Computer Use 稳定性修复（2.1.326）
+
+1. 问题：未注册便携应用经 `open_application` 冷启动反复失败，中文路径已授权仍被判未授权，截图与 `computer_batch` 偶发 PowerShell 超时并诱导模型绕圈。实测分别发现 PowerShell 非 UTF-8 输出破坏中文路径、exe 继承 CLI 工作目录导致 PvZ `FATAL ERROR`、Unicode 进程名被过滤、装饰性 DWM 边框可否决打开、授权别名重复、`shell:AppsFolder` 覆盖真实 exe，以及 Windows 授权路径斜杠/大小写不一致。
+2. 解决：PowerShell 同步/异步输出统一 UTF-8；所有已解析 exe 以自身目录为工作目录并用 `-LiteralPath`；进程名保留 Unicode；边框改为 best-effort；授权按 bundleId 去重并同步等级提示/计数；StartApps 的真实 exe 直接保留原路径，合并按真实 exe > shell 别名 > 普通项；`open_application` 仅在 Windows 规范化路径斜杠和大小写且始终使用原授权身份。批次协议、权限 tier、坐标与取消语义不变。
+3. 位置：`src/utils/computerUse/{platforms/win32,win32/{appLaunch,installedApps,powerShell,windowBorder,windowGuard}}.ts`、`packages/@ant/computer-use-mcp/src/toolCalls.ts` 及对应测试、`tools/computer-use-win32-unicode-e2e.ts`、`computer_use.md`、`test_specification.md`。按用户要求仅做相关回归：单测 80/80、真实 `computer_batch` 中文输入+批次截图连续 3 轮、WinForms 25/25、PvZ 正常主窗口连续 10 次截图、关闭状态枚举真实 exe 全通过；独立多轮 review 最终 Approve，无剩余 Critical/Important/Minor。安装版冷启动与批次结果见邻仓 App 日志，未跑全量回归。
+
 ## 2026-11-13 Windows 高 DPI 截图与点击坐标修复（2.1.322）
 
 1. 问题：150% DPI 下 PopCap/DirectDraw 与 WinForms 的 `PrintWindow` 仅将逻辑尺寸内容贴在物理画布左上角，后续声明整窗坐标导致点击错位；绑定窗口光标回读使用缓存，真实滚轮缺少 DPI-aware 设置；安装版黑盒另发现完整中文 exe 路径已授权却无法被 `open_application` 精确匹配。

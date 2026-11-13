@@ -46,6 +46,29 @@ test('shortcut (exe id) beats registry entry and keeps its paths as extras', () 
   expect(merged[0]!.extraPaths).toContain('QQ')
 })
 
+test('running direct exe beats a shell AppsFolder alias for portable apps', () => {
+  const exe = 'E:\\game\\植物大战僵尸食物版\\PlantsVsZombiesFood.exe'
+  const merged = mergeInstalledEntries([
+    { displayName: 'PlantsVsZombiesFood', path: `shell:AppsFolder\\${exe}`, id: `shell:AppsFolder\\${exe}` },
+    { displayName: 'PlantsVsZombiesFood', path: exe, id: exe, extraPaths: ['植物大战僵尸中文版'] },
+  ])
+  expect(merged).toHaveLength(1)
+  expect(merged[0]!.id).toBe(exe)
+  expect(merged[0]!.extraPaths).toContain('植物大战僵尸中文版')
+  expect(merged[0]!.extraPaths).toContain(`shell:AppsFolder\\${exe}`)
+})
+
+test('shell AppsFolder alias still beats a non-launchable registry entry', () => {
+  const exe = 'E:\\game\\PlantsVsZombiesFood.exe'
+  const alias = `shell:AppsFolder\\${exe}`
+  const merged = mergeInstalledEntries([
+    { displayName: 'PlantsVsZombiesFood', path: '', id: 'portable-game-guid' },
+    { displayName: 'PlantsVsZombiesFood', path: alias, id: alias },
+  ])
+  expect(merged).toHaveLength(1)
+  expect(merged[0]!.id).toBe(alias)
+})
+
 test('running-window entry merges its titles into the matched app', () => {
   const merged = mergeInstalledEntries([
     {

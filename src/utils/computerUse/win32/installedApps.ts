@@ -181,7 +181,7 @@ Get-StartApps -ErrorAction SilentlyContinue | ForEach-Object {
   $name = $_.Name
   $appid = $_.AppID
   if ($appid -and ($appid -like '*!*' -or $appid -like '*:\\*')) {
-    $launch = "shell:AppsFolder\\$appid"
+    $launch = if ($appid -like '*.exe' -and (Test-Path -LiteralPath $appid -PathType Leaf)) { $appid } else { "shell:AppsFolder\\$appid" }
     "$name|$launch|$launch"
   }
 }
@@ -298,6 +298,11 @@ Get-Process -Id ${pidList} -ErrorAction SilentlyContinue | ForEach-Object {
  * matched app's extraPaths (the load-bearing addition for emulator/Android
  * Studio requests: the model names what it sees in the window title).
  */
+function launchablePathRank(path: string): number {
+  if (!path.toLowerCase().endsWith('.exe')) return 0
+  return /^shell:AppsFolder\\/i.test(path) ? 1 : 2
+}
+
 export function mergeInstalledEntries(entries: readonly RawAppEntry[]): InstalledApp[] {
   interface Accum {
     displayName: string
@@ -319,8 +324,8 @@ export function mergeInstalledEntries(entries: readonly RawAppEntry[]): Installe
       })
       continue
     }
-    const existingIsExe = existing.id.toLowerCase().endsWith('.exe')
-    const newIsExe = entry.id.toLowerCase().endsWith('.exe')
+    const existingRank = launchablePathRank(existing.id)
+    const newRank = launchablePathRank(entry.id)
     const appendPaths = (paths: Array<string | undefined>) => {
       for (const p of paths) {
         if (p && p !== existing.path && !existing.extraPaths.includes(p)) {
@@ -328,7 +333,7 @@ export function mergeInstalledEntries(entries: readonly RawAppEntry[]): Installe
         }
       }
     }
-    if (newIsExe && !existingIsExe) {
+    if (newRank > existingRank) {
       // Shortcut/running entry wins over registry — old winner's paths stay
       // as extraPaths for path-based matching.
       const loserPaths = [existing.path, existing.id !== existing.path ? existing.id : undefined]

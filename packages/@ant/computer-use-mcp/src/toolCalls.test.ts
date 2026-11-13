@@ -801,6 +801,19 @@ describe('Windows effective-target permission gates', () => {
     expect(opened).toBe(exePath)
   })
 
+  test('open_application accepts Windows path separator and case variants', async () => {
+    const exePath = 'E:\\Plants Vs Zombies Food Version\\game\\植物大战僵尸食物版\\PlantsVsZombiesFood.exe'
+    let opened = ''
+    const result = await handleToolCall(makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      openApp: async bundleId => { opened = bundleId },
+    }), 'open_application', { app: exePath.replace(/\\/g, '/').toUpperCase() }, makeOverrides({
+      allowedApps: [{ bundleId: exePath, displayName: 'PlantsVsZombiesFood', grantedAt: 1, tier: 'full' }],
+    }))
+    expect(result.isError).toBeUndefined()
+    expect(opened).toBe(exePath)
+  })
+
   test('unknown and non-granted targets fail closed on Windows', async () => {
     const unknown = await handleToolCall(windowsAdapter('full', null), 'type', { text: 'x' }, grants('full'))
     expect(unknown.telemetry?.error_kind).toBe('state_conflict')
@@ -837,6 +850,54 @@ describe('Windows effective-target permission gates', () => {
 
 describe('request_access denial feedback', () => {
   const installed = [{ bundleId: 'app.test', displayName: 'Test App', path: '/test' }]
+
+  test('multiple aliases for one resolved application are granted only once', async () => {
+    let requested = 0
+    const result = await handleToolCall(makeAdapter({
+      listInstalledApps: async () => installed,
+    }), 'request_access', { apps: ['Test App', 'app.test'], reason: 'test' }, makeOverrides({
+      allowedApps: [],
+      onPermissionRequest: async request => {
+        requested = request.apps.length
+        return {
+          granted: request.apps.map(app => ({
+            bundleId: app.resolved!.bundleId,
+            displayName: app.resolved!.displayName,
+            grantedAt: 1,
+            tier: 'full' as const,
+          })),
+          denied: [],
+          flags: { ...DEFAULT_GRANT_FLAGS },
+          userConsented: true,
+        }
+      },
+    }))
+    expect(requested).toBe(1)
+    expect(json(result).granted).toHaveLength(1)
+  })
+
+  test('restricted-tier aliases also dedupe guidance and telemetry', async () => {
+    const result = await handleToolCall(makeAdapter({
+      listInstalledApps: async () => [{ bundleId: 'com.microsoft.VSCode', displayName: 'Visual Studio Code', path: '/code' }],
+    }), 'request_access', { apps: ['Visual Studio Code', 'com.microsoft.VSCode'], reason: 'test' }, makeOverrides({
+      allowedApps: [],
+      onPermissionRequest: async request => ({
+        granted: request.apps.map(app => ({
+          bundleId: app.resolved!.bundleId,
+          displayName: app.resolved!.displayName,
+          grantedAt: 1,
+          tier: 'click' as const,
+        })),
+        denied: [],
+        flags: { ...DEFAULT_GRANT_FLAGS },
+        userConsented: true,
+      }),
+    }))
+    const payload = json(result)
+    expect(payload.granted).toHaveLength(1)
+    expect(payload.tierGuidance.match(/Visual Studio Code/g)).toHaveLength(1)
+    expect(result.telemetry?.denied_terminal_count).toBe(1)
+  })
 
   test('an explicit user denial includes guidance not to repeat the dialog', async () => {
     const result = await handleToolCall(makeAdapter({

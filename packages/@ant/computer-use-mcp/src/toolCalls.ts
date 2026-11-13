@@ -1403,12 +1403,21 @@ async function buildAccessRequest(
     }
   }
 
+  const resolvedBundleIds = new Set<string>();
+  const uniqueSurviving = surviving.filter((r) => {
+    const bundleId = r.resolved?.bundleId;
+    if (!bundleId) return true;
+    if (resolvedBundleIds.has(bundleId)) return false;
+    resolvedBundleIds.add(bundleId);
+    return true;
+  });
+
   // Collect resolved apps with a restricted tier for the guidance message.
   // Unresolved apps with a restricted tier (e.g. model asks for "Chrome" but
   // it's not installed) are omitted — they'll end up in the `denied` list
   // with reason "not_installed" and the model will see that instead.
   const tieredApps: TieredApp[] = [];
-  for (const r of surviving) {
+  for (const r of uniqueSurviving) {
     if (r.proposedTier === "full" || !r.resolved) continue;
     tieredApps.push({
       bundleId: r.resolved.bundleId,
@@ -1420,8 +1429,8 @@ async function buildAccessRequest(
   // Idempotence: apps that are already granted skip the dialog and are
   // merged into the `granted` response. Existing grants keep their tier
   // (which may differ from the current proposedTier if policy changed).
-  const skipDialog = surviving.filter((r) => r.alreadyGranted);
-  const needDialog = surviving.filter((r) => !r.alreadyGranted);
+  const skipDialog = uniqueSurviving.filter((r) => r.alreadyGranted);
+  const needDialog = uniqueSurviving.filter((r) => !r.alreadyGranted);
 
   // Populate icons only for what the dialog will actually show. Sequential
   // awaits are fine — the Swift module is cached (listInstalledApps above
@@ -1463,7 +1472,7 @@ async function buildAccessRequest(
   // resolved goes in the exempt set.
   const exemptForPreview = [
     ...allowedApps.map((a) => a.bundleId),
-    ...surviving.filter((r) => r.resolved).map((r) => r.resolved!.bundleId),
+    ...uniqueSurviving.filter((r) => r.resolved).map((r) => r.resolved!.bundleId),
   ];
   const willHide = await adapter.executor.previewHideSet(
     exemptForPreview,
@@ -3083,12 +3092,16 @@ async function handleOpenApplication(
   if (app instanceof Error) return errorResult(app.message, "bad_args");
 
   // Resolve display-name → bundle ID. Same logic as request_access.
-  const allowed = new Set(overrides.allowedApps.map((g) => g.bundleId));
-  let targetBundleId: string | undefined;
+  const normalizeAppId = (id: string): string =>
+    adapter.executor.capabilities.platform === "win32"
+      ? id.replace(/\//g, "\\").toLowerCase()
+      : id;
+  const allowedById = new Map(
+    overrides.allowedApps.map((g) => [normalizeAppId(g.bundleId), g.bundleId]),
+  );
+  let targetBundleId = allowedById.get(normalizeAppId(app));
 
-  if (allowed.has(app)) {
-    targetBundleId = app;
-  } else {
+  if (!targetBundleId) {
     // Try display name → bundle ID, but ONLY against the allowlist itself.
     // Avoids paying the listInstalledApps() cost on the hot path and is
     // arguably more correct: if the user granted "Slack", the model asking
@@ -3099,7 +3112,7 @@ async function handleOpenApplication(
     targetBundleId = match?.bundleId;
   }
 
-  if (!targetBundleId || !allowed.has(targetBundleId)) {
+  if (!targetBundleId) {
     return errorResult(
       `"${app}" is not granted for this session. Call request_access first.`,
       "app_not_granted",

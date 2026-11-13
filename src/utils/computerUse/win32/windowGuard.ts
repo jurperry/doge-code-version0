@@ -230,10 +230,10 @@ export function findReplacementWindow(
 
 /** PIDs whose process name equals `name` (case-insensitive, no .exe). */
 export function getPidsForProcessName(name: string): number[] {
-  const safe = name.replace(/[^A-Za-z0-9_. -]/g, '').replace(/'/g, "''")
+  const safe = name.replace(/'/g, "''")
   if (!safe.trim()) return []
   try {
-    return runPowerShellSync(`Get-Process -Name '${safe}' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }`, 8000)
+    return runPowerShellSync(`Get-Process | Where-Object { $_.ProcessName -eq '${safe}' } | ForEach-Object { $_.Id }`, 8000)
       .split('\n')
       .map(s => Number(s.trim()))
       .filter(n => Number.isInteger(n) && n > 0)

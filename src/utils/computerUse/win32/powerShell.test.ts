@@ -26,3 +26,9 @@ windowsTest('real sync and async runners enforce timeout and carry stdin', async
   await expect(runPowerShell('Start-Sleep -Seconds 2', 30)).rejects.toThrow(/timed out.*outcome is unknown/i)
   expect(await runPowerShell('[Console]::Out.Write([Console]::In.ReadToEnd())', 1000, 'stdin-ok')).toBe('stdin-ok')
 })
+
+windowsTest('real runners preserve Unicode application paths', async () => {
+  const path = 'E:\\game\\植物大战僵尸食物版\\PlantsVsZombiesFood.exe'
+  expect(runPowerShellSync(`'${path}'`)).toBe(path)
+  expect(await runPowerShell(`'${path}'`)).toBe(path)
+})

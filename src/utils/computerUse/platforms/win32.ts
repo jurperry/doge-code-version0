@@ -35,6 +35,7 @@ import {
   getPidsForProcessName,
 } from '../win32/windowGuard.js'
 import { listInstalledAppsWin32 } from '../win32/installedApps.js'
+import { buildPortableAppLaunchBlock } from '../win32/appLaunch.js'
 import { classifyWindowClasses } from '../win32/windowClassify.js'
 import { runPowerShell, runPowerShellSync } from '../win32/powerShell.js'
 
@@ -1448,9 +1449,8 @@ $proc = $null
 $launchPath = ''
 
 # 1. Exact file path
-if (Test-Path $target) {
-    $proc = Start-Process $target -PassThru -ErrorAction SilentlyContinue
-    $launchPath = $target
+if (Test-Path -LiteralPath $target) {
+    ${buildPortableAppLaunchBlock()}
 }
 
 # 2. exe name in PATH (e.g. "notepad.exe", "code.exe") — .exe results only
@@ -1460,8 +1460,8 @@ if (-not $proc) {
             Where-Object { $_.Source -and $_.Source.EndsWith('.exe') } |
             Select-Object -First 1
         if ($found) {
-            $proc = Start-Process $found.Source -PassThru -ErrorAction SilentlyContinue
-            if ($proc) { $launchPath = $found.Source; break }
+            ${buildPortableAppLaunchBlock('$found.Source')}
+            if ($proc) { break }
         }
     }
 }
@@ -1471,9 +1471,9 @@ if (-not $proc) {
     foreach ($name in @("$target.exe", $target)) {
         foreach ($hive in @('HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths', 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths')) {
             $ap = Get-ItemProperty (Join-Path $hive $name) -ErrorAction SilentlyContinue
-            if ($ap -and $ap.'(default)' -and (Test-Path $ap.'(default)')) {
-                $proc = Start-Process $ap.'(default)' -PassThru -ErrorAction SilentlyContinue
-                if ($proc) { $launchPath = $ap.'(default)'; break }
+            if ($ap -and $ap.'(default)' -and (Test-Path -LiteralPath $ap.'(default)')) {
+                ${buildPortableAppLaunchBlock("$ap.'(default)'")}
+                if ($proc) { break }
             }
         }
         if ($proc) { break }
@@ -1489,7 +1489,7 @@ if (-not $proc) {
         } | Select-Object -First 1
         if ($app -and $app.InstallLocation) {
             $exes = Get-ChildItem $app.InstallLocation -Filter '*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($exes) { $proc = Start-Process $exes.FullName -PassThru -ErrorAction SilentlyContinue; $launchPath = $exes.FullName; break }
+            if ($exes) { ${buildPortableAppLaunchBlock('$exes.FullName')}; break }
         }
     }
 }

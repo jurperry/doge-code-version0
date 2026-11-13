@@ -63,7 +63,11 @@ Auto/bypass 模式会按既有自动放行设计授予已解析应用及请求 f
 
 ### 2. 打开或绑定应用，再截图
 
-`open_application` 只能打开已授权应用，优先匹配 allowlist 中完全一致的 exe 路径/bundleId，再按显示名匹配。Windows 会记录该授权对应的 HWND、PID 和应用身份，普通后台输入与真实前台输入都可据此路由。
+`open_application` 只能打开已授权应用，优先匹配 allowlist 中的 exe 路径/bundleId（Windows 路径统一斜杠与大小写），再按显示名匹配。Windows 会记录该授权对应的 HWND、PID 和应用身份，普通后台输入与真实前台输入都可据此路由。
+
+便携式 exe 启动时使用其所在目录作为工作目录，与从开始菜单或快捷方式启动一致，避免程序找不到同目录资源。通用 PowerShell 输出统一为 UTF-8，中文 exe 路径与窗口标题不会在授权比对前变成乱码；进程名匹配也保留 Unicode。窗口绿色边框仅为装饰，DWM 设置或清理失败不会否决打开、换绑或后续输入。
+
+同一授权请求中的多个名称或别名若解析到同一 bundleId，只进入一次授权弹窗并返回一项 grant，避免重复授权项。`Get-StartApps` 中真实存在的 exe 直接保留原路径，只有 UWP/Store AppID 使用 `shell:AppsFolder` 启动；应用枚举合并时，运行中进程的真实 exe 路径也优先于 shell 启动别名，确保后续可以用该确切路径授权和打开便携应用。
 
 随后调用 `screenshot`：
 

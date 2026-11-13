@@ -44,23 +44,30 @@ public class CuDwm {
  * Set green border on bound window via DWM.
  * Automatic: follows rounded corners, window movement, resize.
  */
+function tryBorder(command: () => string): boolean {
+  try {
+    return command() === '0'
+  } catch {
+    return false
+  }
+}
+
 export function markBound(hwnd: number): boolean {
-  const hr = ps(`${DWM_TYPES}; [CuDwm]::SetBorderColor([IntPtr]${hwnd}, 0, 200, 0)`)
-  return hr === '0'
+  return tryBorder(() => ps(`${DWM_TYPES}; [CuDwm]::SetBorderColor([IntPtr]${hwnd}, 0, 200, 0)`))
 }
 
 /**
  * Remove border, restore default.
  */
 export function unmarkBound(hwnd: number): boolean {
-  const hr = ps(`${DWM_TYPES}; [CuDwm]::ResetBorder([IntPtr]${hwnd})`)
-  return hr === '0'
+  return tryBorder(() => ps(`${DWM_TYPES}; [CuDwm]::ResetBorder([IntPtr]${hwnd})`))
 }
 
 /**
  * Set custom border color.
  */
 export function setBorderColor(hwnd: number, r: number, g: number, b: number): boolean {
-  const hr = ps(`${DWM_TYPES}; [CuDwm]::SetBorderColor([IntPtr]${hwnd}, ${r}, ${g}, ${b})`)
-  return hr === '0'
+  return tryBorder(() => ps(`${DWM_TYPES}; [CuDwm]::SetBorderColor([IntPtr]${hwnd}, ${r}, ${g}, ${b})`))
 }
+
+export const _test = { tryBorder }

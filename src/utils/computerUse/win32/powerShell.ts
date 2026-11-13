@@ -6,6 +6,8 @@ type PowerShellResult = {
   stderr: string
 }
 
+const POWER_SHELL_PREFIX = "$ErrorActionPreference = 'Stop'\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+
 function summarize(value: string): string {
   const text = value.trim()
   return text.length > 500 ? `${text.slice(0, 500)}…` : text
@@ -28,7 +30,7 @@ export function runPowerShellSync(script: string, timeoutMs = 10_000): string {
   try {
     const completed = nodeSpawnSync(
       'powershell',
-      ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'\n${script}`],
+      ['-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
       {
         encoding: 'utf8',
         timeout: timeoutMs,
@@ -50,7 +52,7 @@ export function runPowerShellSync(script: string, timeoutMs = 10_000): string {
 
 export async function runPowerShell(script: string, timeoutMs = 15_000, stdin?: string): Promise<string> {
   const proc = Bun.spawn(
-    ['powershell', '-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'\n${script}`],
+    ['powershell', '-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
     { stdin: stdin === undefined ? 'ignore' : 'pipe', stdout: 'pipe', stderr: 'pipe' },
   )
   if (stdin !== undefined) {
