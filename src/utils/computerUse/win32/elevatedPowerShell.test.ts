@@ -1,0 +1,99 @@
+import { expect, test } from 'bun:test'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { needsElevatedHelper } from './elevation.js'
+import {
+  _test,
+  ensureElevatedPowerShell,
+  isElevatedPowerShellActive,
+  runComputerUsePowerShell,
+  runComputerUsePowerShellSync,
+  setComputerUseTargetElevated,
+} from './elevatedPowerShell.js'
+
+test('only a higher-integrity target requests the elevated helper', () => {
+  expect(needsElevatedHelper('medium', 'high')).toBe(true)
+  expect(needsElevatedHelper('low', 'medium')).toBe(true)
+  expect(needsElevatedHelper('medium', 'medium')).toBe(false)
+  expect(needsElevatedHelper('high', 'medium')).toBe(false)
+  expect(needsElevatedHelper('unknown', 'high')).toBe(false)
+  expect(needsElevatedHelper('medium', 'unknown')).toBe(false)
+})
+
+test.skipIf(process.platform !== 'win32')('the persistent broker preserves output, input, errors and cancellation', async () => {
+  await _test.startLocal()
+  try {
+    expect(isElevatedPowerShellActive()).toBe(true)
+    expect(runComputerUsePowerShellSync('[Console]::Out.Write("sync-ok")')).toBe('sync-ok')
+    expect(await runComputerUsePowerShell('[Console]::Out.Write([Console]::In.ReadToEnd())', 5000, 'input-中😀')).toBe('input-中😀')
+    expect(await runComputerUsePowerShell('[Console]::Out.Write("first"); [Console]::Out.Write("second")')).toBe('firstsecond')
+    await expect(runComputerUsePowerShell('throw "action-failed"')).rejects.toThrow(/action-failed/)
+    expect(isElevatedPowerShellActive()).toBe(true)
+    expect(await runComputerUsePowerShell('"still-alive"')).toBe('still-alive')
+
+    const parentQuery = '(Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId'
+    expect(Number(await runComputerUsePowerShell(parentQuery))).toBe(_test.activePid())
+    setComputerUseTargetElevated(false)
+    expect(Number(await runComputerUsePowerShell(parentQuery))).toBe(process.pid)
+    setComputerUseTargetElevated(true)
+
+    const slow = runComputerUsePowerShell('Start-Sleep -Milliseconds 500; "slow-ok"')
+    await ensureElevatedPowerShell()
+    expect(await slow).toBe('slow-ok')
+    expect(isElevatedPowerShellActive()).toBe(true)
+
+    const marker = join(tmpdir(), `doge-cu-cancel-${process.pid}.txt`)
+    rmSync(marker, { force: true })
+    const blocker = runComputerUsePowerShell('Start-Sleep -Milliseconds 500')
+    const queuedController = new AbortController()
+    const queued = runComputerUsePowerShell(`[System.IO.File]::WriteAllText('${marker.replace(/'/g, "''")}', 'dispatched')`, 5000, 'queued-input', queuedController.signal)
+    queuedController.abort()
+    await expect(queued).rejects.toMatchObject({ name: 'AbortError' })
+    await blocker
+    expect(existsSync(marker)).toBe(false)
+
+    const controller = new AbortController()
+    const pending = runComputerUsePowerShell('Start-Sleep -Seconds 20', 30_000, 'active-input', controller.signal)
+    setTimeout(() => controller.abort(), 100)
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(await runComputerUsePowerShell('"after-cancel"')).toBe('after-cancel')
+    rmSync(marker, { force: true })
+  } finally {
+    await _test.stop()
+  }
+  expect(isElevatedPowerShellActive()).toBe(false)
+}, 30_000)
+
+
+test.skipIf(process.platform !== 'win32')('broker exits when its owner is force-killed', async () => {
+  const dir = join(tmpdir(), `doge-cu-owner-${process.pid}`)
+  const ownerFile = join(dir, 'owner.ts')
+  const pidFile = join(dir, 'broker.pid')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const modulePath = pathToFileURL(resolve(import.meta.dir, 'elevatedPowerShell.ts')).href
+  writeFileSync(ownerFile, `import { writeFileSync } from 'node:fs'; import { _test } from ${JSON.stringify(modulePath)}; await _test.startLocal(); writeFileSync(${JSON.stringify(pidFile)}, String(_test.activePid())); await new Promise(() => {})`)
+  const owner = Bun.spawn(['bun', ownerFile], { stdout: 'inherit', stderr: 'inherit' })
+  let brokerPid = 0
+  try {
+    const deadline = Date.now() + 10_000
+    while (!existsSync(pidFile) && Date.now() < deadline) await Bun.sleep(50)
+    expect(existsSync(pidFile)).toBe(true)
+    brokerPid = Number(readFileSync(pidFile, 'utf8'))
+    spawnSync('taskkill', ['/PID', String(owner.pid), '/F'], { stdio: 'ignore' })
+    await owner.exited
+    let exited = false
+    for (let i = 0; i < 40; i++) {
+      try { process.kill(brokerPid, 0) } catch { exited = true; break }
+      await Bun.sleep(100)
+    }
+    expect(exited).toBe(true)
+  } finally {
+    try { owner.kill() } catch {}
+    if (brokerPid > 0) { try { process.kill(brokerPid, 9) } catch {} }
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 15_000)

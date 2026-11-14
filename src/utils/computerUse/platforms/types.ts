@@ -27,6 +27,7 @@ export interface ScreenshotResult {
   originY?: number
   displayId?: number
   displayCount?: number
+  targetRevision?: number
 }
 
 export interface DisplayInfo {
@@ -50,6 +51,13 @@ export interface InstalledApp {
 export interface FrontmostAppInfo {
   id: string
   appName: string
+  hostId?: string
+  hostName?: string
+  pid?: number
+  hostPid?: number
+  hostTrusted?: boolean
+  startedAt?: number
+  hostStartedAt?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +79,7 @@ export interface InputPlatform {
   // --- Mode A: Global input (all platforms) ---
   moveMouse(x: number, y: number): Promise<void>
   click(x: number, y: number, button: 'left' | 'right' | 'middle', count?: number): Promise<void>
-  typeText(text: string): Promise<void>
+  typeText(text: string, signal?: AbortSignal): Promise<void>
   key(name: string, action: 'press' | 'release'): Promise<void>
   keys(combo: string[]): Promise<void>
   scroll(amount: number, direction: 'vertical' | 'horizontal', x?: number, y?: number): Promise<void>
@@ -122,7 +130,8 @@ export interface DisplayPlatform {
 export interface AppsPlatform {
   listRunning(): WindowHandle[]
   listInstalled(): Promise<InstalledApp[]>
-  open(name: string): Promise<void>
+  open(name: string, signal?: AbortSignal): Promise<void>
   getFrontmostApp(): FrontmostAppInfo | null
+  getAppAtPoint?(x: number, y: number): FrontmostAppInfo | null
   findWindowByTitle(title: string): WindowHandle | null
 }

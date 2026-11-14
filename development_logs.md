@@ -2,6 +2,36 @@
 
 仅保留最近 10 条，每条三行：问题 / 解决 / 位置与验证。历史实现以 git 记录为准，测试统一遵守 [test_specification.md](test_specification.md)。
 
+## 2026-11-14 Windows 新进程接管与坐标代际修复（2.1.337）
+
+1. 问题：绑定 Explorer 启动游戏后仍长期截图/点击旧 Explorer，模型转 Bash 并混用逻辑/物理坐标；自动解绑若不清坐标，还会在并发下让新目标收到旧绑定输入。
+2. 解决：绑定后新启动且不同的前台进程自动解除旧绑定，旧进程后台操作不受影响。使用单调 binding revision：输入/zoom 比较调用 revision，截图记录捕获前 revision 并在返回前复核；同一变化只清一次锚点，延迟旧图不得覆盖新图。模型不得用 shell 绕过目标/权限或混用自定义截图坐标。
+3. 位置：`src/utils/computerUse/{platforms/win32.ts,executor.ts,setup.ts}`、`packages/@ant/computer-use-mcp/src/` 与原生夹具。相关测试 92/92；普通/管理员原生全套及双进程正反例通过，真实新进程前台接管会解除旧绑定。多轮独立审查最终 Approve，无剩余 Critical/Important。
+
+## 2026-11-14 Windows 高 DPI 命中修复与 Computer Use 调用收敛（2.1.336）
+
+1. 问题：一次启动器任务出现 64+ 次工具调用，含 26 次截图和多次重复点击。原始记录证明主要根因不是 UIPI，而是共享目标解析未启用 Per-monitor-V2，却把物理像素传给 WindowFromPoint，导致空命中/误命中和反复重试。
+2. 解决：前台与指针 HWND 求值前统一启用并验证 Per-monitor-V2，与截图和输入坐标一致；不增加启动器特例或 UIA 产品回退。双进程夹具移到主屏右下高物理坐标，保留可信/不可信宿主反例。
+3. 位置：`src/utils/computerUse/platforms/win32.ts`、`tools/computer-use-host-target-e2e.ts`。定向 104/104、普通/管理员原生全套及真实双进程测试通过；真实启动器全局最小化用 switch_display+screenshot+left_click 共 3 次调用成功，独立审查 Approve。
+
+## 2026-11-14 Windows 通用宿主目标解析与授权（2.1.335）
+
+1. 问题：全局命中只看实际子进程，内嵌渲染器与启动器主程序身份不同会反复阻塞；前台和指针校验曾分叉，简单 owner 继承又会被伪造。
+2. 解决：前台与 WindowFromPoint 共用实际/根宿主 PID、exe 与信任解析；仅 GA_ROOT 父/根关系加真实进程祖先链可让宿主覆盖内嵌技术身份，owner 不参与授权。实际与宿主的显式拒绝和安装别名 policy deny 均优先，未知目标拒绝输入。共享 resolveTargetAccess 统一 read/click/full 判断。
+3. 位置：`src/utils/computerUse/{platforms/win32.ts,executor.ts}`、`packages/@ant/computer-use-mcp/src/{executor.ts,toolCalls.ts}`、`tools/computer-use-host-target-e2e.ts`。定向 104/104，普通/管理员原生全套通过；真实双进程正向可信点击与反向外部进程嵌入拒绝均通过，独立审查 Approve。
+
+## 2026-11-14 Windows 高完整性应用管理员助手（2.1.334）
+
+1. 问题：UAC 消失后，仍以高完整性级别运行的启动器受 UIPI 限制，普通 Computer Use 无法输入，绑定 PrintWindow 实测 Access denied；并非所有 UAC 应用都如此。新增助手还需避免取消后输入、授权切换、并发助手和孤儿进程。
+2. 解决：仅对已授权的高完整性目标请求一次常驻管理员 PowerShell，经同用户随机命名管道执行输入/窗口截图；普通目标保持本地执行。保留 30 秒人工 UAC 决策，补齐真实命中/准备后授权复核、事务串行化、取消传播、延迟键鼠释放。助手以父 PID+启动时间识别属主，并用异步管道等待确保强杀属主后退出。
+3. 位置：`src/utils/computerUse/{platforms/win32.ts,executor.ts,wrapper.tsx,win32/}`、`packages/@ant/computer-use-mcp/src/` 及原生夹具。最终定向 102/102；普通与真实管理员 WinForms 全套（截图、点击、拖拽、Unicode、滚轮、holdKey、computer_batch）均通过；强制结束属主后 broker 退出。多轮独立审查最终 Approve，无剩余 Critical/Important。
+
+## 2026-11-14 Windows UAC 等待与输入权限提示（2.1.331）
+
+1. 问题：Windows 提权提示会阻塞启动，旧流程没有回合级人工等待，也会在部分输入路径上把 UIPI 拒绝视作已发送。本机鸣潮快捷方式的入口是 `asInvoker`，真正的启动器和游戏主程序声明 `requireAdministrator`。
+2. 解决：按 Windows 登录会话检测 UAC，在 Computer Use 持锁期间跟踪 30 秒期限。由用户操作系统提示，超时中止回合并上报原因。提示结束后重新截图才可输入。检查绑定 HWND、全屏键盘前台和鼠标命中窗口的完整性级别。取消会中止启动子进程和重复键盘操作，鼠标清理等用户桌面恢复后再执行。
+3. 位置：`src/utils/computerUse/{wrapper.tsx,cleanup.ts,platforms/win32.ts,win32/}`、回合流与 MCP 调度。定向单测 152 项、CLI 版本冒烟和独立复审通过。WinForms 夹具首次通过，后续运行和基线均复现最小化后无法抢回前台。真实 UAC 验证允许后撤下提示、约 30.094 秒终止回合、无后续模型请求、可见停止原因和锁释放。真实提权窗口的绑定输入返回 UIPI，全屏键盘未在提权窗口位于前台时验证。
+
 ## 2026-11-13 Playwright 双浏览器与 Computer Use 开关（2.1.330）
 
 1. 问题：内置 Playwright 只有固定无头模式，模型和用户不能选择可见浏览器；Computer Use 没有关闭出口。审查发现模式选择提示词未从 `setup.ts` 导出，新增双服务还必须保留 `DOGE_PLAYWRIGHT_HEADLESS=0` 的旧可见行为。
@@ -31,33 +61,3 @@
 1. 问题：DeepSeek Harness 输入“你好，做个自我介绍”出现乱码；独立 Electron 与原生 EDIT 均复现，证明短文本 `WM_CHAR` 通道在中文环境不可靠，而非目标应用或更新器异常。
 2. 解决：所有 bound HWND 的直接文本输入统一经原前台守卫和 `SendInput + KEYEVENTF_UNICODE`，保留 Word COM、剪贴板、键鼠授权与释放语义；新增原生 EDIT 和独立 Chromium 真值验证，启动清空沙箱、预置旧真值与失效句柄也不能制造假通过。
 3. 位置：`src/utils/computerUse/{platforms/win32,win32/windowClassify}.ts`、`tools/{computer-use-win32-unicode-e2e,computer-use-chromium-unicode-e2e}.ts`、`computer_use.md`、`test_specification.md`。相关单测 56/56、两轮全量各 1082/0、逐文件隔离 141 文件 1030/0；原生中文短句、Chromium 中英文与 emoji 长文本及原 WinForms 18 项全部通过，独立复审 Approve。
-
-## 2026-11-12 Computer Use 截图展示与异常恢复补强（2.1.318）
-
-1. 问题：App 丢弃截图工具图片，通用原生异常缺少可执行恢复路径；批次中断丢失进度和图像，陈旧像素检查把未点击返回成成功，非有限坐标可穿透到原生层。
-2. 解决：直播与历史统一关联工具图片及单结果同级图像；按动作补充先截图、禁止盲重试的恢复提示，批次新增 `aborted/recovery` 并保留旧中断文案；非有限参数在副作用前拒绝，陈旧点击明确 `isError`。
-3. 位置：`packages/@ant/computer-use-mcp/src/{toolCalls,toolCalls.test}.ts`、`src/utils/computerUse/{setup,setup.test}.ts`、`computer_use.md`，邻仓 App `src/shared/chatHistoryUser.ts` 与 `ChatPane.tsx`。定向 50/50、两轮裸全量各 1082/0、逐文件隔离 141 文件 1030/0、只读实机截图/zoom/cursor/锁释放及隔离 WinForms 输入全通过；独立终审 Approve，安装版结果见邻仓日志。
-
-## 2026-11-12 全量测试跨文件状态污染与回归修复
-
-1. 问题：全量测试出现 17 项失败，涉及重试、模型/OAuth、启动配置、任务通知、记忆路径和滚轮，单文件与组合结果不同。
-2. 解决：逐项确认模块 mock、宿主 env、ALS/OAuthSession、global config/登录 Key/startup 缓存和记忆路径 memoize 污染；改用真实事件 tap、完整测试前后 reset、FD fixture 与 native/xterm.js 分支断言，未修改正常产品语义。
-3. 位置：`tools/{modelTestIsolation,teammate-transcript-progress,model-oauth-source,model-runtime-context,model-startup-context,run-isolated-tests}.ts`、相关测试文件。连续两次裸 `bun test` 均 1070/0，隔离器 140 文件 1029/0，多轮 review 通过，产物全部清理。
-
-## 2026-11-12 Windows Computer Use 可靠性、异常反馈与输入正确性修复
-
-1. 问题：CU 直调丢失 `isError`/超时/取消，批次丢失部分进度与图像，Windows 误报输入成功；双/三击、组合键、Unicode、滚动、多屏、授权身份与剪贴板恢复存在缺口。
-2. 解决：接入统一 MCP 生命周期与调用代际，保留结构化失败和顶层 sibling 图像；Windows 检查 PowerShell/Win32 错误及 PID/前台，修复输入原语、坐标几何、授权提示、剪贴板 stash/恢复和释放通道。
-3. 位置：`packages/@ant/computer-use-mcp/src/`、`src/services/{mcp,tools}/`、`src/utils/computerUse/`、`tools/computer-use{,-input-fixture}-e2e.ts`。定向测试、只读截图与隔离 WinForms 实机均通过；不宣称混合 DPI 或所有应用兼容。
-
-## 2026-11-12 Windows Computer Use Esc 生命周期修复（2.1.317）
-
-1. 问题：Windows Esc hook 消息循环未执行、named pipe 调用错误，注册提前返回且 helper 退出泄漏；模型合成 Escape 和子代理锁所有权也会干扰中止。
-2. 解决：安装可等待握手的原生 hook，以 generation/PID 隔离注册与连接，按 injected flag 忽略模型合成 Escape，后台子代理在加载原生模块前明确拒绝。
-3. 位置：`src/utils/computerUse/{escHotkey,executor,wrapper}.tsx/ts`、`src/utils/computerUse/win32/escHook.ts`。helper 13/13、真实 CLI 3/3、AgentTool 2/2 通过；物理安全桌面未实测，named pipe 信号链已实测。
-
-## 2026-10-31 App 长驻会话跨会话记忆链路与退出回收（2.1.315）
-
-1. 问题：外部 Bun 构建移除记忆提取模块，App 回合结束无法提取；主回合 abort 与进程退出可能丢失在途记忆。
-2. 解决：统一运行时门禁，App 以 `DOGE_HEADLESS_AUTO_MEMORY=1` 显式启用；禁用仍初始化 `MEMORY.md`，提取使用独立 AbortController 并在退出前 drain。
-3. 位置：`src/cli/print.ts`、`src/query/stopHooks.ts`、`src/utils/backgroundHousekeeping.ts`、`src/memdir/`、`src/services/extractMemories/`。聚焦测试 4/4、逐文件 989 pass、独立复审通过。

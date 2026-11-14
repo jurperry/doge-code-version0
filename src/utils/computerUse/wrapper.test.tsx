@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { McpToolCallError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, McpToolTimeoutError } from '../../services/mcp/toolCallLifecycle.js'
 import type { ToolUseContext } from '../../Tool.js'
 import { _test } from './wrapper.js'
+import { UacTimeoutError } from './win32/uacWait.js'
 
 const limits = { idleMs: 30, totalMs: 150, waitIntervalMs: 10 }
 
@@ -23,6 +24,31 @@ const parentMessage = {
 } as any
 
 describe('Computer Use production tool wrapper', () => {
+  test('a UAC deadline aborts the turn and its native operation, clearing UI status', async () => {
+    const context = contextFor()
+    const statuses: unknown[] = []
+    context.setSDKStatus = status => statuses.push(status)
+    let nativeSignal: AbortSignal | undefined
+    let entered = false
+    const result = await _test.callComputerUseTool({
+      dispatch: async (_name, _args, signal, _progress, beforeAction) => {
+        nativeSignal = signal
+        await beforeAction!()
+        entered = true
+        return new Promise(() => {})
+      },
+      toolName: 'open_application',
+      args: {},
+      context,
+      limits: { idleMs: 500, totalMs: 500, waitIntervalMs: 200 },
+      uacGuard: { probe: () => entered ? 'uac' : 'ready', timeoutMs: 12, intervalMs: 2 },
+    })
+    expect(result).toEqual({ data: undefined })
+    expect(context.abortController.signal.reason).toBeInstanceOf(UacTimeoutError)
+    expect(nativeSignal?.aborted).toBe(true)
+    expect(statuses).toEqual(['computer_use_uac', 'computer_use_uac_done'])
+  })
+
   test('turns MCP isError into the shared tool-call failure', async () => {
     await expect(_test.callComputerUseTool({
       dispatch: async () => ({

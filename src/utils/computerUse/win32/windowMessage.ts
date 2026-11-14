@@ -8,7 +8,7 @@
  * for the receiving window's DPI awareness, so no second manual scale is applied.
  */
 
-import { runPowerShellSync } from './powerShell.js'
+import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
 
 const WINMSG_TYPE = `
 Add-Type @'

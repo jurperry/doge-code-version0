@@ -497,10 +497,106 @@ async function resolveAppTier(
   return direct;
 }
 
+async function isExplicitlyDeniedTarget(
+  adapter: ComputerUseHostAdapter,
+  overrides: ComputerUseOverrides,
+  target: { bundleId: string; displayName: string },
+): Promise<boolean> {
+  if (isPolicyDenied(target.bundleId, target.displayName)) return true;
+  const platform = adapter.executor.capabilities.platform;
+  const targetId = normalizeAppId(platform, target.bundleId);
+  const deniedIds = new Set(overrides.userDeniedBundleIds.map(id => normalizeAppId(platform, id)));
+  if (deniedIds.has(targetId)) return true;
+  if (platform !== 'win32') return false;
+  const installed = await adapter.executor.listInstalledApps();
+  for (const app of installed) {
+    const aliases = [app.bundleId, app.path, ...(app.extraPaths ?? [])]
+      .map(alias => normalizeAppId(platform, alias));
+    if (!aliases.includes(targetId)) continue;
+    if (isPolicyDenied(app.bundleId, app.displayName)) return true;
+    if (aliases.some(alias => deniedIds.has(alias))) return true;
+  }
+  return false;
+}
+
+async function resolveTargetAccess(
+  adapter: ComputerUseHostAdapter,
+  overrides: ComputerUseOverrides,
+  target: {
+    bundleId: string;
+    displayName: string;
+    hostBundleId?: string;
+    hostDisplayName?: string;
+    hostTrusted?: boolean;
+  },
+): Promise<{ tier: CuAppPermTier | undefined; denied: boolean }> {
+  if (await isExplicitlyDeniedTarget(adapter, overrides, target)) return { tier: undefined, denied: true };
+  const platform = adapter.executor.capabilities.platform;
+  const targetId = normalizeAppId(platform, target.bundleId);
+  let tier = platform === 'win32'
+    ? await resolveAppTier(adapter, overrides, target)
+    : overrides.allowedApps.find(app => app.bundleId === target.bundleId)?.tier;
+
+  if (platform === 'win32' && target.hostBundleId && target.hostTrusted === true) {
+    const hostId = normalizeAppId(platform, target.hostBundleId);
+    if (hostId !== targetId) {
+      const host = { bundleId: target.hostBundleId, displayName: target.hostDisplayName ?? target.hostBundleId };
+      const hostTier = await isExplicitlyDeniedTarget(adapter, overrides, host)
+        ? undefined
+        : await resolveAppTier(adapter, overrides, host);
+      const rank = { read: 0, click: 1, full: 2 } as const;
+      if (hostTier !== undefined && (tier === undefined || rank[hostTier] > rank[tier])) tier = hostTier;
+    }
+  }
+  return { tier, denied: false };
+}
+
+async function runBoundTargetGate(
+  adapter: ComputerUseHostAdapter,
+  overrides: ComputerUseOverrides,
+): Promise<CuCallToolResult | null> {
+  const boundAppId = adapter.executor.getBoundAppId?.();
+  if (!boundAppId) return null;
+  const tier = await resolveAppTier(adapter, overrides, { bundleId: boundAppId });
+  if (tier !== undefined) return null;
+  return errorResult(
+    `The bound application "${boundAppId}" is no longer granted. Call open_application for an authorized app or switch_display("auto") before capturing or sending input.`,
+    "app_not_granted",
+  );
+}
+
 /** Every click/type/key/scroll/drag/move_mouse runs through this before
  * touching the executor. Returns null on pass, error-result on block.
  * Any throw inside → caught by handleToolCall's outer try → tool error. */
 async function runInputActionGates(
+  adapter: ComputerUseHostAdapter,
+  overrides: ComputerUseOverrides,
+  subGates: CuSubGates,
+  actionKind: CuActionKind,
+  prepareTarget = true,
+): Promise<CuCallToolResult | null> {
+  const gate = await runInputActionPermissionGates(adapter, overrides, subGates, actionKind);
+  if (gate) return gate;
+  if (prepareTarget) {
+    const boundBefore = adapter.executor.getBoundAppId?.() ?? null;
+    await adapter.executor.prepareForTarget?.(overrides.requestSignal);
+    if (adapter.executor.capabilities.platform === 'win32') {
+      const revisionChanged = overrides.boundRevision !== undefined && adapter.executor.getBoundRevision?.() !== overrides.boundRevision;
+      if (revisionChanged || (boundBefore !== null && !adapter.executor.getBoundAppId?.())) {
+        return errorResult(
+          "A newly started application replaced the bound target. No input was sent using the old window coordinates. Take a fresh full-display screenshot before continuing.",
+          "state_conflict",
+        );
+      }
+      const recheck = await runInputActionPermissionGates(adapter, overrides, subGates, actionKind);
+      if (recheck) return recheck;
+    }
+  }
+  throwIfActionAborted(overrides);
+  return null;
+}
+
+async function runInputActionPermissionGates(
   adapter: ComputerUseHostAdapter,
   overrides: ComputerUseOverrides,
   subGates: CuSubGates,
@@ -543,9 +639,16 @@ async function runInputActionGates(
   throwIfActionAborted(overrides);
 
   // After handleToolCall's tier backfill, every grant has a concrete tier.
-  const frontmostTier = frontmost
-    ? await resolveAppTier(adapter, overrides, frontmost)
-    : undefined;
+  const frontmostAccess = frontmost
+    ? await resolveTargetAccess(adapter, overrides, frontmost)
+    : { tier: undefined, denied: false };
+  const frontmostTier = frontmostAccess.tier;
+  if (frontmostAccess.denied && frontmost) {
+    return errorResult(
+      `"${frontmost.displayName}" is explicitly denied and is currently in front. No input was sent.`,
+      "app_not_granted",
+    );
+  }
 
   // Clipboard guard. Per-action, not per-tool-call — runs for every sub-action
   // inside computer_batch and teach_step/teach_batch, so clicking into a
@@ -666,28 +769,40 @@ async function runHitTestGate(
   y: number,
   actionKind: CuActionKind,
 ): Promise<CuCallToolResult | null> {
-  // Non-macOS: HWND-bound mode — clicks go to the bound window via
-  // SendMessage with window-relative coordinates. Hit-test against the
-  // real screen is meaningless.
-  if (adapter.executor.capabilities.screenshotFiltering === 'none') {
+  // Windows bound mode resolves appUnderPoint to the authorized binding;
+  // global mode performs a real WindowFromPoint hit-test. Other unfiltered
+  // platforms retain the frontmost-only fallback.
+  const platform = adapter.executor.capabilities.platform;
+  if (adapter.executor.capabilities.screenshotFiltering === 'none' && platform !== 'win32') {
     return null;
   }
 
   const target = await adapter.executor.appUnderPoint(x, y);
   throwIfActionAborted(overrides);
-  if (!target) return null; // desktop / nothing under point / platform no-op
+  if (!target) {
+    if (platform === 'win32') {
+      return errorResult(
+        "Windows could not identify the application under the pointer. No input was sent; take a fresh screenshot before retrying.",
+        "state_conflict",
+      );
+    }
+    return null;
+  }
 
   // Finder (desktop, file dialogs) is always clickable — same exemption as
   // runInputActionGates. Our own overlay is filtered by Swift (pid != self).
   if (target.bundleId === FINDER_BUNDLE_ID) return null;
 
-  const platform = adapter.executor.capabilities.platform;
-  const tierByBundleId = new Map(
-    overrides.allowedApps.map((a) => [normalizeAppId(platform, a.bundleId), a.tier] as const),
-  );
-  const targetId = normalizeAppId(platform, target.bundleId);
+  const access = await resolveTargetAccess(adapter, overrides, target);
+  if (access.denied) {
+    return errorResult(
+      `Click at these coordinates would land on "${target.displayName}", which is explicitly denied. No input was sent.`,
+      "app_not_granted",
+    );
+  }
+  const targetTier = access.tier;
 
-  if (!tierByBundleId.has(targetId)) {
+  if (targetTier === undefined) {
     // Not in the allowlist at all. The frontmost check would catch this if
     // the target were frontmost, but here a different app is in front. This
     // is the "something popped up" edge case — a new window appeared between
@@ -699,8 +814,6 @@ async function runHitTestGate(
       "app_not_granted",
     );
   }
-
-  const targetTier = tierByBundleId.get(targetId);
 
   // Frontmost-based sync (runInputActionGates) misses the case where
   // the click lands on a NON-FRONTMOST click-tier window. Re-sync by
@@ -2385,6 +2498,10 @@ async function handleScreenshot(
       "allowlist_empty",
     );
   }
+  const boundGate = await runBoundTargetGate(adapter, overrides);
+  if (boundGate) return boundGate;
+  throwIfActionAborted(overrides);
+  await adapter.executor.prepareForTarget?.(overrides.requestSignal);
   throwIfActionAborted(overrides);
 
   // Atomic resolve→prepare→capture (one Swift call, no scheduler gap).
@@ -2662,6 +2779,17 @@ async function handleZoom(
   const allowedIds = overrides.allowedApps.map((g) => g.bundleId);
   // Crop from the same display as lastScreenshot so the zoom region
   // matches the image the model is reading coords from.
+  const boundGate = await runBoundTargetGate(adapter, overrides);
+  if (boundGate) return boundGate;
+  throwIfActionAborted(overrides);
+  const boundBefore = adapter.executor.getBoundAppId?.() ?? null;
+  await adapter.executor.prepareForTarget?.(overrides.requestSignal);
+  if ((overrides.boundRevision !== undefined && adapter.executor.getBoundRevision?.() !== overrides.boundRevision) || (boundBefore !== null && !adapter.executor.getBoundAppId?.())) {
+    return errorResult(
+      "The bound capture target changed to a newly started application. Zoom was not performed on stale coordinates; take a fresh screenshot first.",
+      "state_conflict",
+    );
+  }
   throwIfActionAborted(overrides);
   const zoomed = await adapter.executor.zoom(
     regionLogical,
@@ -2837,7 +2965,7 @@ async function handleType(
 
   if (viaClipboard) {
     throwIfActionAborted(overrides);
-    await adapter.executor.type(text, { viaClipboard: true });
+    await adapter.executor.type(text, { viaClipboard: true }, overrides.requestSignal);
     return okText("Text pasted via clipboard; application effect is not verified.");
   }
 
@@ -2858,7 +2986,7 @@ async function handleType(
         } else if (run === "\t") {
           await adapter.executor.key("tab");
         } else {
-          await adapter.executor.type(run, { viaClipboard: false });
+          await adapter.executor.type(run, { viaClipboard: false }, overrides.requestSignal);
         }
         completed += segmentGraphemes(run).length;
       } catch (err) {
@@ -2885,7 +3013,7 @@ async function handleType(
     } else if (g === "\t") {
       await adapter.executor.key("tab");
     } else {
-      await adapter.executor.type(g, { viaClipboard: false });
+      await adapter.executor.type(g, { viaClipboard: false }, overrides.requestSignal);
     }
   }
   return okText(`Text input dispatched for ${graphemes.length} grapheme(s); application effect is not verified.`);
@@ -2939,7 +3067,7 @@ async function handleKey(
   if (gate) return gate;
 
   throwIfActionAborted(overrides);
-  await adapter.executor.key(keySequence, repeat);
+  await adapter.executor.key(keySequence, repeat, overrides.requestSignal);
   return okText("Key input dispatched; application effect is not verified.");
 }
 
@@ -3194,7 +3322,7 @@ async function handleOpenApplication(
 
   throwIfActionAborted(overrides);
   await releaseHeldMouse(adapter);
-  await adapter.executor.openApp(targetBundleId);
+  await adapter.executor.openApp(targetBundleId, overrides.requestSignal);
 
   // On multi-monitor setups, macOS may place the opened window on a monitor
   // the resolver won't pick (e.g. Claude + another allowed app are co-located
@@ -3493,7 +3621,7 @@ async function handleHoldKey(
 
   const keyNames = parseKeyChord(text);
   throwIfActionAborted(overrides);
-  await adapter.executor.holdKey(keyNames, duration * 1000);
+  await adapter.executor.holdKey(keyNames, duration * 1000, overrides.requestSignal);
   return okText("Key hold dispatched; application effect is not verified.");
 }
 
@@ -3569,7 +3697,7 @@ async function handleLeftMouseUp(
 
   let gate: CuCallToolResult | null;
   try {
-    gate = await runInputActionGates(adapter, overrides, subGates, "mouse");
+    gate = await runInputActionGates(adapter, overrides, subGates, "mouse", false);
   } catch (err) {
     await releaseFirst(errorResult(
       `Mouse release gate failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -3927,6 +4055,11 @@ async function dispatchAction(
   overrides: ComputerUseOverrides,
   subGates: CuSubGates,
 ): Promise<CuCallToolResult> {
+  // A mouse-up also handles release of an existing press after cancellation.
+  if (overrides.beforeAction && name !== "left_mouse_up") {
+    await overrides.beforeAction(name);
+    throwIfActionAborted(overrides);
+  }
   switch (name) {
     case "screenshot": {
       if (a.save_to_disk !== undefined && typeof a.save_to_disk !== "boolean") {

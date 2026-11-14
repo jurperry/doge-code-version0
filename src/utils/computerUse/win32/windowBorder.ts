@@ -10,7 +10,7 @@
  * - Falls back to no-op on older Windows or Electron-style frameless windows
  */
 
-import { runPowerShellSync } from './powerShell.js'
+import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
 
 function ps(script: string): string {
   return runPowerShellSync(script, 5000)

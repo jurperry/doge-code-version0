@@ -158,6 +158,8 @@ export type CompactProgressEvent =
   | { type: 'compact_end' }
 
 export type ToolUseContext = {
+  /** Main query controller, shared by child tool controllers in this turn. */
+  mainTurnAbortController?: AbortController
   options: {
     commands: Command[]
     debug: boolean

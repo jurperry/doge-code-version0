@@ -7,7 +7,8 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'fs'
 import { join } from 'path'
 
-const TMP_DIR = join(process.cwd(), 'test', 'tmp-cu-input-fixture')
+const ELEVATED = process.env.CU_FIXTURE_ELEVATED === '1'
+const TMP_DIR = join(process.cwd(), 'test', ELEVATED ? 'tmp-cu-input-fixture-elevated' : 'tmp-cu-input-fixture')
 const LOG_FILE = join(TMP_DIR, 'events.jsonl')
 const HWND_FILE = join(TMP_DIR, 'hwnd.txt')
 process.env.CLAUDE_CONFIG_DIR = join(TMP_DIR, 'config')
@@ -23,10 +24,7 @@ function check(label: string, ok: boolean, detail = ''): void {
   if (!ok) failures++
 }
 
-const fixtureScript = String.raw`
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing @'
+const fixtureCs = String.raw`
 using System;
 using System.IO;
 using System.Text;
@@ -71,6 +69,12 @@ public static class CuLog {
         File.AppendAllText(Environment.GetEnvironmentVariable("CU_FIXTURE_LOG"), line, new UTF8Encoding(false));
     }
 }
+`
+const fixtureScript = String.raw`
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing @'
+${fixtureCs}
 '@
 $form = New-Object CuFixtureForm
 $form.Text = 'Doge CU isolated input fixture'
@@ -78,6 +82,10 @@ $form.Width = 640
 $form.Height = 480
 $form.StartPosition = 'CenterScreen'
 [void]$form.Show()
+$lifetime = New-Object System.Windows.Forms.Timer
+$lifetime.Interval = 300000
+$lifetime.add_Tick({ $form.Close() })
+$lifetime.Start()
 [System.Windows.Forms.Application]::Run($form)
 `
 
@@ -98,24 +106,65 @@ async function waitFor(predicate: () => boolean, label: string, timeoutMs = 10_0
 }
 
 let proc: ReturnType<typeof Bun.spawn> | undefined
+let secondaryProc: ReturnType<typeof Bun.spawn> | undefined
+let secondaryPid = 0
+let fixturePid = 0
 let unbind: (() => void) | undefined
 try {
   mkdirSync(TMP_DIR, { recursive: true })
   clearEvents()
-  proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-STA', '-Command', fixtureScript], {
-    stdout: 'inherit',
-    stderr: 'inherit',
-    env: { ...process.env },
-  })
+  if (ELEVATED) {
+    const sourcePath = join(TMP_DIR, 'fixture.cs')
+    const fixturePath = join(TMP_DIR, 'fixture.exe')
+    const program = String.raw`
+public static class CuFixtureProgram {
+    [STAThread] public static void Main() {
+        var form = new CuFixtureForm();
+        form.Text = "Doge CU isolated input fixture";
+        form.Width = 640;
+        form.Height = 480;
+        form.StartPosition = FormStartPosition.CenterScreen;
+        form.Show();
+        var lifetime = new Timer { Interval = 300000 };
+        lifetime.Tick += (sender, args) => form.Close();
+        lifetime.Start();
+        Application.Run(form);
+    }
+}
+`
+    const elevatedCs = fixtureCs
+      .replaceAll('Environment.GetEnvironmentVariable("CU_FIXTURE_LOG")', JSON.stringify(LOG_FILE))
+      .replaceAll('Environment.GetEnvironmentVariable("CU_FIXTURE_HWND")', JSON.stringify(HWND_FILE))
+    writeFileSync(sourcePath, `${elevatedCs}\n${program}`, 'utf8')
+    const { runPowerShell, runPowerShellSync } = await import('../src/utils/computerUse/win32/powerShell.js')
+    runPowerShellSync(`
+$compiler = Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
+& $compiler /nologo /target:winexe /out:'${fixturePath.replace(/'/g, "''")}' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll '${sourcePath.replace(/'/g, "''")}'
+if ($LASTEXITCODE -ne 0) { throw 'Could not compile the elevated input fixture' }
+`, 20_000)
+    const rawPid = await runPowerShell(`Start-Process -FilePath '${fixturePath.replace(/'/g, "''")}' -Verb RunAs -PassThru -ErrorAction Stop | Select-Object -ExpandProperty Id`, 60_000)
+    fixturePid = Number(rawPid.trim())
+  } else {
+    proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-STA', '-Command', fixtureScript], {
+      stdout: 'inherit',
+      stderr: 'inherit',
+      env: { ...process.env },
+    })
+    fixturePid = proc.pid
+  }
+  if (!Number.isInteger(fixturePid) || fixturePid <= 0) throw new Error('Fixture did not return a process ID')
   await waitFor(() => existsSync(HWND_FILE) && readFileSync(HWND_FILE, 'utf8').trim().length > 0, 'fixture HWND')
 
-  const { bindWindow, unbindWindow, getBoundHwnd, platform } = await import('../src/utils/computerUse/platforms/win32.js')
+  const { bindWindow, unbindWindow, getBoundHwnd, platform, prepareWindowsTarget } = await import('../src/utils/computerUse/platforms/win32.js')
   const { ensureWindow } = await import('../src/utils/computerUse/win32/windowGuard.js')
-  const { runPowerShellSync } = await import('../src/utils/computerUse/win32/powerShell.js')
+  const { runPowerShellSync: runLocalPowerShellSync } = await import('../src/utils/computerUse/win32/powerShell.js')
+  const { runComputerUsePowerShellSync } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+  const runPowerShellSync = ELEVATED ? runComputerUsePowerShellSync : runLocalPowerShellSync
   const { createCliExecutor } = await import('../src/utils/computerUse/executor.js')
   const hwnd = Number(readFileSync(HWND_FILE, 'utf8').trim())
-  bindWindow(hwnd, proc.pid, undefined, 'fixture.app')
+  bindWindow(hwnd, fixturePid, undefined, 'fixture.app')
   unbind = unbindWindow
+  if (ELEVATED) await prepareWindowsTarget()
   const executor = createCliExecutor({
     getMouseAnimationEnabled: () => false,
     getHideBeforeActionEnabled: () => false,
@@ -247,7 +296,7 @@ public class CuFixtureMin {
 [CuFixtureMin]::IsIconic([IntPtr]${hwnd})
 `)
   check('minimized-window capture restores the original minimized state', minimizedShot.base64.length > 0 && minimized.trim() === 'True', minimized)
-  const activation = ensureWindow(hwnd, true, proc.pid)
+  const activation = ensureWindow(hwnd, true, fixturePid)
   check('fixture can be foregrounded again after minimized capture', activation.status === 'ok')
 
   clearEvents()
@@ -375,6 +424,8 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
 
   clearEvents()
   const globalClick = globalPoint(90, 100)
+  const hitTarget = platform.apps.getAppAtPoint?.(globalClick.x, globalClick.y)
+  check('global target resolver returns the actual/root window identity', !!hitTarget?.id.toLowerCase().endsWith(ELEVATED ? 'fixture.exe' : 'powershell.exe'), JSON.stringify(hitTarget))
   await executor.click(globalClick.x, globalClick.y, 'left', 1)
   await waitFor(() => events().some(e => e.kind === 'mousedown'), 'global click')
   const globalDown = events().find(e => e.kind === 'mousedown')
@@ -452,14 +503,50 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
     && events().some(e => e.kind === 'keydown' && e.detail === 'key=A;ctrl=True')
     && events().some(e => e.kind === 'keyup' && e.detail === 'key=ControlKey;ctrl=False')
     && batch.content.some(item => item.type === 'image'), JSON.stringify({ text: batchChars, events: events(), result: batch.content[0] }))
+
+  bindWindow(hwnd, fixturePid, undefined, 'fixture.app')
+  const previousBinding = getBoundHwnd()
+  if (ELEVATED) {
+    const secondaryPath = join(TMP_DIR, 'fixture.exe').replace(/'/g, "''")
+    const rawPid = runComputerUsePowerShellSync(`Start-Process -FilePath '${secondaryPath}' -PassThru | Select-Object -ExpandProperty Id`)
+    secondaryPid = Number(rawPid.trim())
+  } else {
+    secondaryProc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-STA', '-Command', fixtureScript], {
+      stdout: 'inherit', stderr: 'inherit', env: { ...process.env },
+    })
+    secondaryPid = secondaryProc.pid
+  }
+  await waitFor(() => platform.apps.listRunning().some(window => window.pid === secondaryPid), 'second application window')
+  const secondaryWindow = platform.apps.listRunning().find(window => window.pid === secondaryPid)!
+  const secondaryHwnd = Number(secondaryWindow.id)
+  let secondaryActivation = ensureWindow(secondaryHwnd, true, secondaryPid)
+  for (let i = 0; i < 3 && secondaryActivation.status !== 'ok'; i++) {
+    await Bun.sleep(300)
+    secondaryActivation = ensureWindow(secondaryHwnd, true, secondaryPid)
+  }
+  check('new application can be foregrounded before target transition', secondaryActivation.status === 'ok', JSON.stringify(secondaryActivation))
+  await prepareWindowsTarget()
+  check('a newly started foreground application releases the previous binding', previousBinding === hwnd && getBoundHwnd() === null, JSON.stringify({ previousBinding, current: getBoundHwnd(), secondaryPid }))
 } catch (error) {
   failures++
   console.error('[FAIL] fixture e2e threw:', error)
 } finally {
   try { unbind?.() } catch {}
+  if (secondaryProc) {
+    try { secondaryProc.kill() } catch {}
+    await secondaryProc.exited
+  }
   if (proc) {
     try { proc.kill() } catch {}
     await proc.exited
+  }
+  if (ELEVATED) {
+    const { ensureElevatedPowerShell, runComputerUsePowerShellSync, stopElevatedPowerShell } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+    if (fixturePid > 0) {
+      try { await ensureElevatedPowerShell() } catch {}
+      try { runComputerUsePowerShellSync(`Stop-Process -Id ${fixturePid},${secondaryPid} -Force -ErrorAction SilentlyContinue`) } catch {}
+    }
+    await stopElevatedPowerShell()
   }
   rmSync(TMP_DIR, { recursive: true, force: true })
 }

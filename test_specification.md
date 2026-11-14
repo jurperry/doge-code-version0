@@ -154,6 +154,9 @@ next.customApiEndpoint = undefined
 - 只读 e2e：`bun tools/computer-use-e2e.ts`，覆盖 ListTools、真实截图、save_to_disk、zoom、cursor 和锁释放。
 - 隔离输入 e2e：`bun tools/computer-use-input-fixture-e2e.ts`，使用脚本自己创建、绑定并关闭的 WinForms fixture。
 - 中文输入与批次 e2e：`bun tools/computer-use-win32-unicode-e2e.ts` 通过真实 `computer_batch` 执行原生 EDIT 中文输入和批次内截图，逐字核对控件内容并检查返回图像；`bun tools/computer-use-chromium-unicode-e2e.ts` 独立验证 Electron 输入框的中英文与长 Unicode 文本。
+- UAC 与管理员助手：`bun test tools/computer-use-uac.test.ts src/utils/computerUse/win32/elevatedPowerShell.test.ts` 覆盖人工等待/超时、传输、取消、普通目标切回与强杀属主回收；`CU_FIXTURE_ELEVATED=1 bun tools/computer-use-input-fixture-e2e.ts` 使用真实管理员夹具，UAC 必须由用户处理。
+- 可信宿主与高物理坐标：`bun tools/computer-use-host-target-e2e.ts` 使用真实不同 PID/exe 的内嵌窗口，验证进程树可信时可由宿主授权、外部进程嵌入不得继承权限；宿主置于主屏右下高物理坐标，防止 DPI 命中回归。
+- 自动解绑与坐标代际：纯函数及 `mcpServer.test.ts` 覆盖新进程接管、后台绑定保留、当前输入拒绝、并发解绑只清一次、旧 revision 延迟截图不得覆盖新锚点；原生夹具实际启动第二进程验证旧绑定解除。
 - 不得复用用户的记事本、浏览器、IDE、文档或其他已有窗口。
 - 不得在测试中进行真实系统级破坏性操作、关闭用户应用或覆盖用户剪贴板。
 - 测试窗口、临时图片、配置和进程必须清理。

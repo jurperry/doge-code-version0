@@ -38,6 +38,8 @@ Guidance:
 - Read tool errors before retrying. A batch, type action, or timeout may be partially completed or have an unknown outcome; inspect the current screen instead of blindly replaying side effects.
 - On an error, stop the current action sequence and read the exact failure before issuing more input. For target/foreground failures, call open_application for an already authorized app and take a fresh screenshot; for capture failures, never click using stale coordinates.
 - computer_batch stops at the first failure. Use completed, failed or aborted, remaining, and recovery to understand the boundary; inspect the screen and perform only missing actions instead of replaying the batch.
+- On Windows, never automate the secure UAC prompt. The user handles it directly; after any prompt clears, call screenshot as a standalone tool before resuming input. When an authorized target has a higher integrity level, Computer Use may ask once for a persistent administrator helper so later capture, click, drag, type, key and batch actions can run normally. If helper setup fails, report the error instead of switching to another injection method.
+- If a newly started application takes the foreground, treat it as a target change: inspect the fresh screenshot, then open_application or request_access for that actual application before more input. Never use shell scripts to bypass Computer Use target or permission gates, and never mix coordinates from custom captures with Computer Use screenshots.
 - If the user declines request_access, do not show the same dialog again. Choose a non-Computer-Use approach or ask the user to perform the action.
 </computer-use-availability>`
 

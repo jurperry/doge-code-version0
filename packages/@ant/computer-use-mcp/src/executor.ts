@@ -20,11 +20,19 @@ export interface ScreenshotResult {
   displayId?: number
   /** Avoid a second native enumeration just for screenshot notes. */
   displayCount?: number
+  targetRevision?: number
 }
 
 export interface FrontmostApp {
   bundleId: string
   displayName: string
+  hostBundleId?: string
+  hostDisplayName?: string
+  pid?: number
+  hostPid?: number
+  hostTrusted?: boolean
+  startedAt?: number
+  hostStartedAt?: number
 }
 
 export interface InstalledApp {
@@ -86,9 +94,9 @@ export interface ComputerExecutor {
     displayId?: number,
     captureOrigin?: { x: number; y: number },
   ): Promise<{ base64: string; width: number; height: number }>
-  key(keySequence: string, repeat?: number): Promise<void>
-  holdKey(keyNames: string[], durationMs: number): Promise<void>
-  type(text: string, opts: { viaClipboard: boolean }): Promise<void>
+  key(keySequence: string, repeat?: number, signal?: AbortSignal): Promise<void>
+  holdKey(keyNames: string[], durationMs: number, signal?: AbortSignal): Promise<void>
+  type(text: string, opts: { viaClipboard: boolean }, signal?: AbortSignal): Promise<void>
   readClipboard(): Promise<string>
   writeClipboard(text: string): Promise<void>
   moveMouse(x: number, y: number): Promise<void>
@@ -107,15 +115,19 @@ export interface ComputerExecutor {
     to: { x: number; y: number },
   ): Promise<void>
   scroll(x: number, y: number, dx: number, dy: number): Promise<void>
+  /** Match the execution context to the authorized Windows target when UIPI requires it. */
+  prepareForTarget?(signal?: AbortSignal): Promise<void>
+  getBoundAppId?(): string | null
+  getBoundRevision?(): number | undefined
   getFrontmostApp(): Promise<FrontmostApp | null>
   appUnderPoint(
     x: number,
     y: number,
-  ): Promise<{ bundleId: string; displayName: string } | null>
+  ): Promise<FrontmostApp | null>
   listInstalledApps(): Promise<InstalledApp[]>
   getAppIcon(path: string): Promise<string | undefined>
   listRunningApps(): Promise<RunningApp[]>
-  openApp(bundleId: string): Promise<void>
+  openApp(bundleId: string, signal?: AbortSignal): Promise<void>
   /** Windows: leave HWND-bound mode and use display/global coordinates. */
   unbindApp?(): Promise<void>
 }

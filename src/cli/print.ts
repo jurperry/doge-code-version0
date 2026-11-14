@@ -383,6 +383,7 @@ import { stopTask } from '../tasks/stopTask.js'
 import { isWorkflowStepChild } from '../tools/WorkflowTool/stepChildEnv.js'
 import { pendingShellKills } from '../tasks/LocalShellTask/killShellTasks.js'
 import { drainSdkEvents } from '../utils/sdkEventQueue.js'
+import { UacTimeoutError } from '../utils/computerUse/win32/uacWait.js'
 import { initializeGrowthBook } from '../services/analytics/growthbook.js'
 import { errorMessage, toError } from '../utils/errors.js'
 import { sleep } from '../utils/sleep.js'
@@ -982,7 +983,9 @@ export async function runHeadless(
           )
           break
         case 'error_during_execution':
-          writeToStdout(`Execution error`)
+          writeToStdout(lastMessage.errors.length === 1 && lastMessage.stop_reason === 'computer_use_uac_timeout'
+            ? lastMessage.errors[0]!
+            : 'Execution error')
           break
         case 'error_max_turns':
           writeToStdout(`Error: Reached max turns (${options.maxTurns})`)
@@ -2342,6 +2345,7 @@ function runHeadlessStreaming(
                 const currentState = getAppState()
                 if (
                   !isWorkflowStepChild() &&
+                  !(abortController?.signal.reason instanceof UacTimeoutError) &&
                   getRunningTasks(currentState).some(
                     t =>
                       (t.type === 'local_agent' ||

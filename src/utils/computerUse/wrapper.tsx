@@ -25,6 +25,7 @@ import { mcpToolCallLimits, McpToolCallError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILE
 import type { AssistantMessage } from '../../types/message.js';
 import type { Tool, ToolCallProgress, ToolUseContext } from '../../Tool.js';
 import { logForDebugging } from '../debug.js';
+import { createSystemMessage } from '../messages.js';
 import { isAutoBypassActive } from '../permissions/autoBypass.js';
 import { buildAutoGrantResponse } from './autoGrant.js';
 import { checkComputerUseLock, tryAcquireComputerUseLock } from './computerUseLock.js';
@@ -33,6 +34,7 @@ import { registerEscHotkey } from './escHotkey.js';
 import { getChicagoCoordinateMode } from './gates.js';
 import { getComputerUseHostAdapter } from './hostAdapter.js';
 import { getComputerUseMCPRenderingOverrides } from './toolRendering.js';
+import { getTurnUacGuard, runWithUacGuard, UAC_FRESH_SCREENSHOT, UAC_WAIT_MESSAGE, UacTimeoutError } from './win32/uacWait.js';
 type CallOverride = Pick<Tool, 'call'>['call'];
 type Binding = {
   ctx: ComputerUseSessionContext;
@@ -41,6 +43,7 @@ type Binding = {
     args: unknown,
     requestSignal?: AbortSignal,
     reportProgress?: (progress: CuToolProgress) => void,
+    beforeAction?: (action: string) => Promise<void>,
   ) => Promise<CuCallToolResult>;
 };
 
@@ -59,6 +62,9 @@ type Binding = {
  */
 let binding: Binding | undefined;
 let currentToolUseContext: ToolUseContext | undefined;
+// The dispatcher keeps its screenshot across turn boundaries. UAC invalidates
+// those coordinates until a new standalone screenshot has finished.
+let needsScreenshotAfterUac = false;
 function tuc(): ToolUseContext {
   // Safe: `binding` is only populated when `currentToolUseContext` is set.
   // Called only from within `ctx` callbacks, which only fire during dispatch.
@@ -283,6 +289,7 @@ type CallComputerUseToolOptions = {
   parentMessage?: AssistantMessage;
   onProgress?: ToolCallProgress;
   limits?: McpCallLimits;
+  uacGuard?: Parameters<typeof runWithUacGuard>[3];
 };
 
 function extractToolUseId(message: AssistantMessage | undefined): string | undefined {
@@ -299,11 +306,19 @@ async function callComputerUseTool({
   parentMessage,
   onProgress,
   limits,
+  uacGuard,
 }: CallComputerUseToolOptions) {
   currentToolUseContext = context;
   const toolUseID = extractToolUseId(parentMessage);
   const emit = (data: Record<string, unknown>): void => {
     if (toolUseID) onProgress?.({ toolUseID, data });
+  };
+  const showUacWaiting = (waiting: boolean) => {
+    context.setSDKStatus?.(waiting ? 'computer_use_uac' : 'computer_use_uac_done');
+    if (waiting) {
+      needsScreenshotAfterUac = true;
+      context.appendSystemMessage?.(createSystemMessage(UAC_WAIT_MESSAGE, 'info'));
+    }
   };
   try {
     const { telemetry, ...result } = await runMcpToolCall({
@@ -311,7 +326,37 @@ async function callComputerUseTool({
       serverName: COMPUTER_USE_MCP_SERVER_NAME,
       toolName,
       limits,
-      invoke: (requestSignal, reportProgress) => dispatch(toolName, args, requestSignal, reportProgress),
+      invoke: async (requestSignal, reportProgress) => {
+        if (!uacGuard) return dispatch(toolName, args, requestSignal, reportProgress);
+        const turn = context.mainTurnAbortController;
+        if (!turn) {
+          return runWithUacGuard(requestSignal, showUacWaiting,
+            (beforeAction, signal) => dispatch(toolName, args, signal, reportProgress, beforeAction), uacGuard);
+        }
+        const guard = getTurnUacGuard(turn, showUacWaiting, uacGuard);
+        let captureGeneration: number | undefined;
+        let result: CuCallToolResult;
+        try {
+          result = await dispatch(toolName, args, requestSignal, reportProgress, async action => {
+            const refreshesTarget = action === 'screenshot' || action === 'open_application' || action === 'switch_display';
+            await guard.beforeAction(requestSignal);
+            if (process.platform === 'win32') {
+              const { releaseWindowsMouseAfterTurn } = await import('./platforms/win32.js');
+              await releaseWindowsMouseAfterTurn();
+            }
+            if (needsScreenshotAfterUac && !refreshesTarget) {
+              throw new Error(UAC_FRESH_SCREENSHOT);
+            }
+            if (toolName === 'screenshot') captureGeneration = guard.generation;
+          });
+        } finally {
+          await guard.afterAction(requestSignal);
+        }
+        if (captureGeneration !== undefined && captureGeneration === guard.generation && !result.isError) {
+          needsScreenshotAfterUac = false;
+        }
+        return result;
+      },
       onProgress: progress => emit({
         type: 'mcp_progress',
         status: 'progress',
@@ -364,6 +409,10 @@ async function callComputerUseTool({
 
     return { data };
   } catch (error) {
+    if (error instanceof UacTimeoutError) {
+      context.abortController.abort(error);
+      return { data: undefined };
+    }
     if (context.abortController.signal.aborted && error instanceof Error && error.name === 'AbortError') {
       return { data: undefined };
     }
@@ -386,6 +435,9 @@ export function getComputerUseMCPToolOverrides(toolName: string): ComputerUseMCP
       context,
       parentMessage,
       onProgress,
+      uacGuard: process.platform === 'win32'
+        ? { probe: (await import('./win32/uacProbe.js')).desktopState }
+        : undefined,
     });
   };
   return {

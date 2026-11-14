@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { _test as inputSemantics } from './platforms/win32.js'
+import { _test as inputSemantics, captureScreenForApi, platform, unbindWindow } from './platforms/win32.js'
 import { _test as messageSemantics } from './win32/windowMessage.js'
 
 describe('Windows input planning', () => {
@@ -72,5 +72,44 @@ describe('Windows geometry', () => {
       { width: 1280, height: 720, displayId: 1, originX: 0, originY: 0, scaleFactor: 1 },
     ])
     expect(() => inputSemantics.parseDisplayEntries('bad-entry')).toThrow('Invalid display metadata entry')
+  })
+})
+
+
+describe('Windows bound-target transitions', () => {
+  test('only a newly started different foreground process leaves the old binding', () => {
+    const leave = inputSemantics.shouldLeaveBoundForNewForeground
+    expect(leave(10, 1000, { id: 'new', appName: 'new', pid: 20, startedAt: 2000 })).toBe(true)
+    expect(leave(10, 1000, { id: 'old', appName: 'old', pid: 20, startedAt: 500 })).toBe(false)
+    expect(leave(10, 1000, { id: 'same', appName: 'same', pid: 10, startedAt: 2000 })).toBe(false)
+    expect(leave(10, 1000, { id: 'unknown', appName: 'unknown', pid: 20, startedAt: 0 })).toBe(false)
+    expect(leave(null, 1000, { id: 'new', appName: 'new', pid: 20, startedAt: 2000 })).toBe(false)
+    expect(leave(10, 1000, {
+      id: 'renderer', appName: 'renderer', pid: 30, startedAt: 3000,
+      hostId: 'host', hostName: 'host', hostPid: 10, hostStartedAt: 500,
+    })).toBe(false)
+  })
+})
+
+
+describe('Windows capture revisions', () => {
+  test('a capture is discarded if the binding changes while it is pending', async () => {
+    const original = platform.screenshot.captureScreen
+    let finish!: () => void
+    platform.screenshot.captureScreen = async () => new Promise(resolve => {
+      finish = () => resolve({
+        base64: Buffer.alloc(2048, 1).toString('base64'),
+        width: 100, height: 100, displayWidth: 100, displayHeight: 100,
+        originX: 0, originY: 0,
+      })
+    })
+    try {
+      const pending = captureScreenForApi()
+      unbindWindow()
+      finish()
+      await expect(pending).rejects.toThrow(/target changed.*old image was discarded/i)
+    } finally {
+      platform.screenshot.captureScreen = original
+    }
   })
 })

@@ -96,6 +96,7 @@ export function bindSessionContext(
   args: unknown,
   requestSignal?: AbortSignal,
   reportProgress?: (progress: CuToolProgress) => void,
+  beforeAction?: (action: string) => Promise<void>,
 ) => Promise<CuCallToolResult> {
   const { logger, serverName } = adapter;
 
@@ -104,6 +105,7 @@ export function bindSessionContext(
   let lastScreenshot: ScreenshotResult | undefined;
   let callGeneration = 0;
   let targetGeneration = 0;
+  let lastHandledBoundRevision = 0;
   let targetChangesPending = 0;
   let activeCalls = 0;
 
@@ -155,8 +157,9 @@ export function bindSessionContext(
       }
     : undefined;
 
-  return async (name, args, requestSignal, reportProgress) => {
+  return async (name, args, requestSignal, reportProgress, beforeAction) => {
     const ticket = ++callGeneration;
+    const boundRevision = adapter.executor.getBoundRevision?.();
     const throwIfAborted = (): void => {
       if (requestSignal?.aborted || ctx.isAborted?.()) {
         throw new DOMException("Computer Use call aborted before new side effects", "AbortError");
@@ -256,6 +259,9 @@ export function bindSessionContext(
       acquireCuLock: undefined,
       isAborted: () => requestSignal?.aborted === true || ctx.isAborted?.() === true,
       reportProgress,
+      beforeAction,
+      requestSignal,
+      boundRevision,
     };
 
     logger.debug(
@@ -275,13 +281,22 @@ export function bindSessionContext(
       targetGeneration++;
       targetChangesPending++;
     }
-    const callTargetGeneration = targetGeneration;
+    let callTargetGeneration = targetGeneration;
     activeCalls++;
     try {
       throwIfAborted();
       const result = await handleToolCall(adapter, name, args, overrides);
+      const currentBoundRevision = adapter.executor.getBoundRevision?.();
+      const automaticallyUnbound = !changesTarget && boundRevision !== undefined && currentBoundRevision !== undefined && currentBoundRevision !== boundRevision && currentBoundRevision > lastHandledBoundRevision && !adapter.executor.getBoundAppId?.();
+      if (automaticallyUnbound) {
+        lastHandledBoundRevision = currentBoundRevision;
+        targetGeneration++;
+        callTargetGeneration = targetGeneration;
+        lastScreenshot = undefined;
+        ctx.onScreenshotCleared?.();
+      }
 
-      if (result.screenshot && ticket === callGeneration && callTargetGeneration === targetGeneration && targetChangesPending === 0 && !requestSignal?.aborted && !ctx.isAborted?.()) {
+      if (result.screenshot && (result.screenshot.targetRevision === undefined || result.screenshot.targetRevision === adapter.executor.getBoundRevision?.()) && ticket === callGeneration && callTargetGeneration === targetGeneration && targetChangesPending === 0 && !requestSignal?.aborted && !ctx.isAborted?.()) {
         lastScreenshot = result.screenshot;
         const { base64: _blob, ...dims } = result.screenshot;
         logger.debug(`[${serverName}] screenshot dims: ${JSON.stringify(dims)}`);

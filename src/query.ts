@@ -104,6 +104,7 @@ import { applyToolResultBudget } from './utils/toolResultStorage.js'
 import { recordContentReplacement } from './utils/sessionStorage.js'
 import { handleStopHooks } from './query/stopHooks.js'
 import { buildQueryConfig } from './query/config.js'
+import { stopTurnUacGuard, UacTimeoutError, waitForTurnUac } from './utils/computerUse/win32/uacWait.js'
 import { productionDeps, type QueryDeps } from './query/deps.js'
 import { RetryBudget } from './services/api/withRetry.js'
 import type { Terminal, Continue } from './query/transitions.js'
@@ -235,7 +236,16 @@ export async function* query(
   Terminal
 > {
   const consumedCommandUuids: string[] = []
-  const terminal = yield* queryLoop(params, consumedCommandUuids)
+  const turn = params.toolUseContext.abortController
+  let terminal: Terminal
+  try {
+    terminal = yield* queryLoop({
+      ...params,
+      toolUseContext: { ...params.toolUseContext, mainTurnAbortController: turn },
+    }, consumedCommandUuids)
+  } finally {
+    if (!params.toolUseContext.agentId) stopTurnUacGuard(turn.signal)
+  }
   // Only reached if queryLoop returned normally. Skipped on throw (error
   // propagates through yield*) and on .return() (Return completion closes
   // both generators). This gives the same asymmetric started-without-completed
@@ -1037,6 +1047,18 @@ async function* queryLoop(
       )
     }
 
+    // A UAC request raised after the previous tool can still be waiting when
+    // the model finishes. Keep the turn alive until the user or deadline wins.
+    if (!toolUseContext.agentId && !toolUseContext.abortController.signal.aborted) {
+      const signal = toolUseContext.abortController.signal
+      try {
+        await waitForTurnUac(signal)
+      } catch (error) {
+        if (error instanceof UacTimeoutError) toolUseContext.abortController.abort(error)
+        else if (!signal.aborted) throw error
+      }
+    }
+
     // We need to handle a streaming abort before anything else.
     // When using streamingToolExecutor, we must consume getRemainingResults() so the
     // executor can generate synthetic tool_result blocks for queued/in-progress tools.
@@ -1072,7 +1094,10 @@ async function* queryLoop(
 
       // Skip the interruption message for submit-interrupts — the queued
       // user message that follows provides sufficient context.
-      if (toolUseContext.abortController.signal.reason !== 'interrupt') {
+      const abortReason = toolUseContext.abortController.signal.reason
+      if (abortReason instanceof UacTimeoutError) {
+        yield createSystemMessage(abortReason.message, 'error')
+      } else if (abortReason !== 'interrupt') {
         yield createUserInterruptionMessage({
           toolUse: false,
         })
@@ -1555,14 +1580,17 @@ async function* queryLoop(
       }
       // Skip the interruption message for submit-interrupts — the queued
       // user message that follows provides sufficient context.
-      if (toolUseContext.abortController.signal.reason !== 'interrupt') {
+      const abortReason = toolUseContext.abortController.signal.reason
+      if (abortReason instanceof UacTimeoutError) {
+        yield createSystemMessage(abortReason.message, 'error')
+      } else if (abortReason !== 'interrupt') {
         yield createUserInterruptionMessage({
           toolUse: true,
         })
       }
       // Check maxTurns before returning when aborted
       const nextTurnCountOnAbort = turnCount + 1
-      if (maxTurns && nextTurnCountOnAbort > maxTurns) {
+      if (!(abortReason instanceof UacTimeoutError) && maxTurns && nextTurnCountOnAbort > maxTurns) {
         yield createAttachmentMessage({
           type: 'max_turns_reached',
           maxTurns,

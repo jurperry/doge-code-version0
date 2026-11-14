@@ -376,6 +376,9 @@ export interface ComputerUseSessionContext {
  * store, not the server.
  */
 export interface ComputerUseOverrides {
+  beforeAction?: (action: string) => Promise<void>;
+  requestSignal?: AbortSignal;
+  boundRevision?: number;
   allowedApps: AppGrant[];
   grantFlags: CuGrantFlags;
   coordinateMode: CoordinateMode;

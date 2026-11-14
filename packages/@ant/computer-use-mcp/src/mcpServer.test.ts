@@ -236,10 +236,16 @@ describe('bindSessionContext request cancellation', () => {
   test('an in-flight input blocks a target change instead of using stale coordinates', async () => {
     let finishGate: (() => void) | undefined
     let unbinds = 0
+    let gateResolved = false
     const dispatch = bindSessionContext(adapter({
-      getFrontmostApp: () => new Promise(resolve => {
-        finishGate = () => resolve({ bundleId: 'app.test', displayName: 'Test' })
-      }),
+      getFrontmostApp: () => gateResolved
+        ? Promise.resolve({ bundleId: 'app.test', displayName: 'Test' })
+        : new Promise(resolve => {
+          finishGate = () => {
+            gateResolved = true
+            resolve({ bundleId: 'app.test', displayName: 'Test' })
+          }
+        }),
       unbindApp: async () => { unbinds++ },
     }), 'pixels', context({ onDisplayPinned: () => {} }))
     const input = dispatch('mouse_move', { coordinate: [1, 1] })
@@ -252,6 +258,91 @@ describe('bindSessionContext request cancellation', () => {
     const switched = await dispatch('switch_display', { display: 'auto' })
     expect(switched.isError).toBeUndefined()
     expect(unbinds).toBe(1)
+  })
+
+  test('automatic unbind blocks the current input and resets the coordinate anchor', async () => {
+    const events: Array<number | string> = []
+    let bound: string | null = 'app.test'
+    let revision = 1
+    let transition = false
+    let clicks = 0
+    const dispatch = bindSessionContext(adapter({
+      getBoundAppId: () => bound,
+      getBoundRevision: () => revision,
+      prepareForTarget: async () => { if (transition) { bound = null; revision++; transition = false } },
+      getFrontmostApp: async () => ({ bundleId: 'app.test', displayName: 'Test' }),
+      click: async () => { clicks++ },
+      screenshot: async () => ({
+        base64: Buffer.alloc(2048, 1).toString('base64'),
+        width: 100, height: 100, displayWidth: 100, displayHeight: 100,
+        originX: 0, originY: 0, displayId: 0,
+      }),
+    }), 'pixels', context({
+      onScreenshotCaptured: dims => events.push(dims.width),
+      onScreenshotCleared: () => events.push('cleared'),
+    }))
+    await dispatch('screenshot', {})
+    transition = true
+    const click = await dispatch('left_click', { coordinate: [20, 20] })
+    expect(click.telemetry?.error_kind).toBe('state_conflict')
+    expect(clicks).toBe(0)
+    expect(events).toEqual([100, 'cleared'])
+    expect((await dispatch('screenshot', {})).isError).toBeUndefined()
+    expect(events).toEqual([100, 'cleared', 100])
+  })
+
+  test('concurrent unbind rejects old input and rejects stale screenshot revisions', async () => {
+    const events: Array<number | string> = []
+    let bound: string | null = 'app.test'
+    let revision = 1
+    let transition = false
+    let clicks = 0
+    let gateUsed = false
+    let finishGate: (() => void) | undefined
+    let finishStale: (() => void) | undefined
+    let staleCapture = false
+    const makeShot = () => ({
+      base64: Buffer.alloc(2048, 1).toString('base64'),
+      width: 100, height: 100, displayWidth: 100, displayHeight: 100,
+      originX: 0, originY: 0, displayId: 0, targetRevision: revision,
+    })
+    const dispatch = bindSessionContext(adapter({
+      getBoundAppId: () => bound,
+      getBoundRevision: () => revision,
+      prepareForTarget: async () => { if (transition) { bound = null; revision++; transition = false } },
+      getFrontmostApp: () => {
+        if (gateUsed) return Promise.resolve({ bundleId: 'app.test', displayName: 'Test' })
+        return new Promise(resolve => {
+          gateUsed = true
+          finishGate = () => resolve({ bundleId: 'app.test', displayName: 'Test' })
+        })
+      },
+      click: async () => { clicks++ },
+      screenshot: () => {
+        if (staleCapture) return new Promise(resolve => { finishStale = () => resolve({ ...makeShot(), targetRevision: 1 }) })
+        return Promise.resolve(makeShot())
+      },
+    }), 'pixels', context({
+      onScreenshotCaptured: dims => events.push(dims.width),
+      onScreenshotCleared: () => events.push('cleared'),
+    }))
+    await dispatch('screenshot', {})
+    const input = dispatch('left_click', { coordinate: [20, 20] })
+    for (let i = 0; i < 100 && !finishGate; i++) await Bun.sleep(1)
+    transition = true
+    expect((await dispatch('screenshot', {})).isError).toBeUndefined()
+    expect(events).toEqual([100, 'cleared', 100])
+    finishGate!()
+    expect((await input).telemetry?.error_kind).toBe('state_conflict')
+    expect(clicks).toBe(0)
+    expect(events).toEqual([100, 'cleared', 100])
+
+    staleCapture = true
+    const stale = dispatch('screenshot', {})
+    for (let i = 0; i < 100 && !finishStale; i++) await Bun.sleep(1)
+    finishStale!()
+    expect((await stale).isError).toBeUndefined()
+    expect(events).toEqual([100, 'cleared', 100])
   })
 
   test('open_application failure still invalidates the previous target anchor', async () => {

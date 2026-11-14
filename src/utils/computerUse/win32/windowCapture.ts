@@ -7,7 +7,7 @@
  * corner of that physical bitmap; only those captures are normalized.
  */
 
-import { runPowerShellSync } from './powerShell.js'
+import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
 
 const NORMALIZE_UNAWARE_CAPTURE_CS = `
     static void GetCaptureDpi(IntPtr hwnd, out uint dpiX, out uint dpiY) {

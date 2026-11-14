@@ -5,6 +5,7 @@ import { errorMessage } from '../errors.js'
 import { withResolvers } from '../withResolvers.js'
 import { isLockHeldLocally, releaseComputerUseLock } from './computerUseLock.js'
 import { unregisterEscHotkey } from './escHotkey.js'
+import { stopTurnUacGuard } from './win32/uacWait.js'
 
 // cu.apps.unhide is NOT one of the four @MainActor methods wrapped by
 // drainRunLoop's 30s backstop. On abort paths (where the user hit Ctrl+C
@@ -30,7 +31,7 @@ const UNHIDE_TIMEOUT_MS = 5000
 export async function cleanupComputerUseAfterTurn(
   ctx: Pick<
     ToolUseContext,
-    'getAppState' | 'setAppState' | 'sendOSNotification'
+    'getAppState' | 'setAppState' | 'sendOSNotification' | 'mainTurnAbortController'
   >,
   restoreClipboard: (text: string) => Promise<void> = async text => {
     const { restoreComputerUseClipboard } = await import('./executor.js')
@@ -38,6 +39,7 @@ export async function cleanupComputerUseAfterTurn(
   },
   restoreTimeoutMs = UNHIDE_TIMEOUT_MS,
 ): Promise<void> {
+  if (ctx.mainTurnAbortController) stopTurnUacGuard(ctx.mainTurnAbortController.signal)
   const appState = ctx.getAppState()
 
   const clipboardStash = appState.computerUseMcpState?.clipboardStash
@@ -95,6 +97,15 @@ export async function cleanupComputerUseAfterTurn(
   // Zero-syscall pre-check so non-CU turns don't touch disk. Release is still
   // idempotent (returns false if already released or owned by another session).
   if (!isLockHeldLocally()) return
+
+  if (process.platform === 'win32') {
+    try {
+      const { releaseWindowsMouseAfterTurn } = await import('./platforms/win32.js')
+      await releaseWindowsMouseAfterTurn()
+    } catch (err) {
+      logForDebugging(`[Computer Use MCP] mouse release failed: ${errorMessage(err)}`)
+    }
+  }
 
   // Unregister before lock release so the pump-retain drops as soon as the
   // CU session ends. Idempotent — no-ops if registration failed at acquire.

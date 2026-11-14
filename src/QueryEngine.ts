@@ -108,6 +108,7 @@ import {
   isResultSuccessful,
   normalizeMessage,
 } from './utils/queryHelpers.js'
+import { UacTimeoutError } from './utils/computerUse/win32/uacWait.js'
 
 // Dead code elimination: conditional import for coordinator mode
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -1131,7 +1132,8 @@ export class QueryEngine {
       }
     }
 
-    if (!isResultSuccessful(result, lastStopReason)) {
+    const abortReason = this.abortController.signal.reason
+    if (abortReason instanceof UacTimeoutError || !isResultSuccessful(result, lastStopReason)) {
       yield {
         type: 'result',
         subtype: 'error_during_execution',
@@ -1139,7 +1141,7 @@ export class QueryEngine {
         duration_api_ms: getTotalAPIDuration(),
         is_error: true,
         num_turns: turnCount,
-        stop_reason: lastStopReason,
+        stop_reason: abortReason instanceof UacTimeoutError ? 'computer_use_uac_timeout' : lastStopReason,
         session_id: getSessionId(),
         total_cost_usd: getTotalCost(),
         usage: this.totalUsage,
@@ -1156,6 +1158,7 @@ export class QueryEngine {
         // errors[] is turn-scoped via the watermark; previously it dumped the
         // entire process's logError buffer (ripgrep timeouts, ENOENT, etc).
         errors: (() => {
+          if (abortReason instanceof UacTimeoutError) return [abortReason.message]
           const all = getInMemoryErrors()
           const start = errorLogWatermark
             ? all.lastIndexOf(errorLogWatermark) + 1

@@ -27,6 +27,13 @@ windowsTest('real sync and async runners enforce timeout and carry stdin', async
   expect(await runPowerShell('[Console]::Out.Write([Console]::In.ReadToEnd())', 1000, 'stdin-ok')).toBe('stdin-ok')
 })
 
+windowsTest('abort during stdin writing still terminates the child', async () => {
+  const controller = new AbortController()
+  const pending = runPowerShell('Start-Sleep -Seconds 20', 30_000, 'pending-input', controller.signal)
+  controller.abort()
+  await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+})
+
 windowsTest('real runners preserve Unicode application paths', async () => {
   const path = 'E:\\game\\植物大战僵尸食物版\\PlantsVsZombiesFood.exe'
   expect(runPowerShellSync(`'${path}'`)).toBe(path)

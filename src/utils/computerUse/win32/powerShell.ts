@@ -6,7 +6,7 @@ type PowerShellResult = {
   stderr: string
 }
 
-const POWER_SHELL_PREFIX = "$ErrorActionPreference = 'Stop'\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+export const POWER_SHELL_PREFIX = "$ErrorActionPreference = 'Stop'\n[Console]::InputEncoding = [System.Text.Encoding]::UTF8\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
 
 function summarize(value: string): string {
   const text = value.trim()
@@ -24,7 +24,7 @@ function assertPowerShellSuccess(result: PowerShellResult, timedOut = false): st
   return result.stdout.trim()
 }
 
-export function runPowerShellSync(script: string, timeoutMs = 10_000): string {
+export function runPowerShellSync(script: string, timeoutMs = 10_000, stdin?: string): string {
   let result: PowerShellResult
   let timedOut = false
   try {
@@ -33,6 +33,7 @@ export function runPowerShellSync(script: string, timeoutMs = 10_000): string {
       ['-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
       {
         encoding: 'utf8',
+        input: stdin,
         timeout: timeoutMs,
         killSignal: 'SIGTERM',
         windowsHide: true,
@@ -50,29 +51,40 @@ export function runPowerShellSync(script: string, timeoutMs = 10_000): string {
   return assertPowerShellSuccess(result, timedOut)
 }
 
-export async function runPowerShell(script: string, timeoutMs = 15_000, stdin?: string): Promise<string> {
+export async function runPowerShell(script: string, timeoutMs = 15_000, stdin?: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted()
   const proc = Bun.spawn(
     ['powershell', '-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
     { stdin: stdin === undefined ? 'ignore' : 'pipe', stdout: 'pipe', stderr: 'pipe' },
   )
-  if (stdin !== undefined) {
-    proc.stdin.write(stdin)
-    await proc.stdin.end()
-  }
   let timedOut = false
+  let completed = false
+  const stop = () => { try { proc.kill() } catch {} }
+  signal?.addEventListener('abort', stop, { once: true })
+  if (signal?.aborted) stop()
   const timer = setTimeout(() => {
     timedOut = true
-    try { proc.kill() } catch {}
+    stop()
   }, timeoutMs)
   try {
+    if (stdin !== undefined) {
+      signal?.throwIfAborted()
+      proc.stdin.write(stdin)
+      await proc.stdin.end()
+    }
+    signal?.throwIfAborted()
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
     ])
+    completed = true
+    signal?.throwIfAborted()
     return assertPowerShellSuccess({ exitCode, stdout, stderr }, timedOut)
   } finally {
+    if (!completed) stop()
     clearTimeout(timer)
+    signal?.removeEventListener('abort', stop)
   }
 }
 

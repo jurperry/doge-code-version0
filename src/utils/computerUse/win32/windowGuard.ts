@@ -4,7 +4,7 @@
  * 输入动作分两类传输：
  *  - SendMessage（HWND 绑定，后台安全）→ 仅需存活检查；窗口被关闭后
  *    SendMessage 静默无效，必须先验证 IsWindow。
- *  - 真实输入（Chromium 窗口、UIPI 回退走的 SetCursorPos+mouse_event /
+ *  - 真实输入（Chromium 等窗口使用的 SetCursorPos+mouse_event /
  *    keybd_event）→ 事件注入系统输入流，会落进**当前前台窗口**；目标
  *    不在前台时等于往别的应用里点击/打字。
  *
@@ -18,7 +18,8 @@
  */
 
 import { listWindows } from './windowEnum.js'
-import { runPowerShellSync } from './powerShell.js'
+import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
+import { INPUT_INTEGRITY_TYPES } from './elevation.js'
 
 // ── C# P/Invoke helper ──────────────────────────────────────────────────────
 
@@ -104,6 +105,7 @@ export function buildEnsureWindowScript(
   hwnd: number,
   needForeground: boolean,
   expectedPid?: number,
+  forInput = false,
 ): string {
   const fgBlock = needForeground
     ? `
@@ -123,13 +125,14 @@ if (\$ok) { 'OK' } else { 'NOFG|' + [CuGuard]::FgTitle() }
 `
     : `'OK'
 `
-  const identityBlock = expectedPid === undefined ? fgBlock : `
+  const guarded = forInput ? `[CuInputIntegrity]::RequireWindow([IntPtr]${hwnd})\n${fgBlock}` : fgBlock
+  const identityBlock = expectedPid === undefined ? guarded : `
 \$currentPid = [uint32]0
 [CuGuard]::GetWindowThreadProcessId([IntPtr]${hwnd}, [ref]\$currentPid) | Out-Null
 if (\$currentPid -ne ${expectedPid}) { 'PIDMISMATCH|' + \$currentPid } else {
-${fgBlock}}
+${guarded}}
 `
-  return `${GUARD_TYPES}
+  return `${forInput ? INPUT_INTEGRITY_TYPES : ''}${GUARD_TYPES}
 if (-not [CuGuard]::IsWindow([IntPtr]${hwnd})) { 'DEAD' } else {
 ${identityBlock}}
 `
@@ -191,11 +194,13 @@ export function ensureWindow(
   hwnd: number,
   needForeground: boolean,
   expectedPid?: number,
+  forInput = false,
 ): EnsureWindowResult {
   if (!Number.isInteger(hwnd) || hwnd <= 0) return { status: 'dead' }
   try {
-    return parseEnsureOutput(runPowerShellSync(buildEnsureWindowScript(hwnd, needForeground, expectedPid), 10000))
-  } catch {
+    return parseEnsureOutput(runPowerShellSync(buildEnsureWindowScript(hwnd, needForeground, expectedPid, forInput), 10000))
+  } catch (error) {
+    if (forInput) throw error
     return { status: 'dead' }
   }
 }

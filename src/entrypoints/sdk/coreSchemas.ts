@@ -1278,7 +1278,7 @@ export const SDKAssistantMessageErrorSchema = lazySchema(() =>
 )
 
 export const SDKStatusSchema = lazySchema(() =>
-  z.union([z.literal('compacting'), z.null()]),
+  z.union([z.enum(['compacting', 'computer_use_uac', 'computer_use_uac_done']), z.null()]),
 )
 
 // SDKUserMessage content without uuid/session_id

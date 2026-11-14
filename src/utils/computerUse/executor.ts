@@ -224,7 +224,7 @@ async function withModifiers<T>(
  *   6. Restore — in a `finally`, so a throw between 2-5 never leaves the
  *      user's clipboard clobbered. Restore failures are swallowed.
  */
-async function typeViaClipboard(input: Input, text: string): Promise<void> {
+async function typeViaClipboard(input: Input, text: string, signal?: AbortSignal): Promise<void> {
   let saved: string
   try {
     saved = await readClipboardViaPbpaste()
@@ -238,8 +238,9 @@ async function typeViaClipboard(input: Input, text: string): Promise<void> {
     if ((await readClipboardViaPbpaste()) !== text) {
       throw new Error('Clipboard write did not round-trip; paste was not sent.')
     }
+    signal?.throwIfAborted()
     await input.keys([process.platform === 'darwin' ? 'command' : 'ctrl', 'v'])
-    await sleep(100)
+    await sleep(100, signal)
   } catch (error) {
     pasteError = error
     throw error
@@ -333,6 +334,25 @@ export function createCliExecutor(opts: {
       previewHideSet: async () => [] as any[],
       findWindowDisplays: async (ids: string[]) => ids.map(b => ({ bundleId: b, displayIds: [] })),
       appUnderPoint: async (x: number, y: number) => {
+        if (process.platform === 'win32') {
+          const { getBoundHwnd, getBoundAppId } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+          if (getBoundHwnd()) {
+            const bundleId = getBoundAppId()
+            return bundleId ? { bundleId, displayName: bundleId } : null
+          }
+          const hit = platform!.apps.getAppAtPoint?.(x, y)
+          return hit ? {
+            bundleId: hit.id,
+            displayName: hit.appName,
+            hostBundleId: hit.hostId,
+            hostDisplayName: hit.hostName,
+            pid: hit.pid,
+            hostPid: hit.hostPid,
+            hostTrusted: hit.hostTrusted,
+            startedAt: hit.startedAt,
+            hostStartedAt: hit.hostStartedAt,
+          } : null
+        }
         const info = platform!.apps.getFrontmostApp()
         return info ? { bundleId: info.id, displayName: info.appName } : null
       },
@@ -630,13 +650,14 @@ export function createCliExecutor(opts: {
      * releases modifiers on each invocation, so a mid-loop throw leaves
      * nothing stuck. 8ms between iterations — 125Hz USB polling cadence.
      */
-    async key(keySequence: string, repeat?: number): Promise<void> {
+    async key(keySequence: string, repeat?: number, signal?: AbortSignal): Promise<void> {
       // Windows/Linux: route through platform which handles HWND binding
       if (!isDarwin && platform) {
         const parts = keySequence.split('+').filter(p => p.length > 0)
         const n = repeat ?? 1
         for (let i = 0; i < n; i++) {
-          if (i > 0) await sleep(8)
+          if (i > 0) await sleep(8, signal)
+          signal?.throwIfAborted()
           if (isBareEscape(parts)) notifyExpectedEscape()
           await platform.input.keys(parts)
         }
@@ -648,14 +669,15 @@ export function createCliExecutor(opts: {
       const n = repeat ?? 1
       await drainRunLoop(async () => {
         for (let i = 0; i < n; i++) {
-          if (i > 0) await sleep(8)
+          if (i > 0) await sleep(8, signal)
+          signal?.throwIfAborted()
           if (isEsc) notifyExpectedEscape()
           await input.keys(parts)
         }
       })
     },
 
-    async holdKey(keyNames: string[], durationMs: number): Promise<void> {
+    async holdKey(keyNames: string[], durationMs: number, signal?: AbortSignal): Promise<void> {
       const input = getInput()
       // Press/release each wrapped in drainRunLoop; the sleep sits outside so
       // durationMs isn't bounded by drainRunLoop's 30s timeout. `pressed`
@@ -672,7 +694,7 @@ export function createCliExecutor(opts: {
       try {
         await drainRunLoop(async () => {
           for (const k of keyNames) {
-            if (orphaned) return
+            if (orphaned || signal?.aborted) return
             // Bare Escape: notify the CGEventTap so it doesn't fire the
             // abort callback for a model-synthesized press. Same as key().
             if (isBareEscape([k])) {
@@ -682,26 +704,27 @@ export function createCliExecutor(opts: {
             await input.key(k, 'press')
           }
         })
-        await sleep(durationMs)
+        await sleep(durationMs, signal)
+        signal?.throwIfAborted()
       } finally {
         orphaned = true
         await drainRunLoop(() => releasePressed(input, pressed))
       }
     },
 
-    async type(text: string, opts: { viaClipboard: boolean }): Promise<void> {
+    async type(text: string, opts: { viaClipboard: boolean }, signal?: AbortSignal): Promise<void> {
       // Windows/Linux: route through platform which handles HWND binding
       if (!isDarwin && platform) {
         if (opts.viaClipboard) {
-          await typeViaClipboard(getInput(), text)
+          await typeViaClipboard(getInput(), text, signal)
         } else {
-          await platform.input.typeText(text)
+          await platform.input.typeText(text, signal)
         }
         return
       }
       const input = getInput()
       if (opts.viaClipboard) {
-        await drainRunLoop(() => typeViaClipboard(input, text))
+        await drainRunLoop(() => typeViaClipboard(input, text, signal))
         return
       }
       await input.typeText(text)
@@ -813,6 +836,24 @@ export function createCliExecutor(opts: {
 
     // ── App management ───────────────────────────────────────────────────
 
+    async prepareForTarget(signal?: AbortSignal): Promise<void> {
+      if (process.platform !== 'win32') return
+      const { prepareWindowsTarget } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      await prepareWindowsTarget(signal)
+    },
+
+    getBoundAppId(): string | null {
+      if (process.platform !== 'win32') return null
+      const { getBoundAppId } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      return getBoundAppId()
+    },
+
+    getBoundRevision(): number | undefined {
+      if (process.platform !== 'win32') return undefined
+      const { getBoundRevision } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      return getBoundRevision()
+    },
+
     async getFrontmostApp(): Promise<FrontmostApp | null> {
       // The package gate needs the effective input target for authorization.
       // Background HWND delivery may legitimately differ from the physical
@@ -828,7 +869,17 @@ export function createCliExecutor(opts: {
         if (platform) {
           const info = platform.apps.getFrontmostApp()
           if (!info) return null
-          return { bundleId: info.id, displayName: info.appName }
+          return {
+            bundleId: info.id,
+            displayName: info.appName,
+            hostBundleId: info.hostId,
+            hostDisplayName: info.hostName,
+            hostTrusted: info.hostTrusted,
+            startedAt: info.startedAt,
+            hostStartedAt: info.hostStartedAt,
+            pid: info.pid,
+            hostPid: info.hostPid,
+          }
         }
       }
       if (isDarwin) {
@@ -861,10 +912,10 @@ export function createCliExecutor(opts: {
       return cu.apps.listRunning()
     },
 
-    async openApp(bundleId: string): Promise<void> {
+    async openApp(bundleId: string, signal?: AbortSignal): Promise<void> {
       if (!isDarwin && platform) {
         // Windows/Linux: platform.apps.open() handles HWND binding + DWM border
-        await platform.apps.open(bundleId)
+        await platform.apps.open(bundleId, signal)
         return
       }
       await cu.apps.open(bundleId)

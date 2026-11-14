@@ -126,6 +126,37 @@ describe('screenshot validity and persistence', () => {
     expect(result.content.some(item => item.type === 'image')).toBe(true)
   })
 
+  test('screenshot and zoom prepare the current target before capture', async () => {
+    const requestSignal = new AbortController().signal
+    const calls: string[] = []
+    const adapter = makeAdapter({
+      prepareForTarget: async signal => {
+        expect(signal).toBe(requestSignal)
+        calls.push('prepare')
+      },
+      screenshot: async () => { calls.push('screenshot'); return shot() },
+      zoom: async () => { calls.push('zoom'); return { base64: validBase64, width: 50, height: 50 } },
+    })
+    const options = makeOverrides({ requestSignal })
+    expect((await handleToolCall(adapter, 'screenshot', {}, options)).isError).toBeUndefined()
+    expect((await handleToolCall(adapter, 'zoom', { region: [0, 0, 20, 20] }, options)).isError).toBeUndefined()
+    expect(calls).toEqual(['prepare', 'screenshot', 'prepare', 'zoom'])
+  })
+
+  test('a revoked bound target cannot prepare elevation or be captured', async () => {
+    let preparations = 0
+    const adapter = makeAdapter({
+      getBoundAppId: () => 'revoked.app',
+      prepareForTarget: async () => { preparations++ },
+    })
+    const options = makeOverrides()
+    const screenshot = await handleToolCall(adapter, 'screenshot', {}, options)
+    const zoom = await handleToolCall(adapter, 'zoom', { region: [0, 0, 20, 20] }, options)
+    expect(screenshot.telemetry?.error_kind).toBe('app_not_granted')
+    expect(zoom.telemetry?.error_kind).toBe('app_not_granted')
+    expect(preparations).toBe(0)
+  })
+
   test('a thrown transient capture is retried and later throws become capture_failed', async () => {
     let calls = 0
     const recovered = await handleToolCall(makeAdapter({
@@ -592,11 +623,16 @@ describe('pixel-validation host fallback', () => {
 
   test('mouse-up cleanup still runs when its gate aborts', async () => {
     let releases = 0
-    const adapter = makeAdapter({ mouseUp: async () => { releases++ } })
+    let preparations = 0
+    const adapter = makeAdapter({
+      mouseUp: async () => { releases++ },
+      prepareForTarget: async () => { preparations++ },
+    })
     await handleToolCall(adapter, 'left_mouse_down', {}, makeOverrides())
     const result = await handleToolCall(adapter, 'left_mouse_up', {}, makeOverrides({ isAborted: () => true }))
     expect(result.isError).toBe(true)
     expect(releases).toBe(1)
+    expect(preparations).toBe(1)
   })
 
   test('aborting during the first grapheme delay prevents any text input', async () => {
@@ -804,6 +840,123 @@ describe('Windows effective-target permission gates', () => {
     expect(allowed.isError).toBeUndefined()
     const combo = await handleToolCall(adapter, 'key', { text: 'alt+tab' }, grants('full'))
     expect(combo.telemetry?.error_kind).toBe('grant_flag_required')
+  })
+
+  test('only authorized Windows input prepares the elevated target with the request signal', async () => {
+    let preparations = 0
+    const requestSignal = new AbortController().signal
+    const adapter = windowsAdapter('full')
+    adapter.executor.prepareForTarget = async signal => {
+      expect(signal).toBe(requestSignal)
+      preparations++
+    }
+    const denied = await handleToolCall(adapter, 'type', { text: 'x' }, grants('read'))
+    expect(denied.telemetry?.error_kind).toBe('tier_insufficient')
+    expect(preparations).toBe(0)
+    const allowed = await handleToolCall(adapter, 'type', { text: 'x' }, { ...grants('full'), requestSignal })
+    expect(allowed.isError).toBeUndefined()
+    expect(preparations).toBe(1)
+  })
+
+  test('Windows rejects an ungranted hit target and a foreground change during preparation', async () => {
+    let actions = 0
+    const hitAdapter = windowsAdapter('full')
+    hitAdapter.executor.appUnderPoint = async () => ({ bundleId: 'other.app', displayName: 'Other' })
+    hitAdapter.executor.click = async () => { actions++ }
+    const hit = await handleToolCall(hitAdapter, 'left_click', { coordinate: [1, 1] }, grants('full'))
+    expect(hit.telemetry?.error_kind).toBe('app_not_granted')
+
+    const switchAdapter = windowsAdapter('full')
+    switchAdapter.executor.prepareForTarget = async () => {
+      switchAdapter.executor.getFrontmostApp = async () => ({ bundleId: 'other.app', displayName: 'Other' })
+    }
+    switchAdapter.executor.type = async () => { actions++ }
+    const switched = await handleToolCall(switchAdapter, 'type', { text: 'x' }, grants('full'))
+    expect(switched.telemetry?.error_kind).toBe('app_not_granted')
+
+    const unknownAdapter = windowsAdapter('full')
+    unknownAdapter.executor.appUnderPoint = async () => null
+    unknownAdapter.executor.click = async () => { actions++ }
+    const unknown = await handleToolCall(unknownAdapter, 'left_click', { coordinate: [1, 1] }, grants('full'))
+    expect(unknown.telemetry?.error_kind).toBe('state_conflict')
+
+    const errorAdapter = windowsAdapter('full')
+    errorAdapter.executor.appUnderPoint = async () => { throw new Error('hit-test unavailable') }
+    errorAdapter.executor.click = async () => { actions++ }
+    const failed = await handleToolCall(errorAdapter, 'left_click', { coordinate: [1, 1] }, grants('full'))
+    expect(failed.isError).toBe(true)
+    expect(actions).toBe(0)
+  })
+
+  test('an embedded target uses its authorized host without process-name special cases', async () => {
+    let clicks = 0
+    const adapter = windowsAdapter('full')
+    adapter.executor.appUnderPoint = async () => ({
+      bundleId: 'renderer-helper.exe',
+      displayName: 'renderer-helper',
+      hostBundleId: 'app.test',
+      hostDisplayName: 'Test App',
+      hostTrusted: true,
+    })
+    adapter.executor.click = async () => { clicks++ }
+    const allowed = await handleToolCall(adapter, 'left_click', { coordinate: [1, 1] }, grants('full'))
+    expect(allowed.isError).toBeUndefined()
+    expect(clicks).toBe(1)
+
+    const upgraded = await handleToolCall(adapter, 'left_click', { coordinate: [1, 1] }, makeOverrides({
+      allowedApps: [
+        { bundleId: 'app.test', displayName: 'Test App', grantedAt: 1, tier: 'full' },
+        { bundleId: 'renderer-helper.exe', displayName: 'renderer-helper', grantedAt: 1, tier: 'read' },
+      ],
+    }))
+    expect(upgraded.isError).toBeUndefined()
+    expect(clicks).toBe(2)
+
+    const denied = await handleToolCall(adapter, 'left_click', { coordinate: [1, 1] }, makeOverrides({
+      allowedApps: [
+        { bundleId: 'app.test', displayName: 'Test App', grantedAt: 1, tier: 'full' },
+        { bundleId: 'renderer-helper.exe', displayName: 'renderer-helper', grantedAt: 1, tier: 'read' },
+      ],
+      userDeniedBundleIds: ['renderer-helper.exe'],
+    }))
+    expect(denied.telemetry?.error_kind).toBe('app_not_granted')
+    expect(clicks).toBe(2)
+
+    adapter.executor.appUnderPoint = async () => ({
+      bundleId: 'renderer-helper.exe',
+      displayName: 'renderer-helper',
+      hostBundleId: 'app.test',
+      hostDisplayName: 'Test App',
+      hostTrusted: false,
+    })
+    const untrusted = await handleToolCall(adapter, 'left_click', { coordinate: [1, 1] }, grants('full'))
+    expect(untrusted.telemetry?.error_kind).toBe('app_not_granted')
+    expect(clicks).toBe(2)
+  })
+
+  test('policy denial wins through actual and host installation aliases', async () => {
+    let clicks = 0
+    const adapter = windowsAdapter('full')
+    adapter.executor.click = async () => { clicks++ }
+    adapter.executor.appUnderPoint = async () => ({
+      bundleId: 'renderer-helper.exe',
+      displayName: 'renderer-helper',
+      hostBundleId: 'app.test',
+      hostDisplayName: 'Test App',
+      hostTrusted: true,
+    })
+    adapter.executor.listInstalledApps = async () => [{
+      bundleId: 'installed-renderer', path: 'renderer-helper.exe', displayName: 'Netflix',
+    }]
+    const actualDenied = await handleToolCall(adapter, 'left_click', { coordinate: [1, 1] }, grants('full'))
+    expect(actualDenied.telemetry?.error_kind).toBe('app_not_granted')
+
+    adapter.executor.listInstalledApps = async () => [{
+      bundleId: 'installed-host', path: 'app.test', displayName: 'Netflix',
+    }]
+    const hostDenied = await handleToolCall(adapter, 'left_click', { coordinate: [1, 1] }, grants('full'))
+    expect(hostDenied.telemetry?.error_kind).toBe('app_not_granted')
+    expect(clicks).toBe(0)
   })
 
   test('open_application accepts an exact granted Windows executable path', async () => {
@@ -1061,6 +1214,7 @@ describe('Windows display and window coordinate spaces', () => {
     const adapter = makeAdapter({
       capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
       getFrontmostApp: async () => ({ bundleId: 'E:/Apps/Game.exe', displayName: 'Game' }),
+      appUnderPoint: async () => ({ bundleId: 'E:/Apps/Game.exe', displayName: 'Game' }),
       click: async () => { clicks++ },
     })
     const result = await handleToolCall(adapter, 'left_click', { coordinate: [10, 10] }, makeOverrides({
