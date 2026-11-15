@@ -16,6 +16,7 @@
 export interface WindowFrameworkInfo {
   chromium: boolean
   selfDrawn: boolean
+  winForms?: boolean
   /** The class that triggered the classification — for debug logging. */
   matchedClass: string | null
 }
@@ -63,6 +64,9 @@ export function classifyWindowClasses(
     if (isSelfDrawnClass(cls)) {
       return { chromium: false, selfDrawn: true, matchedClass: cls }
     }
+  }
+  if (topClass.toLowerCase().startsWith('windowsforms10.')) {
+    return { chromium: false, selfDrawn: false, winForms: true, matchedClass: topClass }
   }
   return { chromium: false, selfDrawn: false, matchedClass: null }
 }

@@ -11,6 +11,7 @@ const ELEVATED = process.env.CU_FIXTURE_ELEVATED === '1'
 const TMP_DIR = join(process.cwd(), 'test', ELEVATED ? 'tmp-cu-input-fixture-elevated' : 'tmp-cu-input-fixture')
 const LOG_FILE = join(TMP_DIR, 'events.jsonl')
 const HWND_FILE = join(TMP_DIR, 'hwnd.txt')
+const EXIT_FILE = join(TMP_DIR, 'exit.txt')
 process.env.CLAUDE_CONFIG_DIR = join(TMP_DIR, 'config')
 process.env.CLAUDE_CODE_TMPDIR = TMP_DIR
 process.env.TEMP = TMP_DIR
@@ -39,7 +40,7 @@ public class CuInputControl : UserControl {
         KeyPress += (sender, e) => CuLog.Write("keypress", "code=" + ((int)e.KeyChar));
         KeyDown += (sender, e) => CuLog.Write("keydown", "key=" + e.KeyCode + ";ctrl=" + ((ModifierKeys & Keys.Control) != 0));
         KeyUp += (sender, e) => CuLog.Write("keyup", "key=" + e.KeyCode + ";ctrl=" + ((ModifierKeys & Keys.Control) != 0));
-        MouseDown += (sender, e) => CuLog.Write("mousedown", "button=" + e.Button + ";clicks=" + e.Clicks + ";x=" + e.X + ";y=" + e.Y);
+        MouseDown += (sender, e) => CuLog.Write("mousedown", "button=" + e.Button + ";clicks=" + e.Clicks + ";x=" + e.X + ";y=" + e.Y + ";shift=" + ((ModifierKeys & Keys.Shift) != 0));
         MouseUp += (sender, e) => CuLog.Write("mouseup", "button=" + e.Button);
         MouseWheel += (sender, e) => CuLog.Write("wheel", "delta=" + e.Delta);
     }
@@ -112,6 +113,8 @@ let fixturePid = 0
 let unbind: (() => void) | undefined
 try {
   mkdirSync(TMP_DIR, { recursive: true })
+  rmSync(EXIT_FILE, { force: true })
+  rmSync(HWND_FILE, { force: true })
   clearEvents()
   if (ELEVATED) {
     const sourcePath = join(TMP_DIR, 'fixture.cs')
@@ -125,8 +128,11 @@ public static class CuFixtureProgram {
         form.Height = 480;
         form.StartPosition = FormStartPosition.CenterScreen;
         form.Show();
-        var lifetime = new Timer { Interval = 300000 };
-        lifetime.Tick += (sender, args) => form.Close();
+        var deadline = DateTime.UtcNow.AddMinutes(5);
+        var lifetime = new Timer { Interval = 100 };
+        lifetime.Tick += (sender, args) => {
+            if (DateTime.UtcNow >= deadline || File.Exists(${JSON.stringify(EXIT_FILE)})) form.Close();
+        };
         lifetime.Start();
         Application.Run(form);
     }
@@ -156,6 +162,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile the elevated input fixture' 
   await waitFor(() => existsSync(HWND_FILE) && readFileSync(HWND_FILE, 'utf8').trim().length > 0, 'fixture HWND')
 
   const { bindWindow, unbindWindow, getBoundHwnd, platform, prepareWindowsTarget } = await import('../src/utils/computerUse/platforms/win32.js')
+  const { sendClick } = await import('../src/utils/computerUse/win32/windowMessage.js')
   const { ensureWindow } = await import('../src/utils/computerUse/win32/windowGuard.js')
   const { runPowerShellSync: runLocalPowerShellSync } = await import('../src/utils/computerUse/win32/powerShell.js')
   const { runComputerUsePowerShellSync } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
@@ -239,8 +246,7 @@ $awareness = [CuFixtureGeometry]::GetAwarenessFromDpiAwarenessContext([CuFixture
     y: Math.round((clickPoint.y - clientOffsetY) * 96 / windowDpi),
   }
   clearEvents()
-  await executor.click(clickPoint.x, clickPoint.y, 'left', 1)
-  await new Promise(resolve => setTimeout(resolve, 300))
+  sendClick(hwnd, clickPoint.x, clickPoint.y, 'left', fixturePid)
   const coordinatedDown = events().find(event => event.kind === 'leftmsg' && event.detail.startsWith('msg=513'))
   const actualClient = coordinatedDown
     ? { x: Number(coordinatedDown.detail.match(/;x=(\d+)/)?.[1]), y: Number(coordinatedDown.detail.match(/;y=(\d+)/)?.[1]) }
@@ -337,9 +343,20 @@ public class CuFixtureMin {
 
   clearEvents()
   await executor.click(60, 60, 'middle', 1)
-  await waitFor(() => events().filter(e => e.kind === 'middle').length >= 2, 'middle-button messages')
+  await waitFor(() => events().some(e => e.kind === 'mouseup' && e.detail === 'button=Middle'), 'real middle-button release')
+  check('middle-click delivers physical middle-button down/up to the child control',
+    events().some(e => e.kind === 'mousedown' && e.detail.startsWith('button=Middle;')), JSON.stringify(events()))
+
+  clearEvents()
+  sendClick(hwnd, 60, 60, 'middle', fixturePid)
   const middle = events().filter(e => e.kind === 'middle').map(e => e.detail).join(',')
-  check('middle-click emits WM_MBUTTONDOWN/UP, not right-click', middle.includes('msg=519') && middle.includes('msg=520'), middle)
+  check('background middle-click emits WM_MBUTTONDOWN/UP', middle.includes('msg=519') && middle.includes('msg=520'), middle)
+
+  clearEvents()
+  await executor.click(75, 75, 'left', 1, ['shift'])
+  await waitFor(() => events().some(e => e.kind === 'mousedown'), 'modified bound click')
+  check('bound Shift-click delivers the physical modifier to the WinForms child',
+    events().some(e => e.kind === 'mousedown' && e.detail.endsWith(';shift=True')), JSON.stringify(events()))
 
   clearEvents()
   await executor.mouseDown()
@@ -541,14 +558,34 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
     await proc.exited
   }
   if (ELEVATED) {
-    const { ensureElevatedPowerShell, runComputerUsePowerShellSync, stopElevatedPowerShell } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
-    if (fixturePid > 0) {
-      try { await ensureElevatedPowerShell() } catch {}
-      try { runComputerUsePowerShellSync(`Stop-Process -Id ${fixturePid},${secondaryPid} -Force -ErrorAction SilentlyContinue`) } catch {}
+    // Both elevated fixtures listen for this file and exit their own message loops.
+    writeFileSync(EXIT_FILE, 'exit', 'utf8')
+    const pids = [fixturePid, secondaryPid].filter(pid => pid > 0)
+    const { runPowerShell } = await import('../src/utils/computerUse/win32/powerShell.js')
+    const { stopElevatedPowerShell } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+    try {
+      if (pids.length) await runPowerShell(`
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+while (Get-Process -Id ${pids.join(',')} -ErrorAction SilentlyContinue) {
+    if ([DateTime]::UtcNow -ge $deadline) { throw 'Elevated fixture did not acknowledge its exit file' }
+    Start-Sleep -Milliseconds 100
+}
+`, 7000)
+    } finally {
+      await stopElevatedPowerShell()
     }
-    await stopElevatedPowerShell()
   }
-  rmSync(TMP_DIR, { recursive: true, force: true })
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(TMP_DIR, { recursive: true, force: true })
+      break
+    } catch (error) {
+      // Windows may retain a handle briefly after the elevated fixture exits.
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt === 49 || !['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '')) throw error
+      await Bun.sleep(100)
+    }
+  }
 }
 
 console.log(failures === 0 ? '\nFIXTURE E2E RESULT: ALL PASS' : `\nFIXTURE E2E RESULT: ${failures} FAILURE(S)`)

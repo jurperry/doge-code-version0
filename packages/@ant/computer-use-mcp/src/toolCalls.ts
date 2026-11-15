@@ -37,6 +37,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
+import { win32 as windowsPath } from "node:path";
 
 import { getDefaultTierForApp, getDeniedCategoryForApp, isPolicyDenied } from "./deniedApps.js";
 import { MAX_BATCH_ACTIONS, MAX_BATCH_IMAGE_BYTES, MAX_BATCH_SCREENSHOTS, MAX_TYPE_TEXT_LENGTH } from "./limits.js";
@@ -46,9 +47,11 @@ import type {
   InstalledApp,
   ResolvePrepareCaptureResult,
   ScreenshotResult,
+  WindowsWindow,
 } from "./executor.js";
 import { isSystemKeyCombo } from "./keyBlocklist.js";
 import { validateClickTarget } from "./pixelCompare.js";
+import { BATCH_ACTION_NAMES } from "./tools.js";
 import { SENTINEL_BUNDLE_IDS } from "./sentinelApps.js";
 import type {
   AppGrant,
@@ -128,11 +131,25 @@ export type CuCallToolResult = CallToolResult & {
 // Small result helpers (mirror of chrome-mcp's inline `{content, isError}`)
 // ---------------------------------------------------------------------------
 
-function errorResult(text: string, errorKind?: CuErrorKind): CuCallToolResult {
+const ERROR_RECOVERY: Partial<Record<CuErrorKind, string>> = {
+  allowlist_empty: "request_access",
+  app_not_granted: "request_access",
+  grant_flag_required: "request_access",
+  tier_insufficient: "use_allowed_action",
+  state_conflict: "inspect_state_and_refresh_screenshot",
+  capture_failed: "inspect_capture_target",
+  executor_threw: "inspect_state_before_retry",
+  cu_lock_held: "wait_for_lock_release",
+  bad_args: "correct_arguments",
+};
+
+export function errorResult(text: string, errorKind: CuErrorKind = "other", details: { hwnd?: number; phase?: string } = {}): CuCallToolResult {
+  const error = { code: errorKind, retryable: false, fix: ERROR_RECOVERY[errorKind] ?? "inspect_error", ...details };
   return {
-    content: [{ type: "text", text }],
+    content: [{ type: "text", text }, { type: "text", text: JSON.stringify(error) }],
+    structuredContent: error,
     isError: true,
-    telemetry: errorKind ? { error_kind: errorKind } : undefined,
+    telemetry: { error_kind: errorKind },
   };
 }
 
@@ -469,7 +486,9 @@ async function syncClipboardStash(
 }
 
 function normalizeAppId(platform: "darwin" | "win32", id: string): string {
-  return platform === "win32" ? id.replace(/\//g, "\\").toLowerCase() : id;
+  if (platform !== "win32") return id;
+  const path = id.replace(/\//g, "\\").toLowerCase();
+  return windowsPath.isAbsolute(path) && path.endsWith(".exe") ? windowsPath.normalize(path) : path;
 }
 
 async function resolveAppTier(
@@ -501,6 +520,7 @@ async function isExplicitlyDeniedTarget(
   adapter: ComputerUseHostAdapter,
   overrides: ComputerUseOverrides,
   target: { bundleId: string; displayName: string },
+  installedApps?: readonly InstalledApp[],
 ): Promise<boolean> {
   if (isPolicyDenied(target.bundleId, target.displayName)) return true;
   const platform = adapter.executor.capabilities.platform;
@@ -508,7 +528,7 @@ async function isExplicitlyDeniedTarget(
   const deniedIds = new Set(overrides.userDeniedBundleIds.map(id => normalizeAppId(platform, id)));
   if (deniedIds.has(targetId)) return true;
   if (platform !== 'win32') return false;
-  const installed = await adapter.executor.listInstalledApps();
+  const installed = installedApps ?? await adapter.executor.listInstalledApps();
   for (const app of installed) {
     const aliases = [app.bundleId, app.path, ...(app.extraPaths ?? [])]
       .map(alias => normalizeAppId(platform, alias));
@@ -579,7 +599,7 @@ async function runInputActionGates(
   if (gate) return gate;
   if (prepareTarget) {
     const boundBefore = adapter.executor.getBoundAppId?.() ?? null;
-    await adapter.executor.prepareForTarget?.(overrides.requestSignal);
+    await adapter.executor.prepareForTarget?.(overrides.requestSignal, actionKind === "mouse_position" ? "hover" : "input");
     if (adapter.executor.capabilities.platform === 'win32') {
       const revisionChanged = overrides.boundRevision !== undefined && adapter.executor.getBoundRevision?.() !== overrides.boundRevision;
       if (revisionChanged || (boundBefore !== null && !adapter.executor.getBoundAppId?.())) {
@@ -1089,10 +1109,9 @@ function looksLikeBundleId(s: string): boolean {
 }
 
 function isExactAppPathMatch(requested: string, app: InstalledApp): boolean {
-  const normalize = (value: string) => value.replace(/\//g, "\\").toLowerCase();
-  const wanted = normalize(requested);
+  const wanted = normalizeAppId("win32", requested);
   return [app.bundleId, app.path, ...(app.extraPaths ?? [])]
-    .some(candidate => normalize(candidate) === wanted);
+    .some(candidate => normalizeAppId("win32", candidate) === wanted);
 }
 
 function resolvePortableExecutable(requested: string): InstalledApp | undefined {
@@ -2501,7 +2520,7 @@ async function handleScreenshot(
   const boundGate = await runBoundTargetGate(adapter, overrides);
   if (boundGate) return boundGate;
   throwIfActionAborted(overrides);
-  await adapter.executor.prepareForTarget?.(overrides.requestSignal);
+  await adapter.executor.prepareForTarget?.(overrides.requestSignal, "capture");
   throwIfActionAborted(overrides);
 
   // Atomic resolve→prepare→capture (one Swift call, no scheduler gap).
@@ -2604,6 +2623,7 @@ async function handleScreenshot(
       originX: result.originX,
       originY: result.originY,
       displayCount: result.displayCount,
+      targetRevision: result.targetRevision,
     };
 
     const monitorNote = await buildMonitorNote(
@@ -2783,7 +2803,7 @@ async function handleZoom(
   if (boundGate) return boundGate;
   throwIfActionAborted(overrides);
   const boundBefore = adapter.executor.getBoundAppId?.() ?? null;
-  await adapter.executor.prepareForTarget?.(overrides.requestSignal);
+  await adapter.executor.prepareForTarget?.(overrides.requestSignal, "capture");
   if ((overrides.boundRevision !== undefined && adapter.executor.getBoundRevision?.() !== overrides.boundRevision) || (boundBefore !== null && !adapter.executor.getBoundAppId?.())) {
     return errorResult(
       "The bound capture target changed to a newly started application. Zoom was not performed on stale coordinates; take a fresh screenshot first.",
@@ -2880,7 +2900,9 @@ async function handleClickVariant(
   // §6 item P — pixel-validation staleness check. Sub-gated.
   // Runs AFTER the gates (no point validating if we're about to refuse
   // anyway) but BEFORE the executor call.
-  if (subGates.pixelValidation) {
+  const isWindows = adapter.executor.capabilities.platform === "win32";
+  const boundWindows = isWindows && (adapter.executor.isWindowBound?.() ?? !!adapter.executor.getBoundAppId?.());
+  if (subGates.pixelValidation && (!isWindows || boundWindows)) {
     const { xPct, yPct } = coordToPercentageForPixelCompare(
       rawX,
       rawY,
@@ -2908,7 +2930,12 @@ async function handleClickVariant(
         }
       },
       adapter.logger,
+      9,
+      boundWindows ? 8 : 0,
     );
+    if (boundWindows && overrides.lastScreenshot && validation.skipped) {
+      return errorResult("The bound window could not be revalidated. Take a fresh screenshot before clicking.", "state_conflict");
+    }
     if (!validation.valid && validation.warning) {
       return errorResult(`${validation.warning} The click was not dispatched.`, "state_conflict");
     }
@@ -2982,9 +3009,9 @@ async function handleType(
       }
       try {
         if (run === "\n" || run === "\r" || run === "\r\n") {
-          await adapter.executor.key("return");
+          await adapter.executor.key("return", undefined, overrides.requestSignal);
         } else if (run === "\t") {
-          await adapter.executor.key("tab");
+          await adapter.executor.key("tab", undefined, overrides.requestSignal);
         } else {
           await adapter.executor.type(run, { viaClipboard: false }, overrides.requestSignal);
         }
@@ -3028,6 +3055,8 @@ async function handleKey(
   const keySequence = requireString(args, "text");
   if (keySequence instanceof Error)
     return errorResult("text is required", "bad_args");
+
+  if (parseKeyChord(keySequence).length === 0) return errorResult("text must contain at least one key", "bad_args");
 
   // Cap 100, error strings match.
   let repeat: number | undefined;
@@ -3316,13 +3345,27 @@ async function handleOpenApplication(
     );
   }
 
+  const windowId = args.window_id;
+  if (windowId !== undefined) {
+    if (platform !== "win32" || !adapter.executor.listWindows) {
+      return errorResult("Window selection is unavailable on this platform.", "feature_unavailable");
+    }
+    if (typeof windowId !== "string" || !/^[1-9]\d{0,15}:[1-9]\d{0,9}$/.test(windowId)) {
+      return errorResult("window_id must come from list_granted_applications.", "bad_args");
+    }
+    if (await isExplicitlyDeniedTarget(adapter, overrides, { bundleId: targetBundleId, displayName: app })) {
+      return errorResult("The selected application is denied.", "app_not_granted");
+    }
+  }
+
   // open_application works at any tier — bringing an app forward is exactly
   // what tier "read" enables (you need it on screen to screenshot it). The
   // tier gates on click/type catch any follow-up interaction.
 
   throwIfActionAborted(overrides);
   await releaseHeldMouse(adapter);
-  await adapter.executor.openApp(targetBundleId, overrides.requestSignal);
+  if (typeof windowId === "string") await adapter.executor.openApp(targetBundleId, overrides.requestSignal, windowId);
+  else await adapter.executor.openApp(targetBundleId, overrides.requestSignal);
 
   // On multi-monitor setups, macOS may place the opened window on a monitor
   // the resolver won't pick (e.g. Claude + another allowed app are co-located
@@ -3408,13 +3451,136 @@ async function handleSwitchDisplay(
   );
 }
 
-function handleListGrantedApplications(
+async function handleListGrantedApplications(
+  adapter: ComputerUseHostAdapter,
+  args: Record<string, unknown>,
   overrides: ComputerUseOverrides,
-): CuCallToolResult {
-  return okJson({
+): Promise<CuCallToolResult> {
+  for (const flag of ["include_windows", "include_desktop"]) {
+    if (args[flag] !== undefined && typeof args[flag] !== "boolean") {
+      return errorResult(`${flag} must be a boolean.`, "bad_args");
+    }
+  }
+  if (args.include_desktop === true && adapter.executor.capabilities.platform !== "win32") {
+    return errorResult("Windows desktop information is unavailable on this platform.", "feature_unavailable");
+  }
+  const displays = args.include_desktop === true ? await adapter.executor.listDisplays() : [];
+  const displayLabels = uniqueDisplayLabels(displays);
+  const desktop = args.include_desktop === true ? {
+    desktop_info: {
+      integrityLevel: adapter.executor.getOwnIntegrity?.() ?? "unknown",
+      captureMode: (adapter.executor.isWindowBound?.() ?? !!adapter.executor.getBoundAppId?.()) ? "bound_window" : "full_display",
+      anchorAgeMs: overrides.screenshotAgeMs ?? null,
+      displays: displays.map(({ displayId, isPrimary }) => ({ displayId, label: displayLabels.get(displayId), isPrimary: isPrimary ?? false })),
+      limits: { batchActions: MAX_BATCH_ACTIONS, batchScreenshots: MAX_BATCH_SCREENSHOTS, batchImageBytes: MAX_BATCH_IMAGE_BYTES, typeCodeUnits: MAX_TYPE_TEXT_LENGTH },
+    },
+  } : {};
+  const summary = {
     allowedApps: overrides.allowedApps,
     grantFlags: overrides.grantFlags,
-  });
+    coordinateMode: overrides.coordinateMode,
+    ...desktop,
+  };
+  if (args.include_windows !== true) return okJson(summary);
+  if (!adapter.executor.listWindows) {
+    return errorResult("Window discovery is unavailable on this platform.", "feature_unavailable");
+  }
+  if (summary.allowedApps.length === 0) return okJson({ ...summary, windows: [] });
+
+  const grants = new Map(summary.allowedApps.map(app => [normalizeAppId("win32", app.bundleId), app]));
+  const windows: Array<{ windowId: string; title: string; app: string; tier?: CuAppPermTier }> = [];
+  const denied = new Map<string, boolean>();
+  for (const window of await adapter.executor.listWindows()) {
+    const identity = normalizeAppId("win32", window.bundleId);
+    const grant = grants.get(identity);
+    if (!grant) continue;
+    if (!denied.has(identity)) {
+      denied.set(identity, await isExplicitlyDeniedTarget(adapter, overrides, { bundleId: window.bundleId, displayName: grant.displayName }));
+    }
+    if (denied.get(identity)) continue;
+    windows.push({ windowId: window.windowId, title: window.title, app: grant.bundleId, tier: grant.tier });
+    if (windows.length === 40) break;
+  }
+  throwIfActionAborted(overrides);
+  return okJson({ ...summary, windows });
+}
+
+function publicWindow(window: WindowsWindow, tier: CuAppPermTier) {
+  const { bundleId: exe, dpiAwareness, ...identity } = window;
+  const awareness = ["unaware", "system", "per_monitor"];
+  return { ...identity, exe, dpi_awareness: dpiAwareness === null ? "unknown" : awareness[dpiAwareness] ?? "unknown", tier };
+}
+
+async function windowsWithGrant(
+  adapter: ComputerUseHostAdapter,
+  overrides: ComputerUseOverrides,
+  windows: readonly WindowsWindow[],
+): Promise<Array<{ window: WindowsWindow; tier: CuAppPermTier }>> {
+  const granted = new Map(overrides.allowedApps.map(app => [normalizeAppId("win32", app.bundleId), app]));
+  const installed = await adapter.executor.listInstalledApps();
+  const tiers = new Map<string, CuAppPermTier | undefined>();
+  const result: Array<{ window: WindowsWindow; tier: CuAppPermTier }> = [];
+  for (const window of windows) {
+    if (!window.bundleId) continue;
+    const id = normalizeAppId("win32", window.bundleId);
+    const grant = granted.get(id);
+    if (!grant) continue;
+    if (!tiers.has(id)) {
+      const denied = await isExplicitlyDeniedTarget(adapter, overrides, { bundleId: window.bundleId, displayName: grant.displayName }, installed);
+      tiers.set(id, denied ? undefined : grant.tier);
+    }
+    const tier = tiers.get(id);
+    if (tier) result.push({ window, tier });
+  }
+  return result;
+}
+
+async function handleWindowsTool(
+  name: "list_windows" | "get_window" | "activate_window",
+  adapter: ComputerUseHostAdapter,
+  args: Record<string, unknown>,
+  overrides: ComputerUseOverrides,
+): Promise<CuCallToolResult> {
+  const executor = adapter.executor;
+  if (executor.capabilities.platform !== "win32" || !executor.listWindows ||
+      (name === "activate_window" && !executor.activateWindow)) {
+    return errorResult("Windows window operations are unavailable on this platform.", "feature_unavailable");
+  }
+  if (overrides.allowedApps.length === 0) {
+    return errorResult("No applications are granted. Call request_access first.", "allowlist_empty");
+  }
+  if (name === "list_windows") {
+    const visibleOnly = args.visible_only === undefined ? true : args.visible_only;
+    const grantedOnly = args.granted_only === undefined ? true : args.granted_only;
+    const limit = args.limit === undefined ? 40 : args.limit;
+    if (typeof visibleOnly !== "boolean" || typeof grantedOnly !== "boolean") {
+      return errorResult("visible_only and granted_only must be booleans.", "bad_args");
+    }
+    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+      return errorResult("limit must be an integer from 1 to 100.", "bad_args");
+    }
+    const observed = await executor.listWindows(visibleOnly);
+    const granted = await windowsWithGrant(adapter, overrides, observed);
+    const windows = granted.slice(0, limit).map(({ window, tier }) => publicWindow(window, tier));
+    throwIfActionAborted(overrides);
+    return okJson({ count: windows.length, windows, ...(grantedOnly ? {} : { ungrantedCount: observed.length - granted.length }) });
+  }
+  const hwnd = args.hwnd;
+  if (typeof hwnd !== "number" || !Number.isSafeInteger(hwnd) || hwnd <= 0) {
+    return errorResult("hwnd must be a positive integer from list_windows.", "bad_args");
+  }
+  const match = (await executor.listWindows(false)).find(window => window.hwnd === hwnd);
+  const [authorized] = match ? await windowsWithGrant(adapter, overrides, [match]) : [];
+  if (!authorized) {
+    return errorResult("The window is unavailable or outside the session grant. Refresh list_windows.", "app_not_granted", { hwnd });
+  }
+  throwIfActionAborted(overrides);
+  if (name === "get_window") return okJson({ ...publicWindow(authorized.window, authorized.tier), rootHwnd: hwnd });
+  if (mouseButtonHeld) return errorResult("Release the held mouse button before activating a different window.", "state_conflict");
+  const activated = await executor.activateWindow!(authorized.window, overrides.requestSignal);
+  return okJson({ activated, hwnd, message: activated
+    ? "Window is in the foreground. Take a fresh screenshot before acting on newly visible content."
+    : "Windows did not foreground this window. Inspect the current screen or ask the user to activate it." });
 }
 
 async function handleReadClipboard(
@@ -3620,6 +3786,7 @@ async function handleHoldKey(
   if (gate) return gate;
 
   const keyNames = parseKeyChord(text);
+  if (keyNames.length === 0) return errorResult("text must contain at least one key", "bad_args");
   throwIfActionAborted(overrides);
   await adapter.executor.holdKey(keyNames, duration * 1000, overrides.requestSignal);
   return okText("Key hold dispatched; application effect is not verified.");
@@ -3740,24 +3907,7 @@ async function handleLeftMouseUp(
  * open_application, clipboard, list_granted (no latency benefit, complicates
  * security model).
  */
-const BATCHABLE_ACTIONS: ReadonlySet<string> = new Set([
-  "key",
-  "type",
-  "mouse_move",
-  "left_click",
-  "left_click_drag",
-  "right_click",
-  "middle_click",
-  "double_click",
-  "triple_click",
-  "scroll",
-  "hold_key",
-  "screenshot",
-  "cursor_position",
-  "left_mouse_down",
-  "left_mouse_up",
-  "wait",
-]);
+const BATCHABLE_ACTIONS: ReadonlySet<string> = new Set(BATCH_ACTION_NAMES);
 
 interface BatchActionResult {
   action: string;
@@ -3786,6 +3936,7 @@ function validateBatchActionArgs(
   if (action === "type" || action === "key" || action === "hold_key") {
     const text = requireString(args, "text");
     if (text instanceof Error) return fail(text.message);
+    if (action !== "type" && parseKeyChord(text).length === 0) return fail("text must contain at least one key");
     if (action === "type" && text.length > MAX_TYPE_TEXT_LENGTH) {
       return fail(`text exceeds maximum length of ${MAX_TYPE_TEXT_LENGTH} UTF-16 code units`);
     }
@@ -3880,8 +4031,24 @@ async function handleComputerBatch(
         "bad_args",
       );
     }
-    const validationError = validateBatchActionArgs(act as Record<string, unknown>, i);
+    const actionArgs = act as Record<string, unknown>;
+    const validationError = validateBatchActionArgs(actionArgs, i);
     if (validationError) return errorResult(validationError.message, "bad_args");
+    const usesChord = action === "key" || action === "hold_key" || action.endsWith("click");
+    if (usesChord && typeof actionArgs.text === "string" && !overrides.grantFlags.systemKeyCombos &&
+        isSystemKeyCombo(actionArgs.text, adapter.executor.capabilities.platform)) {
+      return errorResult(`actions[${i}] (${action}) requires the systemKeyCombos grant via request_access. No batch action was dispatched.`, "grant_flag_required");
+    }
+    if (usesChord && typeof actionArgs.text === "string") {
+      try {
+        adapter.executor.validateKeyChord?.(parseKeyChord(actionArgs.text));
+      } catch (error) {
+        return errorResult(`actions[${i}] (${action}): ${error instanceof Error ? error.message : String(error)}`, "bad_args");
+      }
+    }
+    if (action === "screenshot" && actionArgs.save_to_disk === true && !adapter.saveImageToDisk) {
+      return errorResult(`actions[${i}] save_to_disk is not available in this session. No batch action was dispatched.`, "feature_unavailable");
+    }
   }
 
   // prepareForAction ONCE. After this, inner dispatches skip it via
@@ -3928,7 +4095,7 @@ async function handleComputerBatch(
     const result = okJson(
       {
         completed: results.slice(0, -1),
-        failed: failedWithCleanup,
+        failed: { ...failedWithCleanup, code: telemetry?.error_kind },
         remaining: actions.length - results.length,
         recovery: recoveryGuidanceForFailure("computer_batch"),
       },
@@ -4037,8 +4204,10 @@ async function handleComputerBatch(
 }
 
 function textContent(r: CuCallToolResult): string {
+  const structured = r.structuredContent ? JSON.stringify(r.structuredContent) : undefined;
   return r.content
     .filter(item => item.type === "text")
+    .filter(item => item.type !== "text" || item.text !== structured)
     .map(item => item.type === "text" ? item.text : "")
     .join("\n");
 }
@@ -4127,7 +4296,12 @@ async function dispatchAction(
       return handleSwitchDisplay(adapter, a, overrides);
 
     case "list_granted_applications":
-      return handleListGrantedApplications(overrides);
+      return handleListGrantedApplications(adapter, a, overrides);
+
+    case "list_windows":
+    case "get_window":
+    case "activate_window":
+      return handleWindowsTool(name, adapter, a, overrides);
 
     case "read_clipboard":
       return handleReadClipboard(adapter, overrides, subGates);
@@ -4298,9 +4472,7 @@ export async function handleToolCall(
 
   const a = asRecord(args);
 
-  logger.silly(
-    `[${serverName}] tool=${name} args=${JSON.stringify(a).slice(0, 200)}`,
-  );
+  logger.silly(`[${serverName}] tool=${name}`);
 
   // ─── Fail-closed dispatch ────────────────────────────────────────────
   // ANY exception below → tool error, executor never left in a half-called
@@ -4331,9 +4503,11 @@ export async function handleToolCall(
     // the result is still a tool error, never an implicit success.
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[${serverName}] tool=${name} threw: ${msg}`, err);
+    const phase = [...msg.matchAll(/\[CU_HELPER_([A-Z_]+)\]/g)].at(-1)?.[1]?.toLowerCase();
     return errorResult(
       `Tool "${name}" failed: ${msg}. Recovery: ${recoveryGuidanceForFailure(name)}`,
       "executor_threw",
+      phase ? { phase } : undefined,
     );
   }
 }

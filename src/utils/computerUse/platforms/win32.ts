@@ -12,7 +12,9 @@
  * CRITICAL: All screenshots output JPEG (ImageFormat::Jpeg), not PNG.
  */
 
+import { win32 as windowsPath } from 'node:path'
 import { API_RESIZE_PARAMS, resetMouseButtonHeld, targetImageSize } from '@ant/computer-use-mcp'
+import type { TargetPreparation, WindowsWindow } from '@ant/computer-use-mcp'
 import type { Platform } from './index.js'
 import type {
   InputPlatform,
@@ -25,11 +27,12 @@ import type {
   InstalledApp,
   FrontmostAppInfo,
 } from './types.js'
-import { listWindows } from '../win32/windowEnum.js'
+import { listWindowDetails, listWindows } from '../win32/windowEnum.js'
 import { captureWindowByHwnd } from '../win32/windowCapture.js'
 import { detectAppType, openWithController } from '../win32/appDispatcher.js'
 import { markBound, unmarkBound } from '../win32/windowBorder.js'
 import {
+  activateObservedWindow,
   ensureWindow,
   buildRequireWindowScript,
   findReplacementWindow,
@@ -38,10 +41,10 @@ import {
 import { listInstalledAppsWin32 } from '../win32/installedApps.js'
 import { buildPortableAppLaunchBlock, START_CU_APPLICATION } from '../win32/appLaunch.js'
 import { classifyWindowClasses } from '../win32/windowClassify.js'
-import { runPowerShell } from '../win32/powerShell.js'
-import { ensureElevatedPowerShell, isElevatedPowerShellActive, runComputerUsePowerShell, runComputerUsePowerShellSync, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
+import { runPowerShell, runPowerShellSync } from '../win32/powerShell.js'
+import { ensureElevatedPowerShell, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, runComputerUsePowerShellSync, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
 import { PROCESS_IMAGE_PS } from '../win32/processImage.js'
-import { getCurrentProcessIL, getForegroundProcessId, getProcessIL, INPUT_INTEGRITY_TYPES, needsElevatedHelper } from '../win32/elevation.js'
+import { getCurrentProcessIL, getProcessIL, INPUT_INTEGRITY_TYPES, needsElevatedHelper } from '../win32/elevation.js'
 import { desktopState } from '../win32/uacProbe.js'
 
 // ---------------------------------------------------------------------------
@@ -240,6 +243,7 @@ let boundExeBase: string | null = null
 let boundAppId: string | null = null
 let boundAt: number | null = null
 let bindingRevision = 0
+let explicitlyActivatedPid: number | undefined
 /** Track whether SendMessage is working for the bound window (UIPI check) */
 let sendMessageOk: boolean | null = null
 /** Track whether the bound window is Chromium-based (Electron/CEF/Chrome).
@@ -249,10 +253,12 @@ let isChromium: boolean = false
  *  e.g. the Android emulator). SendMessage mouse AND keyboard are app-layer
  *  no-ops for these; everything must go through real input (foreground guard). */
 let isSelfDrawn: boolean = false
+let isWinForms = false
 /** Class that triggered the framework classification — diagnostics. */
 let boundFrameworkClass: string | null = null
 /** Channel used by the current decomposed mouse-down, so release pairs correctly. */
 let mouseDownUsedRealInput: boolean | null = null
+let inputReleasePendingAfterTurn = false
 const pendingKeyReleases = new Set<number>()
 
 function shouldLeaveBoundForNewForeground(boundPid: number | null, boundAt: number | null, foreground: FrontmostAppInfo): boolean {
@@ -274,48 +280,74 @@ async function flushPendingKeyReleases(): Promise<void> {
   }
 }
 
-export async function prepareWindowsTarget(signal?: AbortSignal): Promise<void> {
+export async function prepareWindowsTarget(signal?: AbortSignal, purpose: TargetPreparation = 'input'): Promise<void> {
   signal?.throwIfAborted()
-  if (pendingKeyReleases.size > 0 && isElevatedPowerShellActive()) await ensureElevatedPowerShell(signal)
+  if (pendingKeyReleases.size > 0) await prepareComputerUseRelease()
   await flushPendingKeyReleases()
   const foreground = apps.getFrontmostApp()
-  if (foreground && shouldLeaveBoundForNewForeground(boundPid, boundAt, foreground)) unbindWindow()
+  const foregroundPid = foreground?.hostPid ?? foreground?.pid
+  if (foregroundPid !== explicitlyActivatedPid) {
+    explicitlyActivatedPid = undefined
+    if (foreground && shouldLeaveBoundForNewForeground(boundPid, boundAt, foreground)) unbindWindow()
+  }
+  if (!boundPid && (purpose === 'capture' || purpose === 'hover')) {
+    // Full-display capture and positioning operate on the desktop itself.
+    setComputerUseTargetElevated(false)
+    return
+  }
   const current = getCurrentProcessIL()
   if (current === 'high' || current === 'system') {
     setComputerUseTargetElevated(false)
     return
   }
-  const pid = boundPid ?? getForegroundProcessId()
+  const pid = boundPid ?? foreground?.pid
   const target = pid ? getProcessIL(pid) : 'unknown'
   const required = needsElevatedHelper(current, target)
+  if (required) {
+    if (purpose === 'hover' && !isElevatedPowerShellActive()) {
+      throw new Error('This window requires the Windows Computer Use helper. Capture a fresh screenshot after the user approves it before moving the pointer.')
+    }
+    await ensureElevatedPowerShell(signal)
+  }
   setComputerUseTargetElevated(required)
-  if (required) await ensureElevatedPowerShell(signal)
+}
+
+/** Retry only deferred cleanup or an interrupted press after UAC. */
+export async function releaseWindowsInputBeforeAction(afterUac: boolean): Promise<void> {
+  if (afterUac || inputReleasePendingAfterTurn || pendingKeyReleases.size > 0) {
+    await releaseWindowsMouseAfterTurn()
+  }
 }
 
 /** Clean up an unfinished decomposed press once the user desktop is active. */
 export async function releaseWindowsMouseAfterTurn(): Promise<void> {
-  if (desktopState() !== 'ready') return
-  await flushPendingKeyReleases()
   const channel = mouseDownUsedRealInput
-  if (channel === null) return
-  try {
-    if (channel || boundHwnd) await input.mouseUp(0, 0)
+  inputReleasePendingAfterTurn = channel !== null || pendingKeyReleases.size > 0
+  if (!inputReleasePendingAfterTurn || desktopState() !== 'ready') return
+  if (pendingKeyReleases.size > 0 || channel === true) await prepareComputerUseRelease()
+  await flushPendingKeyReleases()
+  if (channel !== null) {
+    try {
+      if (channel || boundHwnd) await input.mouseUp(0, 0)
+    } catch (error) {
+      // A dead background target never held a physical button.
+      if (channel) {
+        throw new Error(`The physical Windows mouse button could not be released. No new action was sent; retry cleanup before continuing. ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     mouseDownUsedRealInput = null
     resetMouseButtonHeld()
-  } catch (error) {
-    // Background release to a dead window leaves no physical button held.
-    if (channel === false) {
-      mouseDownUsedRealInput = null
-      resetMouseButtonHeld()
-      return
-    }
-    throw new Error(`The physical Windows mouse button could not be released. No new action was sent; retry cleanup before continuing. ${error instanceof Error ? error.message : String(error)}`)
   }
+  inputReleasePendingAfterTurn = false
 }
 
 /** Mouse channel for the bound window: real input required? */
 function realMouseChannel(): boolean {
   return isChromium || isSelfDrawn
+}
+
+function realKeyboardChannel(): boolean {
+  return realMouseChannel() || isWinForms
 }
 
 /** Get the bound HWND, or null if not bound */
@@ -343,6 +375,7 @@ export function bindWindow(hwnd: number, pid?: number, exeBase?: string, appId: 
   boundAppId = appId
   boundAt = Date.now()
   bindingRevision++
+  explicitlyActivatedPid = undefined
   mouseDownUsedRealInput = null
   // Reset SendMessage status — will be checked on first operation
   sendMessageOk = null
@@ -351,6 +384,7 @@ export function bindWindow(hwnd: number, pid?: number, exeBase?: string, appId: 
   const framework = detectWindowFramework(hwnd)
   isChromium = framework.chromium
   isSelfDrawn = framework.selfDrawn
+  isWinForms = framework.winForms === true
   boundFrameworkClass = framework.matchedClass
   // Invalidate screenshot cache for new window
   cachedScreenshot = null
@@ -367,6 +401,7 @@ export function bindFile(filePath: string, appType: import('../win32/appDispatch
   boundAppId = appId
   boundAt = Date.now()
   bindingRevision++
+  explicitlyActivatedPid = undefined
   mouseDownUsedRealInput = null
 }
 
@@ -381,10 +416,12 @@ export function unbindWindow(): void {
   boundAppId = null
   boundAt = null
   bindingRevision++
+  explicitlyActivatedPid = undefined
   mouseDownUsedRealInput = null
   sendMessageOk = null
   isChromium = false
   isSelfDrawn = false
+  isWinForms = false
   boundFrameworkClass = null
 }
 
@@ -424,7 +461,7 @@ export function getBoundInputChannel(): {
 function guardBoundWindow(needForeground: boolean): void {
   if (!boundHwnd) return
   let result = ensureWindow(boundHwnd, needForeground, boundPid ?? undefined, true)
-  if (result.status === 'dead') {
+  if (result.status === 'dead' && !isAbsoluteExe(boundAppId)) {
     const replacement = findReplacementWindow(boundPid, boundExeBase)
     if (replacement) {
       bindWindow(replacement.hwnd, replacement.pid, boundExeBase ?? undefined, boundAppId)
@@ -628,7 +665,7 @@ for (\$i = 0; \$i -lt ${count}; \$i++) {
     if (-not [CuClickRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before click' }
     if (-not [CuWin32]::SetCursorPos(${rx} + \$r.L, ${ry} + \$r.T)) { throw 'SetCursorPos failed before click' }
     Start-Sleep -Milliseconds 20
-    [CuInputIntegrity]::RequireAtCursor()
+    [CuInputIntegrity]::RequireAtCursor([IntPtr]${hwnd})
     [CuWin32]::mouse_event(${downFlag}, 0, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 50
     [CuWin32]::mouse_event(${upFlag}, 0, 0, 0, [IntPtr]::Zero)
@@ -886,7 +923,7 @@ function vkForKey(name: string): number | undefined {
   return undefined
 }
 
-function planKeyChord(parts: string[]): { modifiers: number[]; keys: number[] } {
+export function planKeyChord(parts: string[]): { modifiers: number[]; keys: number[] } {
   if (parts.length === 0) throw new Error('Key chord is empty; no input was sent.')
   const modifiers: number[] = []
   const keys: number[] = []
@@ -988,7 +1025,7 @@ const input: InputPlatform = {
     if (boundHwnd) {
       // Multi-click needs the real system click counter; background messages
       // remain limited to single-click delivery.
-      const realInput = count > 1 || realMouseChannel()
+      const realInput = count > 1 || realMouseChannel() || isWinForms
       guardBoundWindow(realInput)
       if (realInput) {
         sendInputClick(boundHwnd, x, y, button, count)
@@ -1038,7 +1075,13 @@ for ($i = 0; $i -lt ${count}; $i++) {
   },
 
   async mouseUp(x, y) {
-    if (desktopState() !== 'ready') return
+    if (desktopState() !== 'ready') {
+      if (mouseDownUsedRealInput === true) {
+        inputReleasePendingAfterTurn = true
+        throw new Error('The Windows input desktop is unavailable. The physical mouse release will be retried when it is ready.')
+      }
+      return
+    }
     if (!boundHwnd) {
       sendInputButton(undefined, x, y, 'left', 'up')
       mouseDownUsedRealInput = null
@@ -1099,7 +1142,7 @@ for ($i = 0; $i -lt ${count}; $i++) {
         pendingKeyReleases.add(vk)
         return
       }
-      if (boundHwnd && !isSelfDrawn) {
+      if (boundHwnd && !realKeyboardChannel()) {
         try { getWm().sendKey(boundHwnd, vk, 'up') } catch {}
       }
       // Always attempt the physical release too; key-up is idempotent and must
@@ -1114,7 +1157,7 @@ for ($i = 0; $i -lt ${count}; $i++) {
       return
     }
     if (boundHwnd) {
-      if (!isSelfDrawn) {
+      if (!realKeyboardChannel()) {
         guardBoundWindow(false)
         ensureSendAccess()
         if (!getWm().sendKey(boundHwnd, vk, 'down', boundPid ?? undefined)) {
@@ -1137,8 +1180,9 @@ ${INPUT_INTEGRITY_TYPES}
   async keys(parts) {
     const chord = planKeyChord(parts)
     if (boundHwnd) {
-      const needsRealChord = chord.modifiers.length > 0
-      if (!isSelfDrawn && !needsRealChord) {
+      // Return/Tab need the focused control, which may have its own HWND.
+      const needsRealChord = chord.modifiers.length > 0 || chord.keys.includes(VK_MAP.return) || chord.keys.includes(VK_MAP.tab)
+      if (!realKeyboardChannel() && !needsRealChord) {
         guardBoundWindow(false)
         ensureSendAccess()
         if (!getWm().sendKeys(boundHwnd, parts, boundPid ?? undefined)) {
@@ -1438,7 +1482,7 @@ export async function captureScreenForApi(displayId?: number): Promise<Screensho
 
 function parseDisplayEntries(raw: string): DisplayInfo[] {
   return raw.split('|').filter(Boolean).map(entry => {
-    const [w, h, id, x, y, _primary, _scale] = entry.split(',')
+    const [w, h, id, x, y, primary, _scale] = entry.split(',')
     const values = [w, h, id, x, y].map(Number)
     if (values.some(value => !Number.isFinite(value))) {
       throw new Error(`Invalid display metadata entry: ${entry}`)
@@ -1451,6 +1495,7 @@ function parseDisplayEntries(raw: string): DisplayInfo[] {
       originY: values[4]!,
       // Dimensions are already physical pixels (DPI-aware PS script).
       scaleFactor: 1,
+      isPrimary: primary?.toLowerCase() === 'true',
     }
   })
 }
@@ -1503,7 +1548,7 @@ $result -join "|"
 // ---------------------------------------------------------------------------
 
 function readWindowTarget(hwndExpression: string, prelude = ''): FrontmostAppInfo {
-  const out = ps(`${WIN32_TYPES}
+  const out = runPowerShellSync(`${WIN32_TYPES}
 ${PROCESS_IMAGE_PS}
 ${prelude}
 Add-Type @'
@@ -1577,6 +1622,38 @@ $hostIdentity = if ($hostProcessId -eq $processId) { $actual } else { Read-CuTar
   }
 }
 
+function isAbsoluteExe(path: string | null): boolean {
+  return path !== null && windowsPath.isAbsolute(path) && /\.exe$/i.test(path)
+}
+
+function comparableExePath(path: string): string {
+  return windowsPath.normalize(path).toLowerCase()
+}
+
+function windowIdentity(window: { hwnd: number; pid: number }): string {
+  return `${window.hwnd}:${window.pid}`
+}
+
+export function listWindowsWithIdentity(visibleOnly = true): WindowsWindow[] {
+  return listWindowDetails(visibleOnly).map(({ path, ...window }) => ({
+    ...window,
+    bundleId: path,
+    windowId: windowIdentity(window),
+  }))
+}
+
+export function activateWindowsWindow(window: WindowsWindow, signal?: AbortSignal): boolean {
+  signal?.throwIfAborted()
+  const candidate = listWindowDetails(false).find(item => item.hwnd === window.hwnd && item.pid === window.pid)
+  if (!candidate?.path || comparableExePath(candidate.path) !== comparableExePath(window.bundleId)) {
+    throw new Error('The selected window changed. Refresh list_windows before activating it.')
+  }
+  signal?.throwIfAborted()
+  const activated = activateObservedWindow(candidate.hwnd, candidate.pid)
+  if (activated) explicitlyActivatedPid = candidate.pid
+  return activated
+}
+
 const apps: AppsPlatform = {
   listRunning(): WindowHandle[] {
     const windows = listWindows()
@@ -1597,64 +1674,44 @@ const apps: AppsPlatform = {
     }
   },
 
-  async open(name, signal) {
+  async open(name, signal, windowId) {
     signal?.throwIfAborted()
-    // Detect app type and route to appropriate controller
+    const exactExe = isAbsoluteExe(name)
     const appType = detectAppType(name)
-
-    // Excel/Word → COM automation (no window, no HWND)
-    if (appType === 'excel' || appType === 'word') {
+    if (!exactExe && !windowId && (appType === 'excel' || appType === 'word')) {
       const result = await openWithController(name)
       signal?.throwIfAborted()
-      if (result.filePath) {
-        bindFile(result.filePath, result.type, name)
-      }
+      if (result.filePath) bindFile(result.filePath, result.type, name)
       return
     }
 
     const escaped = name.replace(/'/g, "''")
-    // Executable base name (no .exe) — process-name matching key
-    const base = escaped.split(/[\\/]/).pop()!.replace(/\.exe$/i, '').trim()
-
-    // ── Step 0: already-running window → bind directly, no new instance ──
-    // Single-instance apps (Android Studio, emulators, browsers) make
-    // Start-Process hand off to the existing instance and exit — the old code
-    // then waited 10s on the dead launcher PID and silently gave up, leaving
-    // the binding stale. Matching the live window up front makes open()
-    // idempotent and turns "user minimized/closed the window" into a re-bind.
-    {
-      const windows = listWindows()
-      const candidatePids = base ? getPidsForProcessName(base) : []
-      if (candidatePids.length > 0) {
-        const byProc = windows.find(w => candidatePids.includes(w.pid))
-        if (byProc) {
-          bindWindow(byProc.hwnd, byProc.pid, base, name)
-          const activation = ensureWindow(byProc.hwnd, true)
-          if (activation.status !== 'ok') {
-            throw new Error(`"${name}" was found and bound, but could not be brought to the foreground. The binding remains active; take a screenshot before deciding whether to retry.`)
-          }
-          await prepareWindowsTarget(signal)
-          return
-        }
+    const base = windowsPath.basename(name).replace(/\.exe$/i, '').trim()
+    const windows = listWindows(exactExe)
+    const candidatePids = !exactExe && base ? getPidsForProcessName(base) : []
+    const matchingWindows = windows.filter(window => exactExe
+      ? window.path && comparableExePath(window.path) === comparableExePath(name)
+      : candidatePids.includes(window.pid))
+    const candidate = windowId
+      ? matchingWindows.find(window => exactExe && windowIdentity(window) === windowId)
+      : matchingWindows[0]
+    if (windowId && !candidate) {
+      throw new Error('The selected window no longer matches the granted executable. Refresh list_granted_applications before opening it.')
+    }
+    if (candidate) {
+      bindWindow(candidate.hwnd, candidate.pid, base, name)
+      const activation = ensureWindow(candidate.hwnd, true, candidate.pid)
+      if (activation.status !== 'ok') {
+        throw new Error(`"${name}" was found and bound, but could not be brought to the foreground. The binding remains active; take a screenshot before deciding whether to retry.`)
       }
-      if (windows.length > 0 && name.length >= 3 && candidatePids.length > 0) {
-        const lower = name.toLowerCase()
-        const byTitle = windows.find(w => candidatePids.includes(w.pid) && w.title.toLowerCase().includes(lower))
-        if (byTitle) {
-          bindWindow(byTitle.hwnd, byTitle.pid, base, name)
-          const activation = ensureWindow(byTitle.hwnd, true)
-          if (activation.status !== 'ok') {
-            throw new Error(`"${name}" was found and bound, but could not be brought to the foreground. The binding remains active; take a screenshot before deciding whether to retry.`)
-          }
-          await prepareWindowsTarget(signal)
-          return
-        }
-      }
+      await prepareWindowsTarget(signal)
+      return
     }
 
     // ── Launch: 1) exact path 2) PATH 3) registry 4) UWP 5) raw name ──
     const result = await runPowerShell(`
 ${WIN32_TYPES}
+${exactExe ? PROCESS_IMAGE_PS : ''}
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -1690,6 +1747,7 @@ public class CuLaunch {
 # WindowsApps with an App Paths entry) — Get-StartApps is unreliable in
 # non-interactive sessions.
 $target = '${escaped}'
+$exactExe = $${exactExe}
 $proc = $null
 $launchPath = ''
 
@@ -1700,6 +1758,7 @@ if (Test-Path -LiteralPath $target) {
     ${buildPortableAppLaunchBlock()}
 }
 
+if (-not $exactExe) {
 # 2. exe name in PATH (e.g. "notepad.exe", "code.exe") — .exe results only
 if (-not $proc) {
     foreach ($name in @($target, "$target.exe")) {
@@ -1753,42 +1812,41 @@ if (-not $proc) {
 # 6. Last resort: try raw name
 if (-not $proc) { $proc = Start-CuApplication $target; if ($proc) { $launchPath = $target } }
 
+}
+
 if (-not $proc) { Write-Host "LAUNCH_FAILED"; exit }
 
 # Wait for a window: 1) the new PID  2) any PID whose process name matches the
-# launched exe's base (single-instance handoff / UWP stub-PID cases)  3) a
-# window title containing the base or target name. namePids is recomputed per
-# iteration — Store apps may not have spawned yet on loop entry.
-$hint = if ($launchPath -like '*\\*') { [System.IO.Path]::GetFileNameWithoutExtension($launchPath) } else { '${base}' }
+# launched exe's base for shell identities (single-instance/UWP handoff).
+# Complete exe paths are matched only by process image.
+$hint = if ($launchPath -like '*\\*') { [System.IO.Path]::GetFileNameWithoutExtension($launchPath) } else { '${base.replace(/'/g, "''")}' }
 $hwnd = 0
 $hwndPid = 0
 for ($i = 0; $i -lt 50 -and $hwnd -eq 0; $i++) {
     Start-Sleep -Milliseconds 200
     [CuLaunch]::ListWindows()
+    if ($exactExe) {
+        foreach ($c in [CuLaunch]::windows) {
+            $parts = $c.Split('|')
+            $wp = [uint32]$parts[1]
+            $image = [CuProcessImage]::Get($wp)
+            if ([string]::Equals($image, $launchPath, [StringComparison]::OrdinalIgnoreCase)) {
+                $hwnd = [long]$parts[0]; $hwndPid = $wp; break
+            }
+        }
+        continue
+    }
     foreach ($c in [CuLaunch]::windows) {
         $parts = $c.Split('|')
-        if ($parts.Length -lt 3) { continue }
-        $wh = [long]$parts[0]; $wp = [uint32]$parts[1]; $wt = $parts[2]
-        if ($wp -eq [uint32]$proc.Id) { $hwnd = $wh; $hwndPid = $wp; break }
+        $wp = [uint32]$parts[1]
+        if ($wp -eq [uint32]$proc.Id) { $hwnd = [long]$parts[0]; $hwndPid = $wp; break }
     }
     if ($hwnd -eq 0 -and -not [string]::IsNullOrEmpty($hint)) {
-        $namePids = @()
-        Get-Process -Name $hint -ErrorAction SilentlyContinue | ForEach-Object { $namePids += [uint32]$_.Id }
+        $namePids = @(Get-Process -Name $hint -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
         foreach ($c in [CuLaunch]::windows) {
             $parts = $c.Split('|')
-            if ($parts.Length -lt 3) { continue }
-            $wh = [long]$parts[0]; $wp = [uint32]$parts[1]
-            if ($namePids -contains $wp) { $hwnd = $wh; $hwndPid = $wp; break }
-        }
-    }
-    if ($hwnd -eq 0 -and -not [string]::IsNullOrEmpty($hint)) {
-        foreach ($c in [CuLaunch]::windows) {
-            $parts = $c.Split('|')
-            if ($parts.Length -lt 3) { continue }
-            $wh = [long]$parts[0]; $wp = [uint32]$parts[1]; $wt = $parts[2]
-            if (($namePids -contains $wp) -and ($wt.IndexOf($hint, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or $wt.IndexOf($target, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
-                $hwnd = $wh; $hwndPid = $wp; break
-            }
+            $wp = [uint32]$parts[1]
+            if ($namePids -contains $wp) { $hwnd = [long]$parts[0]; $hwndPid = $wp; break }
         }
     }
 }
@@ -1808,6 +1866,9 @@ Write-Host "$hwnd|$hwndPid|$exePath"
       )
     }
     if (result.startsWith('HWND_NOT_FOUND')) {
+      if (exactExe) {
+        throw new Error(`Launched "${name}" but no window belonging to that executable appeared within 10s. If it opened another application, request access to that application's executable before binding its window.`)
+      }
       throw new Error(
         `Launched "${name}" but no application window appeared within 10s. ` +
           'It may be a background-only app, still initializing, or require ' +
@@ -1825,7 +1886,7 @@ Write-Host "$hwnd|$hwndPid|$exePath"
         ? exePath.split(/[\\/]/).pop()!.replace(/\.exe$/i, '').trim()
         : base
       bindWindow(hwnd, pid, exeBase || undefined, name)
-      const activation = ensureWindow(hwnd, true)
+      const activation = ensureWindow(hwnd, true, pid)
       if (activation.status !== 'ok') {
         throw new Error(`"${name}" launched and was bound, but could not be brought to the foreground. The binding remains active; take a screenshot before deciding whether to retry.`)
       }

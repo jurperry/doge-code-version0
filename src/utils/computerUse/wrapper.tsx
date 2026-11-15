@@ -338,13 +338,14 @@ async function callComputerUseTool({
         let result: CuCallToolResult;
         try {
           result = await dispatch(toolName, args, requestSignal, reportProgress, async action => {
-            const refreshesTarget = action === 'screenshot' || action === 'open_application' || action === 'switch_display';
+            const canRunBeforeRefresh = action === 'screenshot' || action === 'open_application' || action === 'switch_display' ||
+              action === 'list_windows' || action === 'get_window' || action === 'list_granted_applications';
             await guard.beforeAction(requestSignal);
             if (process.platform === 'win32') {
-              const { releaseWindowsMouseAfterTurn } = await import('./platforms/win32.js');
-              await releaseWindowsMouseAfterTurn();
+              const { releaseWindowsInputBeforeAction } = await import('./platforms/win32.js');
+              await releaseWindowsInputBeforeAction(needsScreenshotAfterUac);
             }
-            if (needsScreenshotAfterUac && !refreshesTarget) {
+            if (needsScreenshotAfterUac && !canRunBeforeRefresh) {
               throw new Error(UAC_FRESH_SCREENSHOT);
             }
             if (toolName === 'screenshot') captureGeneration = guard.generation;

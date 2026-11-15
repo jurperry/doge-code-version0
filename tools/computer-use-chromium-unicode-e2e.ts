@@ -3,6 +3,8 @@ import { createRequire } from 'module'
 import { join } from 'path'
 import { createCliExecutor } from '../src/utils/computerUse/executor.js'
 import { bindWindow, getBoundInputChannel, unbindWindow } from '../src/utils/computerUse/platforms/win32.js'
+import { handleToolCall, DEFAULT_GRANT_FLAGS } from '@ant/computer-use-mcp'
+import { getComputerUseHostAdapter } from '../src/utils/computerUse/hostAdapter.js'
 import { runPowerShellSync } from '../src/utils/computerUse/win32/powerShell.js'
 
 const box = join(process.cwd(), 'test', 'tmp-cu-chromium-unicode')
@@ -41,7 +43,7 @@ app.whenReady().then(() => {
 `
 const html = `<!doctype html>
 <html><head><meta charset="utf-8"><title>CU Chromium Unicode Fixture</title></head>
-<body><input id="target" autofocus style="width:90%;font-size:24px"><script>
+<body><textarea id="target" autofocus style="width:90%;font-size:24px"></textarea><script>
 const target = document.getElementById('target')
 target.focus()
 target.addEventListener('input', () => {
@@ -95,6 +97,16 @@ try {
   const longMatched = await waitForText(longText)
   const longActual = actualText()
   check('long mixed Unicode input remains intact', longMatched, `${longActual.length}/${longText.length} UTF-16 code units`)
+  await executor.key('ctrl+a')
+  await executor.key('backspace')
+  const result = await handleToolCall(getComputerUseHostAdapter(), 'type', { text: '甲\n乙\r\n丙\r丁😀' }, {
+    allowedApps: [{ bundleId: 'fixture.app', displayName: 'Chromium fixture', grantedAt: 1, tier: 'full' }],
+    grantFlags: { ...DEFAULT_GRANT_FLAGS },
+    userDeniedBundleIds: [],
+    coordinateMode: 'pixels',
+  })
+  const multilineMatched = await waitForText('甲\n乙\n丙\n丁😀')
+  check('bound Chromium textarea receives each explicit line break without clipboard paste', !result.isError && multilineMatched, JSON.stringify(actualText()))
 } catch (error) {
   failures++
   console.error('[FAIL] Chromium Unicode e2e threw:', error)

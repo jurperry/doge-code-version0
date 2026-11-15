@@ -263,13 +263,12 @@ export interface ComputerUseHostAdapter {
    * `nativeImage.createFromBuffer(jpeg).crop(rect).toBitmap()` — Chromium's
    * decoders, BSD-licensed, no `.node` binary.
    *
-   * Returns null on decode/crop failure — caller treats null as `skipped`,
-   * click proceeds (validation failure must never block the action).
+   * Returns null on decode/crop failure. The caller handles skipped validation.
    */
   cropRawPatch(
     jpegBase64: string,
     rect: { x: number; y: number; width: number; height: number },
-  ): Buffer | null;
+  ): Buffer | null | Promise<Buffer | null>;
 }
 
 // ----------------------------------------------------------------------------
@@ -422,6 +421,8 @@ export interface ComputerUseOverrides {
    * cold start → pixel validation skipped (click proceeds).
    */
   lastScreenshot?: ScreenshotResult;
+  /** Monotonic age of the current in-memory screenshot anchor. */
+  screenshotAgeMs?: number;
 
   /**
    * Fired after every `prepareForAction` with the bundle IDs it just hid.

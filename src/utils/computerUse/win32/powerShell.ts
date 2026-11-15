@@ -1,5 +1,7 @@
 import { spawnSync as nodeSpawnSync } from 'node:child_process'
 
+let observeSpawn: (() => void) | undefined
+
 type PowerShellResult = {
   exitCode: number | null
   stdout: string
@@ -28,6 +30,7 @@ export function runPowerShellSync(script: string, timeoutMs = 10_000, stdin?: st
   let result: PowerShellResult
   let timedOut = false
   try {
+    observeSpawn?.()
     const completed = nodeSpawnSync(
       'powershell',
       ['-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
@@ -53,6 +56,7 @@ export function runPowerShellSync(script: string, timeoutMs = 10_000, stdin?: st
 
 export async function runPowerShell(script: string, timeoutMs = 15_000, stdin?: string, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted()
+  observeSpawn?.()
   const proc = Bun.spawn(
     ['powershell', '-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
     { stdin: stdin === undefined ? 'ignore' : 'pipe', stdout: 'pipe', stderr: 'pipe' },
@@ -88,4 +92,7 @@ export async function runPowerShell(script: string, timeoutMs = 15_000, stdin?: 
   }
 }
 
-export const _test = { assertPowerShellSuccess }
+export const _test = {
+  assertPowerShellSuccess,
+  observeSpawns(observer?: () => void) { observeSpawn = observer },
+}

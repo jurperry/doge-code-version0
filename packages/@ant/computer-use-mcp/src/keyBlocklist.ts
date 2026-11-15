@@ -43,6 +43,8 @@ const CANONICAL_MODIFIER: Readonly<Record<string, string>> = {
   // both Force Quit.
   alt: "alt",
   option: "alt",
+  lalt: "alt",
+  ralt: "alt",
 };
 
 /** Sort order for canonicals. ctrl < alt < shift < meta. */
@@ -68,6 +70,8 @@ const BLOCKED_WIN32 = new Set([
   "alt+tab", // window switcher
   "meta+l", // Win+L — lock
   "meta+d", // Win+D — show desktop
+  "meta+r", // Win+R — Run dialog
+  "ctrl+shift+escape", // Task Manager
 ]);
 
 /**
@@ -84,11 +88,11 @@ function partitionKeys(seq: string): { mods: string[]; keys: string[] } {
   const mods: string[] = [];
   const keys: string[] = [];
   for (const p of parts) {
-    const canonical = CANONICAL_MODIFIER[p];
+    const canonical = Object.hasOwn(CANONICAL_MODIFIER, p) ? CANONICAL_MODIFIER[p] : undefined;
     if (canonical !== undefined) {
       mods.push(canonical);
     } else {
-      keys.push(p);
+      keys.push(p === "esc" ? "escape" : p);
     }
   }
   // Dedupe: "cmd+command+q" → "meta+q", not "meta+meta+q".
@@ -136,7 +140,16 @@ export function isSystemKeyCombo(
     return blocklist.has(mods.join("+"));
   }
 
-  // mods + each key. Any hit blocks the whole sequence.
+  if (platform === "win32") {
+    // hold_key and click modifiers can press keys one at a time. An extra
+    // modifier later in the chord cannot undo an earlier system shortcut.
+    return [...blocklist].some(combo => {
+      const parts = combo.split("+");
+      const key = parts.pop()!;
+      return keys.includes(key) && parts.every(modifier => mods.includes(modifier));
+    });
+  }
+
   for (const key of keys) {
     if (blocklist.has(prefix + key)) {
       return true;

@@ -11,7 +11,7 @@ type ChicagoConfig = CuSubGates & {
 
 const DEFAULTS: ChicagoConfig = {
   enabled: true,
-  pixelValidation: false,
+  pixelValidation: process.platform === 'win32',
   clipboardPasteMultiline: true,
   mouseAnimation: true,
   hideBeforeAction: true,

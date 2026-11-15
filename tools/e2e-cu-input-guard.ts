@@ -1,320 +1,172 @@
-/**
- * Computer Use 输入前置卫兵 + 应用枚举 端到端验证脚本（Windows 实机）。
- *
- * 验证内容：
- *  1. listInstalledAppsWin32 拆阶段枚举：非空、含已知应用（notepad）、
- *     运行中窗口以 extraPaths（窗口标题）形式参与解析候选、耗时可控。
- *  2. apps.open('notepad') → HWND 绑定成功（含"已运行窗口优先绑定"路径）。
- *  3. 后台 SendMessage typeText：存活卫兵通过、文本真实进入 notepad。
- *  4. 杀掉 notepad 进程 → 输入卫兵按预期抛错（带 open_application 指引），
- *     绝不静默无效。
- *  5. 重新 open → 绑定恢复；最小化后 needForeground 路径能恢复窗口并置前。
- *
- * 运行：bun run tools/e2e-cu-input-guard.ts
- * 影响面：会短暂打开/激活一个 notepad 窗口（第 5 步短暂抢占前台），结束即清理。
- * 不写任何文件到 C 盘测试目录之外；notepad 不落盘。
- */
+/** Isolated regression for exact Windows window discovery and binding. */
+import assert from 'node:assert/strict'
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join, win32 as windowsPath } from 'node:path'
+import { DEFAULT_GRANT_FLAGS, handleToolCall } from '@ant/computer-use-mcp'
+import { getComputerUseHostAdapter } from '../src/utils/computerUse/hostAdapter.js'
+import { getBoundHwnd, getBoundRevision, platform, prepareWindowsTarget, unbindWindow } from '../src/utils/computerUse/platforms/win32.js'
+import { runPowerShellSync } from '../src/utils/computerUse/win32/powerShell.js'
+import { listWindows } from '../src/utils/computerUse/win32/windowEnum.js'
 
-process.env.CLAUDE_CONFIG_DIR = (() => {
-  const { join } = require('path') as typeof import('path')
-  return join(process.cwd(), 'test', 'tmp-cu-guard-e2e-config')
-})()
-
-const { mkdirSync, rmSync } = await import('fs')
-
-const TMP_DIR = process.env.CLAUDE_CONFIG_DIR
-
-let failures = 0
-function check(label: string, ok: boolean, detail: string): void {
-  const mark = ok ? 'PASS' : 'FAIL'
-  console.log(`[${mark}] ${label}${detail ? ` — ${detail}` : ''}`)
-  if (!ok) failures++
-}
-
-/** Read a notepad edit control's text via WM_GETTEXT (Edit child on classic
- *  notepad, RichEditD2DPT on the Win11 Store version). */
-async function readNotepadText(hwnd: number): Promise<string> {
-  const r = Bun.spawnSync({
-    cmd: [
-      'powershell',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      `
-Add-Type @'
+const box = join(process.cwd(), 'test', 'tmp-cu-exact-window')
+const intended = join(box, 'granted', 'WordFixture.exe')
+const foreign = join(box, 'other', 'WordFixture.exe')
+const source = join(box, 'fixture.cs')
+const fixture = `
 using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public class NpRead {
-    public delegate bool EnumChildProc(IntPtr h, IntPtr lp);
-    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr p, EnumChildProc cb, IntPtr lp);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, StringBuilder l);
-    public static StringBuilder buf = new StringBuilder(4096);
-    public static void Read(IntPtr parent) {
-        EnumChildWindows(parent, delegate(IntPtr h, IntPtr lp) {
-            var sb = new StringBuilder(256);
-            GetClassName(h, sb, sb.Capacity);
-            var cls = sb.ToString();
-            if (cls == "Edit" || cls == "RichEditD2DPT" || cls == "RichEdit20W") {
-                SendMessage(h, 0x000D, (IntPtr)4096, buf);
-                return false;
-            }
-            return true;
-        }, IntPtr.Zero);
+using System.Windows.Forms;
+using System.IO;
+using System.Drawing;
+class WindowFixture {
+    [STAThread] static void Main(string[] args) {
+        var form = new Form { Text = args.Length > 0 ? args[0] : "Granted fixture", Width = 420, Height = 300 };
+        if (args.Length > 1) {
+            form.BackColor = Color.White;
+            var update = new Timer { Interval = 60 };
+            update.Tick += (sender, e) => {
+                if (File.Exists(args[1])) { form.BackColor = Color.DarkBlue; update.Stop(); }
+            };
+            form.MouseDown += (sender, e) => File.WriteAllText(args[1] + ".click", "received");
+            update.Start();
+        }
+        var timeout = new Timer { Interval = 90000 };
+        timeout.Tick += (sender, e) => form.Close();
+        timeout.Start();
+        Application.Run(form);
     }
 }
-'@
-[NpRead]::Read([IntPtr]${hwnd})
-[NpRead]::buf.ToString()
-`,
-    ],
-    stdout: 'pipe',
-    stderr: 'pipe',
-    timeoutMs: 10000,
-  })
-  return new TextDecoder().decode(r.stdout).replace(/\0+$/, '')
+`
+
+function literal(path: string): string { return "'" + path.replaceAll("'", "''") + "'" }
+
+async function waitForWindow(predicate: (window: ReturnType<typeof listWindows>[number]) => boolean) {
+  for (let i = 0; i < 20; i++) {
+    const window = listWindows(true).find(predicate)
+    if (window) return window
+    await Bun.sleep(100)
+  }
+  throw new Error('Fixture window did not appear')
 }
 
-/** Kill the process owning a window (used to simulate "user closed the app"). */
-function killWindowProcess(pid: number): void {
-  Bun.spawnSync({
-    cmd: ['taskkill', '/PID', String(pid), '/T', '/F'],
-    stdout: 'pipe',
-    stderr: 'pipe',
-    timeoutMs: 10000,
-  })
+function isIntended(path: string | undefined): boolean {
+  return !!path && windowsPath.normalize(path).toLowerCase() === intended.toLowerCase()
 }
 
+const procs: ReturnType<typeof Bun.spawn>[] = []
+mkdirSync(join(box, 'granted'), { recursive: true })
+mkdirSync(join(box, 'other'), { recursive: true })
+process.env.TEMP = box
+process.env.TMP = box
+process.env.CLAUDE_CONFIG_DIR = join(box, 'config')
 try {
-  mkdirSync(TMP_DIR, { recursive: true })
+  writeFileSync(source, fixture, 'utf8')
+  runPowerShellSync(`
+$compiler = Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
+& $compiler /nologo /target:winexe /out:${literal(intended)} /reference:System.Windows.Forms.dll /reference:System.Drawing.dll ${literal(source)}
+if ($LASTEXITCODE -ne 0) { throw 'Could not compile exact-window fixture' }
+`, 20_000)
+  copyFileSync(intended, foreign)
+  const other = Bun.spawn([foreign, 'Private fixture'], { stdout: 'ignore', stderr: 'ignore' })
+  procs.push(other)
+  const foreignWindow = await waitForWindow(window => window.pid === other.pid)
 
-  const { platform, getBoundHwnd, bindWindow } = await import(
-    '../src/utils/computerUse/platforms/win32.js'
-  )
-  const { ensureWindow } = await import(
-    '../src/utils/computerUse/win32/windowGuard.js'
-  )
-  const { listInstalledAppsWin32 } = await import(
-    '../src/utils/computerUse/win32/installedApps.js'
-  )
-
-  // ── 1. 应用枚举（问题 2 的核心修复）──────────────────────────────────
-  const enumStart = Date.now()
-  const installed = await listInstalledAppsWin32()
-  const enumMs = Date.now() - enumStart
-  check(
-    'listInstalledAppsWin32 returns a non-trivial list',
-    installed.length > 10,
-    `${installed.length} apps in ${enumMs}ms`,
-  )
-  check(
-    'enumeration completes in a sane time (<30s, was: 15s kill → empty)',
-    enumMs < 30000,
-    `${(enumMs / 1000).toFixed(1)}s`,
-  )
-  const notepadEntry = installed.find(
-    a => a.displayName.toLowerCase() === 'notepad',
-  )
-  check(
-    'notepad resolvable by display name',
-    notepadEntry !== undefined,
-    notepadEntry ? `id=${notepadEntry.id}` : 'missing',
-  )
-
-  // ── 1b. request_access 全链路（问题 2 的工具层回归）──────────────────
-  // bindSessionContext → handleRequestAccess → resolveRequestedApps →
-  // 新枚举列表解析 → （stub 掉弹窗）授权成功。旧行为：枚举被 15s 守卫杀掉
-  // → 列表为空 → not_installed。
-  let dispatch: ((name: string, args: unknown) => Promise<any>) | undefined
-  let grantedApps: Array<{ bundleId: string; displayName: string; grantedAt: number }> = []
-  {
-    const { bindSessionContext, DEFAULT_GRANT_FLAGS } = await import(
-      '@ant/computer-use-mcp'
-    )
-    const { getComputerUseHostAdapter } = await import(
-      '../src/utils/computerUse/hostAdapter.js'
-    )
-    const { getChicagoCoordinateMode } = await import(
-      '../src/utils/computerUse/gates.js'
-    )
-    const {
-      checkComputerUseLock,
-      tryAcquireComputerUseLock,
-      releaseComputerUseLock,
-    } = await import('../src/utils/computerUse/computerUseLock.js')
-
-    const ctx = {
-      getAllowedApps: () => grantedApps,
-      getGrantFlags: () => DEFAULT_GRANT_FLAGS,
-      getUserDeniedBundleIds: () => [],
-      getSelectedDisplayId: () => undefined,
-      isAborted: () => false,
-      checkCuLock: async () => ({ holder: undefined, isSelf: false }),
-      acquireCuLock: async () => {
-        const r = await tryAcquireComputerUseLock()
-        if (r.kind === 'blocked') throw new Error(`lock held by ${r.by}`)
-      },
-      onPermissionRequest: async (req: any) => ({
-        granted: req.apps
-          .filter((a: any) => a.resolved)
-          .map((a: any) => ({
-            bundleId: a.resolved.bundleId,
-            displayName: a.resolved.displayName,
-            grantedAt: Date.now(),
-          })),
-        denied: [],
-        flags: DEFAULT_GRANT_FLAGS,
-      }),
-    }
-    dispatch = bindSessionContext(
-      getComputerUseHostAdapter(),
-      getChicagoCoordinateMode(),
-      ctx as any,
-    ) as any
-    const res = await dispatch('request_access', {
-      apps: ['notepad'],
-      reason: 'e2e resolution check',
-    })
-    const text = res.content?.[0]?.text ?? ''
-    const parsed = JSON.parse(text)
-    grantedApps = parsed.granted ?? []
-    check(
-      'request_access resolves notepad end-to-end (was: not_installed)',
-      grantedApps.length === 1 && /notepad/i.test(grantedApps[0].displayName),
-      JSON.stringify(grantedApps),
-    )
+  const adapter = getComputerUseHostAdapter()
+  const overrides = {
+    allowedApps: [{ bundleId: intended, displayName: 'Granted fixture', grantedAt: 1, tier: 'full' as const }],
+    grantFlags: { ...DEFAULT_GRANT_FLAGS },
+    userDeniedBundleIds: [],
+    coordinateMode: 'pixels' as const,
   }
+  const forged = await handleToolCall(adapter, 'open_application', {
+    app: intended, window_id: `${foreignWindow.hwnd}:${foreignWindow.pid}`,
+  }, overrides)
+  assert.equal(forged.isError, true)
+  assert.equal(getBoundHwnd(), null)
 
-  // ── 2. open('notepad') → 绑定 ─────────────────────────────────────────
-  await platform.apps.open('notepad')
-  const hwnd = getBoundHwnd()
-  check('open(notepad) binds an HWND', hwnd !== null && hwnd > 0, `hwnd=${hwnd}`)
-  if (!hwnd) throw new Error('no bound hwnd — aborting further steps')
+  const opened = await handleToolCall(adapter, 'open_application', { app: intended }, overrides)
+  assert.equal(opened.isError, undefined, JSON.stringify(opened.content))
+  const first = await waitForWindow(window => isIntended(window.path))
+  assert.equal(getBoundHwnd(), first.hwnd)
+  assert.notEqual(first.pid, other.pid)
 
-  // ── 3. 后台 SendMessage 输入（存活卫兵通过）────────────────────────────
-  await platform.input.typeText('cu-guard-e2e')
-  await new Promise(r => setTimeout(r, 600))
-  const text = await readNotepadText(hwnd)
-  check(
-    'background SendMessage typeText lands in notepad (liveness guard passes)',
-    text.includes('cu-guard-e2e'),
-    JSON.stringify(text.slice(0, 60)),
-  )
-
-  // ── 3b. 卫兵微缓存下连续动作不炸 ──────────────────────────────────────
-  await platform.input.typeText('-ok')
-  await new Promise(r => setTimeout(r, 400))
-  const text2 = await readNotepadText(hwnd)
-  check(
-    'second rapid action passes the guard micro-cache',
-    text2.includes('cu-guard-e2e-ok'),
-    JSON.stringify(text2.slice(0, 60)),
-  )
-
-  // ── 4. 进程被杀 → 卫兵必须报错而非静默 ────────────────────────────────
-  // 先解除边框标记的干扰：直接杀 pid（bindWindow 时记录在 listWindows 里）
-  const { listWindows } = await import(
-    '../src/utils/computerUse/win32/windowEnum.js'
-  )
-  const win = listWindows().find(w => w.hwnd === hwnd)
-  const pid = win?.pid
-  if (pid) {
-    killWindowProcess(pid)
-    await new Promise(r => setTimeout(r, 800))
-    let threw: Error | undefined
-    try {
-      await platform.input.typeText('should-not-appear')
-    } catch (e) {
-      threw = e as Error
-    }
-    check(
-      'guard throws after the app is killed (actionable error, no silent no-op)',
-      threw !== undefined && /no longer exists|open_application/i.test(threw.message),
-      threw ? threw.message.slice(0, 90) : 'no error thrown',
-    )
-    const deadProbe = ensureWindow(hwnd, false)
-    check('probe reports dead for the killed window', deadProbe.status === 'dead', JSON.stringify(deadProbe))
-
-    // 工具层传播：同一状态下走 dispatch('type')，模型看到的应是 isError + 指引
-    if (dispatch) {
-      const toolRes = await dispatch('type', { text: 'x' })
-      const toolText = toolRes?.content?.[0]?.text ?? ''
-      check(
-        'guard error surfaces as a model-facing tool error with guidance',
-        toolRes?.isError === true && /no longer exists|open_application/i.test(toolText),
-        toolText.slice(0, 90),
-      )
-    }
-  } else {
-    check('found notepad pid for kill test', false, 'window not enumerated')
+  const trigger = join(box, 'change-content')
+  const secondProcess = Bun.spawn([intended, 'Second granted fixture', trigger], { stdout: 'ignore', stderr: 'ignore' })
+  procs.push(secondProcess)
+  const second = await waitForWindow(window => window.pid === secondProcess.pid)
+  const invoke = async (name: string, args: Record<string, unknown> = {}) => {
+    const result = await handleToolCall(adapter, name, args, overrides)
+    assert.equal(result.isError, undefined, JSON.stringify(result.content))
+    const block = result.content[0]
+    assert.equal(block.type, 'text')
+    return JSON.parse(block.text)
   }
-
-  // ── 5. 重新 open + 最小化 → 前台激活恢复 ──────────────────────────────
-  await new Promise(r => setTimeout(r, 500))
-  await platform.apps.open('notepad')
-  const hwnd2 = getBoundHwnd()
-  check('re-open rebinds a fresh HWND', hwnd2 !== null && hwnd2 > 0 && hwnd2 !== hwnd, `hwnd=${hwnd2}`)
-
-  if (hwnd2) {
-    // 最小化它，再走 needForeground 卫兵：应恢复 + 置前 + 校验通过
-    Bun.spawnSync({
-      cmd: [
-        'powershell',
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class NpMin { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd); }
-'@
-[NpMin]::ShowWindow([IntPtr]${hwnd2}, 6) | Out-Null
-`,
-      ],
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeoutMs: 10000,
-    })
-    await new Promise(r => setTimeout(r, 400))
-    const minimized = ensureWindow(hwnd2, false)
-    // liveness probe still alive（最小化 ≠ 死亡）
-    check('minimized window still passes liveness probe', minimized.status === 'ok', JSON.stringify(minimized))
-
-    const activated = ensureWindow(hwnd2, true)
-    check(
-      'foreground guard restores a minimized window and verifies frontmost',
-      activated.status === 'ok',
-      JSON.stringify(activated),
-    )
-
-    // 收尾：关掉这个 notepad（SendMessage WM_CLOSE）
-    Bun.spawnSync({
-      cmd: [
-        'powershell',
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class NpClose { [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }
-'@
-[NpClose]::SendMessage([IntPtr]${hwnd2}, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
-`,
-      ],
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeoutMs: 10000,
-    })
+  const { windows, ungrantedCount } = await invoke('list_windows', { visible_only: false, granted_only: false })
+  assert.ok(windows.every((window: { exe: string }) => isIntended(window.exe)))
+  assert.deepEqual(new Set(windows.filter((window: { visible: boolean }) => window.visible).map((window: { title: string }) => window.title)), new Set(['Granted fixture', 'Second granted fixture']))
+  assert.ok(ungrantedCount >= 1)
+  const limited = await invoke('list_windows', { limit: 1 })
+  assert.equal(limited.count, 1)
+  const detail = await invoke('get_window', { hwnd: second.hwnd })
+  assert.equal(detail.pid, secondProcess.pid)
+  assert.equal(detail.tier, 'full')
+  assert.equal(detail.il, 'medium')
+  assert.equal(typeof detail.className, 'string')
+  assert.equal(detail.rootHwnd, second.hwnd)
+  assert.ok(!('rect' in detail) && !('width' in detail))
+  const beforeActivation = getBoundRevision()
+  const activation = await invoke('activate_window', { hwnd: second.hwnd })
+  assert.equal(activation.activated, true)
+  assert.equal((await invoke('get_window', { hwnd: second.hwnd })).foreground, true)
+  await prepareWindowsTarget(undefined, 'capture')
+  assert.equal(getBoundHwnd(), first.hwnd)
+  assert.equal(getBoundRevision(), beforeActivation)
+  for (const name of ['get_window', 'activate_window']) {
+    const denied = await handleToolCall(adapter, name, { hwnd: foreignWindow.hwnd }, overrides)
+    assert.equal(denied.structuredContent?.code, 'app_not_granted')
+    assert.ok(!JSON.stringify(denied).includes('Private fixture'))
   }
-} catch (e) {
-  check('e2e ran to completion', false, String(e))
+  const { desktop_info } = await invoke('list_granted_applications', { include_desktop: true })
+  assert.equal(desktop_info.captureMode, 'bound_window')
+  assert.ok(desktop_info.displays.some((screen: { isPrimary: boolean }) => screen.isPrimary))
+  assert.ok(desktop_info.displays.every((screen: object) => !('width' in screen) && !('scaleFactor' in screen)))
+  console.log('PASS window diagnostics, grant-only metadata, and foreground activation without rebinding')
+  const selected = await handleToolCall(adapter, 'open_application', {
+    app: intended, window_id: `${second.hwnd}:${second.pid}`,
+  }, overrides)
+  assert.equal(selected.isError, undefined, JSON.stringify(selected.content))
+  assert.equal(getBoundHwnd(), second.hwnd)
+
+  const capture = await handleToolCall(adapter, 'screenshot', {}, overrides)
+  assert.ok(capture.screenshot, JSON.stringify(capture.content.filter(block => block.type === 'text')))
+  const coordinates = [Math.round(capture.screenshot!.width / 2), Math.round(capture.screenshot!.height / 2)]
+  const click = (snapshot: typeof capture.screenshot) => handleToolCall(adapter, 'left_click', { coordinate: coordinates },
+    { ...overrides, lastScreenshot: snapshot, boundRevision: getBoundRevision() })
+  writeFileSync(trigger, 'change', 'utf8')
+  await Bun.sleep(350)
+  const stale = await click(capture.screenshot)
+  assert.equal(stale.structuredContent?.code, 'state_conflict', JSON.stringify(stale.content))
+  assert.equal(existsSync(trigger + '.click'), false)
+  const fresh = await handleToolCall(adapter, 'screenshot', {}, overrides)
+  assert.ok(fresh.screenshot)
+  const confirmed = await click(fresh.screenshot)
+  assert.equal(confirmed.isError, undefined, JSON.stringify(confirmed.content))
+  assert.equal(existsSync(trigger + '.click'), true)
+  console.log('PASS 9×9 check blocks a changed bound window and accepts a fresh screenshot')
+
+  secondProcess.kill()
+  await secondProcess.exited
+  await assert.rejects(platform.input.typeText('stale input'), /window no longer exists/)
+  console.log('PASS exact launch, granted-only discovery, explicit selection, forged and stale target rejection')
 } finally {
-  try {
-    rmSync(TMP_DIR, { recursive: true, force: true })
-  } catch {}
+  unbindWindow()
+  for (const proc of procs) { try { proc.kill() } catch {}; await proc.exited }
+  for (const window of listWindows(true).filter(window => isIntended(window.path))) {
+    try { process.kill(window.pid, 9) } catch {}
+  }
+  for (let i = 0; i < 20; i++) {
+    try { rmSync(box, { recursive: true, force: true }); break } catch (error) {
+      if (i === 19) throw error
+      await Bun.sleep(100)
+    }
+  }
 }
-
-console.log(failures === 0 ? '\nAll CU guard e2e checks passed.' : `\n${failures} check(s) FAILED.`)
-process.exit(failures === 0 ? 0 : 1)

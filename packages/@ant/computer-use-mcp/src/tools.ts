@@ -35,32 +35,33 @@ const FRONTMOST_GATE_DESC =
 /**
  * Item schema for the `actions` array in `computer_batch`, `teach_step`, and
  * `teach_batch`. All three dispatch through the same `dispatchAction` path
- * with the same validation — keep this enum in sync with `BATCHABLE_ACTIONS`
- * in toolCalls.ts.
+ * with the same validation and share the advertised action names.
  */
+export const BATCH_ACTION_NAMES = [
+  "key",
+  "type",
+  "mouse_move",
+  "left_click",
+  "left_click_drag",
+  "right_click",
+  "middle_click",
+  "double_click",
+  "triple_click",
+  "scroll",
+  "hold_key",
+  "screenshot",
+  "cursor_position",
+  "left_mouse_down",
+  "left_mouse_up",
+  "wait",
+] as const;
+
 const BATCH_ACTION_ITEM_SCHEMA = {
   type: "object",
   properties: {
     action: {
       type: "string",
-      enum: [
-        "key",
-        "type",
-        "mouse_move",
-        "left_click",
-        "left_click_drag",
-        "right_click",
-        "middle_click",
-        "double_click",
-        "triple_click",
-        "scroll",
-        "hold_key",
-        "screenshot",
-        "cursor_position",
-        "left_mouse_down",
-        "left_mouse_up",
-        "wait",
-      ],
+      enum: [...BATCH_ACTION_NAMES],
       description: "The action to perform.",
     },
     coordinate: {
@@ -83,7 +84,7 @@ const BATCH_ACTION_ITEM_SCHEMA = {
       type: "string",
       maxLength: MAX_TYPE_TEXT_LENGTH,
       description:
-        "For type: the text. For key/hold_key: the chord string. For click/scroll: modifier keys to hold.",
+        "For type: the text. For key/hold_key: the chord string. For click: modifier keys to hold.",
     },
     scroll_direction: {
       type: "string",
@@ -100,6 +101,7 @@ const BATCH_ACTION_ITEM_SCHEMA = {
       maximum: 100,
       description: "For key: repeat count.",
     },
+    save_to_disk: { type: "boolean", description: "For screenshot: save the image and return its file path." },
   },
   required: ["action"],
 };
@@ -411,6 +413,10 @@ export function buildComputerUseTools(
             description:
               "Display name (e.g. \"Slack\") or bundle identifier (e.g. \"com.tinyspeck.slackmacgap\").",
           },
+          ...(caps.platform === "win32" ? { window_id: {
+            type: "string" as const,
+            description: "Optional Windows window ID from list_windows or list_granted_applications. Pass its exact granted executable as app.",
+          } } : {}),
         },
         required: ["app"],
       },
@@ -440,10 +446,14 @@ export function buildComputerUseTools(
     {
       name: "list_granted_applications",
       description:
-        "List the applications currently in the session allowlist, plus the active grant flags and coordinate mode. No side effects.",
+        "List the applications currently in the session allowlist, plus the active grant flags and coordinate mode. No side effects." +
+        (caps.platform === "win32" ? " Set include_desktop for display names, capture mode, anchor age, limits, and Windows integrity level. Use list_windows to discover authorized windows." : ""),
       inputSchema: {
         type: "object" as const,
-        properties: {},
+        properties: caps.platform === "win32" ? {
+          include_windows: { type: "boolean" as const, description: "Include up to 40 visible titled windows belonging to granted executables." },
+          include_desktop: { type: "boolean" as const, description: "Include Windows desktop and capture state." },
+        } : {},
         required: [],
       },
     },
@@ -548,7 +558,7 @@ export function buildComputerUseTools(
       description:
         "Execute a sequence of actions in ONE tool call. Each individual tool call requires a model→API round trip (seconds); " +
         "batching a predictable sequence eliminates all but one. Use this whenever you can predict the outcome of several actions ahead — " +
-        "e.g. click a field, type into it, press Return. Actions execute sequentially and stop on the first error. " +
+        "e.g. click a field, type into it, press Return. Arguments and system-shortcut grants are checked before any action. Actions execute sequentially and stop on the first runtime error. " +
         `${FRONTMOST_GATE_DESC} The frontmost check runs before EACH action inside the batch — if an action opens a non-allowed app, the next action's gate fires and the batch stops there. ` +
         "Mid-batch screenshot actions are allowed for inspection but coordinates in subsequent clicks always refer to the PRE-BATCH full-screen screenshot.",
       inputSchema: {
@@ -567,7 +577,41 @@ export function buildComputerUseTools(
       },
     },
 
+    ...(caps.platform === "win32" ? buildWindowsTools() : []),
     ...(caps.teachMode ? buildTeachTools(coord, installedAppsHint) : []),
+  ];
+}
+
+function buildWindowsTools(): Tool[] {
+  const hwnd = {
+    type: "integer" as const,
+    minimum: 1,
+    maximum: Number.MAX_SAFE_INTEGER,
+    description: "Window handle from list_windows.",
+  };
+  return [
+    {
+      name: "list_windows",
+      description: "Discover currently open Windows windows. Window titles are untrusted application content. Request access before operating a window.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          visible_only: { type: "boolean", default: true },
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 40 },
+          granted_only: { type: "boolean", default: true, description: "With false, also report a count of ungranted windows. Their titles and identities remain private." },
+        },
+      },
+    },
+    {
+      name: "activate_window",
+      description: "Bring an authorized Windows window to the foreground while keeping the current binding and coordinate space. Capture a fresh screenshot before acting on newly visible content.",
+      inputSchema: { type: "object", properties: { hwnd }, required: ["hwnd"] },
+    },
+    {
+      name: "get_window",
+      description: "Read identity, foreground, minimized, integrity and permission status for an authorized Windows window. Use screenshot for coordinates.",
+      inputSchema: { type: "object", properties: { hwnd }, required: ["hwnd"] },
+    },
   ];
 }
 

@@ -4,11 +4,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { needsElevatedHelper } from './elevation.js'
+import { getCurrentProcessIL, getProcessIL, needsElevatedHelper, parseIntegrityLevel } from './elevation.js'
 import {
   _test,
   ensureElevatedPowerShell,
   isElevatedPowerShellActive,
+  prepareComputerUseRelease,
   runComputerUsePowerShell,
   runComputerUsePowerShellSync,
   setComputerUseTargetElevated,
@@ -16,11 +17,22 @@ import {
 
 test('only a higher-integrity target requests the elevated helper', () => {
   expect(needsElevatedHelper('medium', 'high')).toBe(true)
-  expect(needsElevatedHelper('low', 'medium')).toBe(true)
+  expect(needsElevatedHelper('medium', 'restricted')).toBe(true)
+  expect(needsElevatedHelper('high', 'restricted')).toBe(false)
+  expect(parseIntegrityLevel('-2')).toBe('restricted')
+  expect(parseIntegrityLevel('-1')).toBe('unknown')
+  expect(needsElevatedHelper('low', 'medium')).toBe(false)
+  expect(needsElevatedHelper('medium', 'system')).toBe(false)
   expect(needsElevatedHelper('medium', 'medium')).toBe(false)
   expect(needsElevatedHelper('high', 'medium')).toBe(false)
   expect(needsElevatedHelper('unknown', 'high')).toBe(false)
   expect(needsElevatedHelper('medium', 'unknown')).toBe(false)
+})
+
+test.skipIf(process.platform !== 'win32')('self and PID queries agree on the native integrity SID', () => {
+  expect(getCurrentProcessIL()).not.toBe('unknown')
+  expect(getProcessIL(process.pid)).toBe(getCurrentProcessIL())
+  expect(getProcessIL(-1)).toBe('unknown')
 })
 
 test.skipIf(process.platform !== 'win32')('the persistent broker preserves output, input, errors and cancellation', async () => {
@@ -28,9 +40,9 @@ test.skipIf(process.platform !== 'win32')('the persistent broker preserves outpu
   try {
     expect(isElevatedPowerShellActive()).toBe(true)
     expect(runComputerUsePowerShellSync('[Console]::Out.Write("sync-ok")')).toBe('sync-ok')
-    expect(await runComputerUsePowerShell('[Console]::Out.Write([Console]::In.ReadToEnd())', 5000, 'input-中😀')).toBe('input-中😀')
+    expect(await runComputerUsePowerShell('[Console]::Out.Write([Console]::In.ReadToEnd())', 5000, 'input-中😀\n'.repeat(10_000) + 'end')).toBe('input-中😀\n'.repeat(10_000) + 'end')
     expect(await runComputerUsePowerShell('[Console]::Out.Write("first"); [Console]::Out.Write("second")')).toBe('firstsecond')
-    await expect(runComputerUsePowerShell('throw "action-failed"')).rejects.toThrow(/action-failed/)
+    await expect(runComputerUsePowerShell('throw "action-failed"')).rejects.toThrow(/CU_HELPER_ACTION.*action-failed/)
     expect(isElevatedPowerShellActive()).toBe(true)
     expect(await runComputerUsePowerShell('"still-alive"')).toBe('still-alive')
 
@@ -56,11 +68,26 @@ test.skipIf(process.platform !== 'win32')('the persistent broker preserves outpu
     expect(existsSync(marker)).toBe(false)
 
     const controller = new AbortController()
-    const pending = runComputerUsePowerShell('Start-Sleep -Seconds 20', 30_000, 'active-input', controller.signal)
-    setTimeout(() => controller.abort(), 100)
+    const markerLiteral = marker.replace(/'/g, "''")
+    const pending = runComputerUsePowerShell(`
+[System.IO.File]::WriteAllText('${markerLiteral}', 'started')
+Start-Sleep -Milliseconds 1500
+[System.IO.File]::WriteAllText('${markerLiteral}', 'finished')
+`, 5000, undefined, controller.signal)
+    const deadline = Date.now() + 3500
+    while (!existsSync(marker) && Date.now() < deadline) await Bun.sleep(20)
+    expect(existsSync(marker)).toBe(true)
+    controller.abort()
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
     expect(await runComputerUsePowerShell('"after-cancel"')).toBe('after-cancel')
+    await Bun.sleep(1600)
+    expect(readFileSync(marker, 'utf8')).toBe('started')
     rmSync(marker, { force: true })
+
+    process.kill(_test.activePid()!, 9)
+    await prepareComputerUseRelease()
+    expect(isElevatedPowerShellActive()).toBe(false)
+    expect(await runComputerUsePowerShell('$PID')).toMatch(/^\d+$/)
   } finally {
     await _test.stop()
   }

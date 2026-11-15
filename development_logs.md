@@ -2,6 +2,18 @@
 
 仅保留最近 10 条，每条三行：问题 / 解决 / 位置与验证。历史实现以 git 记录为准，测试统一遵守 [test_specification.md](test_specification.md)。
 
+## 2026-11-15 Windows 27 工具、窗口诊断与点击时效（2.1.339）
+
+1. 问题：独立窗口发现、前台激活、诊断和桌面状态缺失。已绑定窗口内容变化仍可按旧图点击，UAC 真拒绝丢失 Win32 1223，性能和工具契约缺基线。
+2. 解决：三个 Win32 独立入口与合并桌面诊断组成 27 工具。授权按实际 exe 完整路径过滤，拒绝同名外部窗口。仅激活保留绑定和坐标空间。绑定点击比较截图几何和 9×9 邻域。错误返回类别、阶段及恢复指引，管理员启动通过原生错误码识别真正拒绝。
+3. 位置：`@ant/computer-use-mcp`、`src/utils/computerUse/{executor,hostAdapter,platforms/win32,win32/,wrapper.tsx}`、实机夹具与性能脚本。独立复审通过。176/176、27 项 MCP 注册、窗口隔离和截图变化、普通与管理员真实输入、UAC 拒绝、原生 EDIT、Chromium、Qt Android 事件和 CLI 版本冒烟均已核验。管理员输入断言通过后，旧夹具清理出现 Windows 目录占用，进程随后退出，夹具改为发送退出文件并等待两实例退出。单独的无管理员账户与受限令牌实机测试仍待验证。
+
+## 2026-11-15 Windows Computer Use 窗口身份、输入与清理（2.1.338）
+
+1. 问题：完整 exe 路径仍可能误绑同名进程，WinForms 子控件不响应顶层合成点击和换行，分解拖拽在宿主调用中提前释放。批次权限预检与管理员助手取消有缺口。
+2. 解决：窗口发现仅返回确切授权 exe 的窗口，显式选择和打开时重验窗口身份。WinForms 点击与键盘使用真实焦点控件，保持按住状态至显式释放或回合清理。批次预检静态权限、键名和截图保存能力。统一令牌 SID 完整性读取，助手动作经 stdin 转发，通过客户进程句柄取消，助手失联后可恢复本地释放。
+3. 位置：`@ant/computer-use-mcp`、`src/utils/computerUse/{executor,wrapper,platforms/win32,win32/}`、`computer_use.md` 及 Windows 夹具。独立 review 复审通过，172/172 单测及 `bun run version` 通过。普通和管理员输入、原生 EDIT、Chromium、Qt Android 真实触摸事件、同名 exe 发现与绑定、可信嵌入正反例和只读截图通过。App 安装版 0.2.240 覆盖真实拖拽事件、截图、Esc、窗口发现和批次预检。
+
 ## 2026-11-14 Windows 新进程接管与坐标代际修复（2.1.337）
 
 1. 问题：绑定 Explorer 启动游戏后仍长期截图/点击旧 Explorer，模型转 Bash 并混用逻辑/物理坐标；自动解绑若不清坐标，还会在并发下让新目标收到旧绑定输入。
@@ -49,15 +61,3 @@
 1. 问题：未注册便携应用经 `open_application` 冷启动反复失败，中文路径已授权仍被判未授权，截图与 `computer_batch` 偶发 PowerShell 超时并诱导模型绕圈。实测分别发现 PowerShell 非 UTF-8 输出破坏中文路径、exe 继承 CLI 工作目录导致 PvZ `FATAL ERROR`、Unicode 进程名被过滤、装饰性 DWM 边框可否决打开、授权别名重复、`shell:AppsFolder` 覆盖真实 exe，以及 Windows 授权路径斜杠/大小写不一致。
 2. 解决：PowerShell 同步/异步输出统一 UTF-8；所有已解析 exe 以自身目录为工作目录并用 `-LiteralPath`；进程名保留 Unicode；边框改为 best-effort；授权按 bundleId 去重并同步等级提示/计数；StartApps 的真实 exe 直接保留原路径，合并按真实 exe > shell 别名 > 普通项；`open_application` 仅在 Windows 规范化路径斜杠和大小写且始终使用原授权身份。批次协议、权限 tier、坐标与取消语义不变。
 3. 位置：`src/utils/computerUse/{platforms/win32,win32/{appLaunch,installedApps,powerShell,windowBorder,windowGuard}}.ts`、`packages/@ant/computer-use-mcp/src/toolCalls.ts` 及对应测试、`tools/computer-use-win32-unicode-e2e.ts`、`computer_use.md`、`test_specification.md`。按用户要求仅做相关回归：单测 80/80、真实 `computer_batch` 中文输入+批次截图连续 3 轮、WinForms 25/25、PvZ 正常主窗口连续 10 次截图、关闭状态枚举真实 exe 全通过；独立多轮 review 最终 Approve，无剩余 Critical/Important/Minor。安装版冷启动与批次结果见邻仓 App 日志，未跑全量回归。
-
-## 2026-11-13 Windows 高 DPI 截图与点击坐标修复（2.1.322）
-
-1. 问题：150% DPI 下 PopCap/DirectDraw 与 WinForms 的 `PrintWindow` 仅将逻辑尺寸内容贴在物理画布左上角，后续声明整窗坐标导致点击错位；绑定窗口光标回读使用缓存，真实滚轮缺少 DPI-aware 设置；安装版黑盒另发现完整中文 exe 路径已授权却无法被 `open_application` 精确匹配。
-2. 解决：捕获与输入切换 Per-Monitor-V2 并校验最终 context；在移动最小化窗口前固定显示器 DPI，只对已验证的 PopCap `MainWindow` 与 WinForms 归一化贴角内容，其他 unaware 窗口不盲目裁剪；后台消息保留物理客户区偏移，由 Windows 做接收端转换，避免双重缩放；光标改为实时窗口局部坐标并修正越界提示；`open_application` 优先接受 allowlist 中的精确路径/bundleId，再回退显示名匹配。
-3. 位置：`src/utils/computerUse/{executor,platforms/win32,win32/windowCapture,win32/windowMessage}.ts`、`packages/@ant/computer-use-mcp/src/{toolCalls,toolCalls.test}.ts`、`tools/computer-use-input-fixture-e2e.ts`、`computer_use.md`、`test_specification.md`。相关单测 109/109、隔离 WinForms 25/25、Chromium Unicode 与只读 e2e 全通过；显示器枚举 20/20；PvZ 中文路径授权及启动页、玩玩小游戏两次真实 MCP 点击通过。独立复审 Approve，无 Critical/Important；混合 DPI 副屏与游戏内 Esc 未实测。
-
-## 2026-11-12 Windows 中文输入乱码修复（2.1.319）
-
-1. 问题：DeepSeek Harness 输入“你好，做个自我介绍”出现乱码；独立 Electron 与原生 EDIT 均复现，证明短文本 `WM_CHAR` 通道在中文环境不可靠，而非目标应用或更新器异常。
-2. 解决：所有 bound HWND 的直接文本输入统一经原前台守卫和 `SendInput + KEYEVENTF_UNICODE`，保留 Word COM、剪贴板、键鼠授权与释放语义；新增原生 EDIT 和独立 Chromium 真值验证，启动清空沙箱、预置旧真值与失效句柄也不能制造假通过。
-3. 位置：`src/utils/computerUse/{platforms/win32,win32/windowClassify}.ts`、`tools/{computer-use-win32-unicode-e2e,computer-use-chromium-unicode-e2e}.ts`、`computer_use.md`、`test_specification.md`。相关单测 56/56、两轮全量各 1082/0、逐文件隔离 141 文件 1030/0；原生中文短句、Chromium 中英文与 emoji 长文本及原 WinForms 18 项全部通过，独立复审 Approve。

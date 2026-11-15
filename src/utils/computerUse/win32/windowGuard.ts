@@ -19,6 +19,7 @@
 
 import { listWindows } from './windowEnum.js'
 import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
+import { runPowerShellSync as runLocalPowerShellSync } from './powerShell.js'
 import { INPUT_INTEGRITY_TYPES } from './elevation.js'
 
 // ── C# P/Invoke helper ──────────────────────────────────────────────────────
@@ -106,6 +107,7 @@ export function buildEnsureWindowScript(
   needForeground: boolean,
   expectedPid?: number,
   forInput = false,
+  allowAltNudge = true,
 ): string {
   const fgBlock = needForeground
     ? `
@@ -117,7 +119,7 @@ if ([CuGuard]::IsIconic([IntPtr]${hwnd})) {
 for (\$i = 0; \$i -lt 3 -and -not \$ok; \$i++) {
     \$ok = [CuGuard]::TryForeground([IntPtr]${hwnd})
     if (-not \$ok) {
-        if (\$i -eq 1) { [CuGuard]::AltNudge() }
+        ${allowAltNudge ? 'if ($i -eq 1) { [CuGuard]::AltNudge() }' : ''}
         Start-Sleep -Milliseconds 200
     }
 }
@@ -203,6 +205,12 @@ export function ensureWindow(
     if (forInput) throw error
     return { status: 'dead' }
   }
+}
+
+/** Foreground an observed window using only local window-manager operations. */
+export function activateObservedWindow(hwnd: number, pid: number): boolean {
+  if (!Number.isSafeInteger(hwnd) || hwnd <= 0 || !Number.isSafeInteger(pid) || pid <= 0) return false
+  return parseEnsureOutput(runLocalPowerShellSync(buildEnsureWindowScript(hwnd, true, pid, false, false))).status === 'ok'
 }
 
 // ── Replacement-window lookup (window died → app may have another window) ──

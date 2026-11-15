@@ -9,6 +9,7 @@ import { COMPUTER_USE_MCP_SERVER_NAME } from './common.js'
 import { createCliExecutor } from './executor.js'
 import { getChicagoEnabled, getChicagoSubGates } from './gates.js'
 import { requireComputerUseSwift } from './swiftLoader.js'
+import { cropWindowsClickPatch } from './win32/clickPatch.js'
 
 class DebugLogger implements Logger {
   silly(message: string, ...args: unknown[]): void {
@@ -80,13 +81,7 @@ export function getComputerUseHostAdapter(): ComputerUseHostAdapter {
       return result.filepath
     },
 
-    // Pixel-validation JPEG decode+crop. MUST be synchronous (the package
-    // does `patch1.equals(patch2)` directly on the return value). Cowork uses
-    // Electron's `nativeImage` (sync); our `image-processor-napi` is
-    // sharp-compatible and async-only. Returning null → validation skipped,
-    // click proceeds — the designed fallback per `PixelCompareResult.skipped`.
-    // The sub-gate defaults to false anyway.
-    cropRawPatch: () => null,
+    cropRawPatch: process.platform === 'win32' ? cropWindowsClickPatch : () => null,
   }
   return cached
 }

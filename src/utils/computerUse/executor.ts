@@ -650,10 +650,15 @@ export function createCliExecutor(opts: {
      * releases modifiers on each invocation, so a mid-loop throw leaves
      * nothing stuck. 8ms between iterations — 125Hz USB polling cadence.
      */
+    validateKeyChord: process.platform === 'win32' ? parts => {
+      const { planKeyChord } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      planKeyChord(parts)
+    } : undefined,
+
     async key(keySequence: string, repeat?: number, signal?: AbortSignal): Promise<void> {
       // Windows/Linux: route through platform which handles HWND binding
       if (!isDarwin && platform) {
-        const parts = keySequence.split('+').filter(p => p.length > 0)
+        const parts = keySequence.split('+').map(part => part.trim()).filter(Boolean)
         const n = repeat ?? 1
         for (let i = 0; i < n; i++) {
           if (i > 0) await sleep(8, signal)
@@ -664,7 +669,7 @@ export function createCliExecutor(opts: {
         return
       }
       const input = getInput()
-      const parts = keySequence.split('+').filter(p => p.length > 0)
+      const parts = keySequence.split('+').map(part => part.trim()).filter(Boolean)
       const isEsc = isBareEscape(parts)
       const n = repeat ?? 1
       await drainRunLoop(async () => {
@@ -836,11 +841,16 @@ export function createCliExecutor(opts: {
 
     // ── App management ───────────────────────────────────────────────────
 
-    async prepareForTarget(signal?: AbortSignal): Promise<void> {
+    async prepareForTarget(signal, purpose): Promise<void> {
       if (process.platform !== 'win32') return
       const { prepareWindowsTarget } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
-      await prepareWindowsTarget(signal)
+      await prepareWindowsTarget(signal, purpose)
     },
+
+    isWindowBound: process.platform === 'win32' ? () => {
+      const { getBoundHwnd } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      return getBoundHwnd() !== null
+    } : undefined,
 
     getBoundAppId(): string | null {
       if (process.platform !== 'win32') return null
@@ -912,10 +922,25 @@ export function createCliExecutor(opts: {
       return cu.apps.listRunning()
     },
 
-    async openApp(bundleId: string, signal?: AbortSignal): Promise<void> {
+    listWindows: process.platform === 'win32' ? async visibleOnly => {
+      const { listWindowsWithIdentity } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      return listWindowsWithIdentity(visibleOnly)
+    } : undefined,
+
+    activateWindow: process.platform === 'win32' ? async (window, signal) => {
+      const { activateWindowsWindow } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      return activateWindowsWindow(window, signal)
+    } : undefined,
+
+    getOwnIntegrity: process.platform === 'win32' ? () => {
+      const { getCurrentProcessIL } = require('./win32/elevation.js') as typeof import('./win32/elevation.js')
+      return getCurrentProcessIL()
+    } : undefined,
+
+    async openApp(bundleId: string, signal?: AbortSignal, windowId?: string): Promise<void> {
       if (!isDarwin && platform) {
         // Windows/Linux: platform.apps.open() handles HWND binding + DWM border
-        await platform.apps.open(bundleId, signal)
+        await platform.apps.open(bundleId, signal, windowId)
         return
       }
       await cu.apps.open(bundleId)

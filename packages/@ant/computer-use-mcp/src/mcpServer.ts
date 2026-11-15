@@ -28,6 +28,7 @@ import type { ScreenshotResult } from "./executor.js";
 import type { CuCallToolResult } from "./toolCalls.js";
 import {
   defersLockAcquire,
+  errorResult,
   handleToolCall,
   resetMouseButtonHeld,
 } from "./toolCalls.js";
@@ -103,6 +104,7 @@ export function bindSessionContext(
   // Screenshot blob persists here across calls — NOT on `ctx`. Hosts hold
   // onto the returned dispatcher; that's the identity that matters.
   let lastScreenshot: ScreenshotResult | undefined;
+  let screenshotAt: number | undefined;
   let callGeneration = 0;
   let targetGeneration = 0;
   let lastHandledBoundRevision = 0;
@@ -176,11 +178,7 @@ export function bindSessionContext(
       if (lock.holder !== undefined && !lock.isSelf) {
         const text =
           ctx.formatLockHeldMessage?.(lock.holder) ?? DEFAULT_LOCK_HELD_MESSAGE;
-        return {
-          content: [{ type: "text", text }],
-          isError: true,
-          telemetry: { error_kind: "cu_lock_held" },
-        };
+        return errorResult(text, "cu_lock_held");
       }
       if (lock.holder === undefined && !defersLockAcquire(name)) {
         await ctx.acquireCuLock?.();
@@ -196,11 +194,7 @@ export function bindSessionContext(
           const text =
             ctx.formatLockHeldMessage?.(recheck.holder) ??
             DEFAULT_LOCK_HELD_MESSAGE;
-          return {
-            content: [{ type: "text", text }],
-            isError: true,
-            telemetry: { error_kind: "cu_lock_held" },
-          };
+          return errorResult(text, "cu_lock_held");
         }
         // Fresh holder → any prior session's mouseButtonHeld is stale.
         // Mirrors what Gate-3 does on the acquire branch. After the
@@ -231,6 +225,7 @@ export function bindSessionContext(
       grantFlags: ctx.getGrantFlags(),
       userDeniedBundleIds: ctx.getUserDeniedBundleIds(),
       coordinateMode,
+      screenshotAgeMs: screenshotAt === undefined ? undefined : Math.round(performance.now() - screenshotAt),
       selectedDisplayId: ctx.getSelectedDisplayId(),
       displayPinnedByModel: ctx.getDisplayPinnedByModel?.(),
       displayResolvedForApps: ctx.getDisplayResolvedForApps?.(),
@@ -270,17 +265,12 @@ export function bindSessionContext(
 
     // ─── Dispatch ────────────────────────────────────────────────────────
     const changesTarget = name === "open_application" || name === "switch_display";
-    if (targetChangesPending > 0 || (changesTarget && activeCalls > 0)) {
-      return {
-        content: [{ type: "text", text: "The capture target is changing or an action is still running. Wait for the current call to finish, then take a fresh screenshot before acting." }],
-        isError: true,
-        telemetry: { error_kind: "state_conflict" },
-      };
+    const changesFocus = changesTarget || name === "activate_window";
+    if (targetChangesPending > 0 || (changesFocus && activeCalls > 0)) {
+      return errorResult("The capture target is changing or an action is still running. Wait for the current call to finish, then take a fresh screenshot before acting.", "state_conflict");
     }
-    if (changesTarget) {
-      targetGeneration++;
-      targetChangesPending++;
-    }
+    if (changesTarget) targetGeneration++;
+    if (changesFocus) targetChangesPending++;
     let callTargetGeneration = targetGeneration;
     activeCalls++;
     try {
@@ -293,11 +283,13 @@ export function bindSessionContext(
         targetGeneration++;
         callTargetGeneration = targetGeneration;
         lastScreenshot = undefined;
+        screenshotAt = undefined;
         ctx.onScreenshotCleared?.();
       }
 
       if (result.screenshot && (result.screenshot.targetRevision === undefined || result.screenshot.targetRevision === adapter.executor.getBoundRevision?.()) && ticket === callGeneration && callTargetGeneration === targetGeneration && targetChangesPending === 0 && !requestSignal?.aborted && !ctx.isAborted?.()) {
         lastScreenshot = result.screenshot;
+        screenshotAt = performance.now();
         const { base64: _blob, ...dims } = result.screenshot;
         logger.debug(`[${serverName}] screenshot dims: ${JSON.stringify(dims)}`);
         ctx.onScreenshotCaptured?.(dims);
@@ -308,10 +300,11 @@ export function bindSessionContext(
       try {
         if (changesTarget) {
           lastScreenshot = undefined;
+          screenshotAt = undefined;
           ctx.onScreenshotCleared?.();
         }
       } finally {
-        if (changesTarget) targetChangesPending--;
+        if (changesFocus) targetChangesPending--;
         activeCalls--;
         requestSignal?.removeEventListener("abort", abortDialog);
         dialogAbort.abort();

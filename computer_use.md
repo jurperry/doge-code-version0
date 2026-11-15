@@ -8,15 +8,16 @@ Computer Use 是 Doge Code 内置的一组 MCP 工具，允许模型在用户授
 
 ## 一、能力总览
 
-在支持的 macOS/Windows 会话中，CLI 当前向模型暴露 24 个工具。
+CLI 在 Windows 会话中向模型暴露 27 个工具，在 macOS 会话中暴露 24 个。
 
 | 类别 | 工具 | 用途 |
 |------|------|------|
 | 授权 | `request_access` | 请求控制应用、读取/写入剪贴板、使用系统组合键 |
-| 授权 | `list_granted_applications` | 查询本会话已授权应用及 grant flags |
+| 授权 | `list_granted_applications` | 查询授权、flags 和坐标模式。Windows 的 `include_desktop` 可返回桌面诊断 |
+| Windows | `list_windows` / `get_window` / `activate_window` | 发现和诊断授权窗口，或前置授权窗口并保留绑定 |
 | 屏幕 | `screenshot` | 获取当前目标显示器或绑定窗口的 JPEG 图像及尺寸 |
 | 屏幕 | `zoom` | 放大上一张截图的指定区域，不改变后续点击的坐标基准 |
-| 应用 | `open_application` | 启动、绑定或前置已授权应用 |
+| 应用 | `open_application` | 启动、绑定或前置已授权应用，Windows 可指定现有窗口 |
 | 应用 | `switch_display` | 退出窗口绑定，选择全屏与全局输入；固定或恢复自动显示器选择 |
 | 鼠标 | `left_click` / `right_click` / `middle_click` | 单击指定位置 |
 | 鼠标 | `double_click` / `triple_click` | 连续双击/三击 |
@@ -69,10 +70,12 @@ Auto/bypass 模式会按既有自动放行设计授予已解析应用及请求 f
 
 同一授权请求中的多个名称或别名若解析到同一 bundleId，只进入一次授权弹窗并返回一项 grant，避免重复授权项。`Get-StartApps` 中真实存在的 exe 直接保留原路径，只有 UWP/Store AppID 使用 `shell:AppsFolder` 启动；应用枚举合并时，运行中进程的真实 exe 路径也优先于 shell 启动别名，确保后续可以用该确切路径授权和打开便携应用。进程路径通过 `QueryFullProcessImageName` 获取，MainModule 不可读时不再只剩进程名；完整路径及其已知别名精确匹配优先于显示名宽松匹配，避免注册表 GUID 抢占真实 exe 授权。本地确实存在的完整 exe 即使尚未注册或运行也可授权，但仍需用户同意，且保留元数据或完整路径所对应的受限 tier，不因改成 exe 身份而升级为 full。静态安装项可短期缓存，运行中窗口每次请求重新读取，避免启动时旧缓存长期影响授权。
 
+Windows 使用 `list_windows` 查找当前已获确切 exe 路径授权的窗口。直接使用返回的 `hwnd` 调用 `get_window` 或 `activate_window`，也可传 `exe` 和 `windowId` 给 `open_application` 精确绑定。前台激活保留当前绑定及坐标空间。默认只枚举可见标题窗口，数量上限默认 40。`granted_only: false` 增加未授权窗口计数。`list_granted_applications({ "include_desktop": true })` 返回显示器标识、主屏、完整性、捕获模式、锚点年龄和工具上限。
+
 随后调用 `screenshot`：
 
 - 返回实际 JPEG 图像；
-- 返回图像宽高、原始显示宽高、显示器 ID 和虚拟桌面原点；
+- 向模型返回图像宽高，原始显示尺寸、显示器 ID 和虚拟桌面原点用于内部映射；
 - 后续鼠标坐标默认以这张图片为准。
 
 如果目标窗口已绑定，截图优先来自该窗口，而不是整块显示器。需要整个桌面时，调用 `switch_display("auto")` 退出窗口绑定；需要指定显示器时，向 `switch_display` 传入显示器名称。切换后旧截图坐标失效，必须重新截图。
@@ -80,6 +83,8 @@ Auto/bypass 模式会按既有自动放行设计授予已解析应用及请求 f
 ### 3. 操作并验证
 
 使用点击、输入、滚动或批次后，**必须再次截图验证**。
+
+Windows 绑定窗口的独立点击会复查截图几何与 9×9 像素邻域。内容变化或验证不可用会返回 `state_conflict`，提示重新截图。
 
 当前成功文案使用 `Click dispatched`、`Text input dispatched` 等表述，含义是“输入已派发，应用效果尚未验证”，不再把注入成功等同于业务成功。
 
@@ -120,7 +125,7 @@ Windows 不会只凭窗口标题授予权限：
 - 输入前检查 HWND 当前 PID；
 - SendMessage 和 PrintWindow 前再次检查 expected PID；
 - HWND 被复用时，旧授权不再自动有效；
-- 绑定窗口死亡时先找同 PID 的替代窗口，再按已知 exe 身份查找替代窗口；不能只凭标题重绑。替代窗口仍须通过当前授权、PID 和输入前检查，旧 HWND 本身不构成永久授权。
+- 完整 exe 路径绑定必须由 `open_application` 选定。窗口消失后，返回错误并要求重新打开和截图。旧的名称式应用绑定仍可按原 PID 或进程基名恢复。
 
 ### 前台与真实输入
 
@@ -141,10 +146,10 @@ Windows 不会只凭窗口标题授予权限：
 
 应用授权和 Windows 提权是两件事：进入 allowlist 不改变进程完整性级别，UAC 提权也不会提升应用的 read/click/full tier。
 
-- 普通目标继续使用普通权限 PowerShell；目标为更高完整性级别时，才请求一次常驻管理员 PowerShell 助手。目标启动后因此可能先后出现应用 UAC 与助手 UAC。
+- 普通目标继续使用普通权限 PowerShell；只有确认目标为 High 且本地进程完整性级别更低时才请求管理员 PowerShell 助手。完整性 RID 直接从令牌的 SID 读取。已授权的 `restricted` 目标也可请求助手，助手仍需确认目标实际完整性。查询失败时原生注入门禁拒绝键鼠操作。目标启动后因此可能先后出现应用 UAC 与助手 UAC。
 - UAC 安全桌面永远由用户处理，不做截图点击自动化。检测到本会话 UAC 后暂停动作，从检测起等待 30 秒；超时中止当前回合并显示原因。提示处理后必须重新截图。
 - 管理员助手复用同一套目标身份、前台、命中与 tier 检查，支持绑定/全屏截图、点击、拖拽、键入、滚轮和批次。普通目标即使助手已存在也切回本地执行，新应用启动仍走本地路径。
-- 助手使用随机命名管道、同用户 ACL、父进程 PID+启动时间校验和进程内事务队列。主动取消不清空健康助手；脚本错误不重启助手、不自动重放动作；客户端断开或取消会终止对应动作子进程。
+- 助手使用随机命名管道、账户 ACL、父进程 PID+启动时间校验和进程内事务队列。每个动作有独立 PowerShell 子进程，通过 stdin 传送脚本和输入。主动取消保留健康助手；脚本报错后保留原助手与已执行状态。取消会结束客户端进程，助手检测到其退出后终止动作子进程。物理释放前探测已有助手，失联时可尝试本地释放。
 - 空闲连接使用异步等待并周期检查属主，动作执行期间也检查属主与连接。父进程正常退出或被强杀后，助手不得因 PID 复用而残留。
 - System、安全桌面、系统关键界面以及应用自身的反作弊/DRM 限制不属于通用绕过目标。
 
@@ -214,7 +219,7 @@ AppState 保存：
 - 截图在捕获前记录 revision，并在捕获/缩放完成后复核。目标在捕获中变化时丢弃旧图；延迟旧图不得覆盖新锚点，同一 revision 变化只清理一次；
 - 自动解绑后的当前输入必须使用新全屏截图；本调用在解绑后完成的新截图可建立新锚点；
 - 取消后，旧调用不能继续发出新的输入；
-- 鼠标释放和必要的安全清理不被普通门禁随意阻断。真实物理释放失败会保留待清理状态并阻断下一动作，不能仅因新回合取得锁就忘掉仍按住的键鼠。
+- 同一回合的 `left_mouse_down`、`mouse_move`、`left_mouse_up` 共享按住状态。回合结束或 UAC 中断时会释放；失败时保留待清理状态并阻断下一动作，直到恢复。
 
 ## 五、坐标与截图设计
 
@@ -286,12 +291,13 @@ Windows 主要使用两条通道，不会在一个失败动作后盲目换通道
 用于：
 
 - 所有 bound HWND 的直接文本输入（不再使用后台 `WM_CHAR`，避免中文乱码）；
-- Chromium、Qt/SDL 等自绘窗口；
+- Chromium、Qt/SDL 等自绘窗口，以及 WinForms 的点击与组合键；
+- 需要到达当前焦点控件的 Return 和 Tab；
 - 双击/三击；
 - 修饰键组合；
 - 需要真实滚轮的场景。
 
-使用 `SetCursorPos + mouse_event/keybd_event`，并在同一脚本内完成前台复核、最新窗口位置读取和输入。
+使用 `SetCursorPos + mouse_event/keybd_event`，并在同一脚本内完成前台复核、最新窗口位置读取和输入。绑定窗口真实点击会在按下前确认指针命中的根窗口为绑定窗口。WinForms 的分解鼠标动作与滚动仍沿用背景消息。
 
 组合键顺序为：
 
@@ -307,7 +313,8 @@ Windows 主要使用两条通道，不会在一个失败动作后盲目换通道
 - 按 UTF-16 code unit 发送，覆盖代理对；
 - 中文、emoji、ASCII 大写和符号不依赖手工 Shift；
 - 文本先 UTF-8 base64 编码，再经 stdin 传入，避免命令行注入和长度上限；
-- `SendInput` 返回事件数必须完整，部分成功会报错并尝试反向释放。
+- `SendInput` 返回事件数必须完整，部分成功会报错并尝试反向释放；
+- Windows `type` 的非剪贴板路径将 LF、CRLF 和 CR 各派发为一次 Return，Tab 派发为实际键。焦点控件按正常键盘语义处理这些按键。
 
 所有 bound HWND 的直接文本输入统一走真实 Unicode 通道；后台 `WM_CHAR` 不再用于这类文本输入。
 
@@ -330,7 +337,7 @@ Windows 对第三次点击的计数可能开始新序列，例如 WinForms 报�
 - 最多 4 张截图；
 - 累计图片最多 20MiB；
 - 单次 `type` 最多 100,000 个 UTF-16 code unit；
-- 所有动作的完整参数在第一个副作用前校验；
+- 第一个动作前统一检查参数范围和形状、系统组合键授权及截图保存能力，并使用 Windows 键名解析器校验组合键。应用身份、tier 与命中在每个动作前复核；
 - 顺序执行，首个失败停止；
 - 每个动作尝试后报告真实 progress，刷新 idle deadline。
 
@@ -339,7 +346,7 @@ Windows 对第三次点击的计数可能开始新序列，例如 WinForms 报�
 ```json
 {
   "completed": [{"action": "left_click", "ok": true, "output": "Click dispatched..."}],
-  "failed": {"action": "type", "ok": false, "output": "actions[1] (type) threw: ..."},
+  "failed": {"action": "type", "ok": false, "code": "executor_threw", "output": "actions[1] (type) threw: ..."},
   "remaining": 1,
   "recovery": "Do not replay the whole batch..."
 }

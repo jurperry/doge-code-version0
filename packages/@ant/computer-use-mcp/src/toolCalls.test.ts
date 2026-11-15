@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { buildComputerUseTools } from './tools.js'
 import type { ComputerExecutor } from './executor.js'
 import {
   handleToolCall,
@@ -364,7 +365,7 @@ describe('computer_batch failure and visual feedback', () => {
 
     expect(result.content.filter(item => item.type === 'image')).toHaveLength(1)
     expect(result.screenshot).toBeUndefined()
-    expect(json(result).failed.ok).toBe(false)
+    expect(json(result).failed).toMatchObject({ ok: false, code: 'executor_threw' })
   })
 
   test('mouse cleanup failure is appended without erasing batch progress', async () => {
@@ -393,6 +394,31 @@ describe('computer_batch failure and visual feedback', () => {
     expect(result.telemetry?.error_kind).toBe('bad_args')
     expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('actions[1] coordinate is required') })
     expect(cursorCalls).toBe(0)
+  })
+
+  test('batch preflights system shortcuts, empty chords and unavailable saves before dispatch', async () => {
+    const dispatched: string[] = []
+    const adapter = makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      click: async () => { dispatched.push('click') },
+      key: async () => { dispatched.push('key') },
+      validateKeyChord: parts => { if (parts.includes('NoSuchKey')) throw new Error('Unsupported key') },
+    })
+    for (const [action, code] of [
+      [{ action: 'key', text: 'win+r' }, 'grant_flag_required'],
+      [{ action: 'hold_key', duration: 0, text: 'Shift+Ctrl+Esc+Alt' }, 'grant_flag_required'],
+      [{ action: 'left_click', coordinate: [2, 2], text: 'ralt+f4' }, 'grant_flag_required'],
+      [{ action: 'key', text: ' + ' }, 'bad_args'],
+      [{ action: 'key', text: 'NoSuchKey' }, 'bad_args'],
+      [{ action: 'screenshot', save_to_disk: true }, 'feature_unavailable'],
+    ] as const) {
+      const result = await handleToolCall(adapter, 'computer_batch', {
+        actions: [{ action: 'left_click', coordinate: [1, 1] }, action],
+      }, makeOverrides())
+      expect(result.telemetry?.error_kind).toBe(code)
+      expect(result.content[0]).toMatchObject({ text: expect.stringContaining('actions[1]') })
+      expect(dispatched).toEqual([])
+    }
   })
 
   test('batch size and text length limits fail before execution', async () => {
@@ -984,6 +1010,64 @@ describe('Windows effective-target permission gates', () => {
     expect(opened).toBe(exePath)
   })
 
+  test('window discovery exposes only exact granted executable titles and supports selection', async () => {
+    const grantedExe = 'E:/fixture/visible.exe'
+    const otherExe = 'E:/other/visible.exe'
+    const adapter = windowsAdapter('full')
+    let enumerations = 0
+    let opaqueSelection: string | undefined
+    adapter.executor.listWindows = async () => {
+      enumerations++
+      const status = { className: 'Fixture', visible: true, minimized: false, foreground: true, dpiAwareness: 2, il: 'medium' }
+      return [
+        { ...status, hwnd: 10, pid: 20, bundleId: grantedExe.toUpperCase(), windowId: '10:20', title: 'Visible document' },
+        { ...status, hwnd: 30, pid: 40, bundleId: otherExe, windowId: '30:40', title: 'Private document' },
+      ]
+    }
+    adapter.executor.openApp = async (_bundleId, _signal, windowId) => { opaqueSelection = windowId }
+    const overrides = makeOverrides({
+      allowedApps: [{ bundleId: grantedExe, displayName: 'Fixture', grantedAt: 1, tier: 'read' }],
+    })
+    const tools = buildComputerUseTools(adapter.executor.capabilities, 'pixels')
+    expect(tools.find(tool => tool.name === 'list_granted_applications')?.inputSchema.properties).toHaveProperty('include_windows')
+    expect(tools.find(tool => tool.name === 'open_application')?.inputSchema.properties).toHaveProperty('window_id')
+    expect(tools).toHaveLength(27)
+    expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['list_windows', 'get_window', 'activate_window']))
+    expect(tools.map(tool => tool.name)).not.toContain('desktop_info')
+
+    const summary = await handleToolCall(adapter, 'list_granted_applications', {}, overrides)
+    expect(json(summary)).toMatchObject({ coordinateMode: 'pixels' })
+    expect(enumerations).toBe(0)
+    const found = await handleToolCall(adapter, 'list_granted_applications', { include_windows: true }, overrides)
+    expect(json(found).windows).toEqual([{ windowId: '10:20', title: 'Visible document', app: grantedExe, tier: 'read' }])
+    const selected = await handleToolCall(adapter, 'open_application', { app: grantedExe, window_id: '10:20' }, overrides)
+    expect(selected.isError).toBeUndefined()
+    expect(opaqueSelection).toBe('10:20')
+
+    const list = await handleToolCall(adapter, 'list_windows', { visible_only: false, limit: 1, granted_only: false }, overrides)
+    expect(json(list)).toMatchObject({ count: 1, ungrantedCount: 1, windows: [{ hwnd: 10, il: 'medium', dpi_awareness: 'per_monitor', tier: 'read' }] })
+    expect(JSON.stringify(list)).not.toContain('Private document')
+    const detail = await handleToolCall(adapter, 'get_window', { hwnd: 10 }, overrides)
+    expect(json(detail)).toMatchObject({ hwnd: 10, rootHwnd: 10, foreground: true, minimized: false })
+    const deniedDetail = await handleToolCall(adapter, 'get_window', { hwnd: 30 }, overrides)
+    expect(deniedDetail.structuredContent).toMatchObject({ code: 'app_not_granted', hwnd: 30 })
+    expect(JSON.stringify(deniedDetail)).not.toContain(otherExe)
+    let activatedHwnd = 0
+    adapter.executor.activateWindow = async window => { activatedHwnd = window.hwnd; return true }
+    const activation = await handleToolCall(adapter, 'activate_window', { hwnd: 10 }, overrides)
+    expect(json(activation)).toMatchObject({ activated: true, hwnd: 10 })
+    expect(activatedHwnd).toBe(10)
+    const diagnostics = await handleToolCall(adapter, 'list_granted_applications', { include_desktop: true }, { ...overrides, screenshotAgeMs: 25 })
+    expect(json(diagnostics).desktop_info).toMatchObject({ anchorAgeMs: 25, limits: { batchActions: 100, typeCodeUnits: 100_000 } })
+    expect(json(diagnostics).desktop_info.displays[0]).toEqual({ displayId: 0, label: 'display 0', isPrimary: false })
+
+    adapter.executor.listInstalledApps = async () => [{ bundleId: 'alias', path: grantedExe, displayName: 'Fixture' }]
+    const deniedOverrides = { ...overrides, userDeniedBundleIds: ['alias'] }
+    const denied = await handleToolCall(adapter, 'list_granted_applications', { include_windows: true }, deniedOverrides)
+    expect(json(denied).windows).toEqual([])
+    expect((await handleToolCall(adapter, 'open_application', { app: grantedExe, window_id: '10:20' }, deniedOverrides)).telemetry?.error_kind).toBe('app_not_granted')
+  })
+
   test('unknown and non-granted targets fail closed on Windows', async () => {
     const unknown = await handleToolCall(windowsAdapter('full', null), 'type', { text: 'x' }, grants('full'))
     expect(unknown.telemetry?.error_kind).toBe('state_conflict')
@@ -1269,7 +1353,7 @@ describe('Windows display and window coordinate spaces', () => {
     })
     const result = await handleToolCall(adapter, 'type', { text: 'x' }, makeOverrides({
       allowedApps: [{ bundleId: 'E:\\Apps\\Game.exe', displayName: 'Game', grantedAt: 1, tier: 'full' }],
-      userDeniedBundleIds: ['e:/apps/game.exe'],
+      userDeniedBundleIds: ['e:/apps/subdir/../game.exe'],
     }))
     expect(result.telemetry?.error_kind).toBe('allowlist_empty')
     expect(typed).toBe(0)

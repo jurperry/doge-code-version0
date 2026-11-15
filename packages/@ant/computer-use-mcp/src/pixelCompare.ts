@@ -6,17 +6,8 @@
  * seen. If the 9×9 patch around the target differs, the click is aborted and
  * the model is told to re-screenshot. This is NOT a popup detector.
  *
- * Semantics preserved exactly:
- *   - Skip on no `lastScreenshot` (cold start) — click proceeds.
- *   - Skip on any internal error (crop throws, screenshot fails, etc.) —
- *     click proceeds. Validation failure must never block the action.
- *   - 9×9 exact byte equality on raw pixel bytes. No fuzzing, no tolerance.
- *   - Compare in percentage coords so Retina scale doesn't matter.
- *
- * JPEG decode + crop is INJECTED via `ComputerUseHostAdapter.cropRawPatch`.
- * The original used `sharp` (LGPL, native `.node` addon); we inject Electron's
- * `nativeImage` (Chromium decoders, BSD, nothing to bundle) from the host, so
- * this package never imports it — the crop is a function parameter.
+ * The host decodes a 9×9 patch from each JPEG. The Windows caller allows
+ * modest JPEG variation and handles unavailable comparisons explicitly.
  */
 
 import type { ScreenshotResult } from "./executor.js";
@@ -26,7 +17,7 @@ import type { Logger } from "./types.js";
 export type CropRawPatchFn = (
   jpegBase64: string,
   rect: { x: number; y: number; width: number; height: number },
-) => Buffer | null;
+) => Buffer | null | Promise<Buffer | null>;
 
 /** 9×9 is empirically the sweet spot — large enough to catch a tooltip
  * appearing, small enough to not false-positive on surrounding animation.
@@ -36,8 +27,7 @@ const DEFAULT_GRID_SIZE = 9;
 export interface PixelCompareResult {
   /** true → click may proceed. false → patch changed, abort the click. */
   valid: boolean;
-  /** true → validation did not run (cold start, sub-gate off, or internal
-   * error). The caller MUST treat this identically to `valid: true`. */
+  /** true → a comparison could not be performed. */
   skipped: boolean;
   /** Populated when valid === false. Returned to the model verbatim. */
   warning?: string;
@@ -81,33 +71,29 @@ function computeCropRect(
  * @returns true for identical pixels, false for a real mismatch, and null
  * when no comparison can be performed (invalid rect or unavailable crop).
  */
-export function comparePixelAtLocation(
+export async function comparePixelAtLocation(
   crop: CropRawPatchFn,
   lastScreenshot: ScreenshotResult,
   freshScreenshot: ScreenshotResult,
   xPercent: number,
   yPercent: number,
-  gridSize: number = DEFAULT_GRID_SIZE,
-): boolean | null {
+  gridSize = DEFAULT_GRID_SIZE,
+  tolerance = 0,
+): Promise<boolean | null> {
   // Both screenshots are of the same display — use the fresh one's
   // dimensions (less likely to be stale than last's).
-  const rect = computeCropRect(
-    freshScreenshot.width,
-    freshScreenshot.height,
-    xPercent,
-    yPercent,
-    gridSize,
-  );
+  if (lastScreenshot.width !== freshScreenshot.width || lastScreenshot.height !== freshScreenshot.height ||
+      lastScreenshot.displayWidth !== freshScreenshot.displayWidth || lastScreenshot.displayHeight !== freshScreenshot.displayHeight ||
+      lastScreenshot.originX !== freshScreenshot.originX || lastScreenshot.originY !== freshScreenshot.originY ||
+      lastScreenshot.displayId !== freshScreenshot.displayId || lastScreenshot.targetRevision !== freshScreenshot.targetRevision) return false;
+  const rect = computeCropRect(freshScreenshot.width, freshScreenshot.height, xPercent, yPercent, gridSize);
   if (!rect) return null;
-
-  const patch1 = crop(lastScreenshot.base64, rect);
-  const patch2 = crop(freshScreenshot.base64, rect);
-  if (!patch1 || !patch2) return null;
-
-  // Direct buffer equality. Note: nativeImage.toBitmap() gives BGRA, sharp's
-  // .raw() gave RGB.
-  // Doesn't matter — we're comparing two same-format buffers for equality.
-  return patch1.equals(patch2);
+  const [previous, current] = await Promise.all([crop(lastScreenshot.base64, rect), crop(freshScreenshot.base64, rect)]);
+  if (!previous || !current || previous.length === 0 || previous.length !== current.length) return null;
+  if (tolerance === 0) return previous.equals(current);
+  let difference = 0;
+  for (let i = 0; i < previous.length; i++) difference += Math.abs(previous[i]! - current[i]!);
+  return difference <= tolerance * previous.length;
 }
 
 /**
@@ -131,7 +117,8 @@ export async function validateClickTarget(
   yPercent: number,
   takeFreshScreenshot: () => Promise<ScreenshotResult | null>,
   logger: Logger,
-  gridSize: number = DEFAULT_GRID_SIZE,
+  gridSize = DEFAULT_GRID_SIZE,
+  tolerance = 0,
 ): Promise<PixelCompareResult> {
   if (!lastScreenshot) {
     return { valid: true, skipped: true };
@@ -143,13 +130,14 @@ export async function validateClickTarget(
       return { valid: true, skipped: true };
     }
 
-    const pixelsMatch = comparePixelAtLocation(
+    const pixelsMatch = await comparePixelAtLocation(
       crop,
       lastScreenshot,
       fresh,
       xPercent,
       yPercent,
       gridSize,
+      tolerance,
     );
 
     if (pixelsMatch === null) {
@@ -165,8 +153,7 @@ export async function validateClickTarget(
         "Screen content at the target location changed since the last screenshot. Take a new screenshot before clicking.",
     };
   } catch (err) {
-    // Skip validation on technical errors, execute action anyway.
-    // Battle-tested: validation failure must never block the click.
+    // The caller decides whether a skipped comparison can proceed.
     logger.debug("[pixelCompare] validation error, skipping", err);
     return { valid: true, skipped: true };
   }

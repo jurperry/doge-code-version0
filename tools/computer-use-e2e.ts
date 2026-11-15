@@ -63,7 +63,9 @@ try {
   const { tools } = await mcpClient.listTools()
   check(
     'MCP ListTools exposes the CU toolset',
-    tools.length >= 20 && tools.some(t => t.name === 'request_access') && tools.some(t => t.name === 'screenshot'),
+    tools.length === (process.platform === 'win32' ? 27 : 24) &&
+      (process.platform !== 'win32' || ['list_windows', 'activate_window', 'get_window'].every(name => tools.some(t => t.name === name))) &&
+      !tools.some(t => t.name === 'desktop_info'),
     `${tools.length} tools`,
   )
   await mcpClient.close()

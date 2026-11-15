@@ -35,6 +35,7 @@ export interface DisplayInfo {
   height: number
   scaleFactor: number
   displayId: number
+  isPrimary?: boolean
   originX?: number
   originY?: number
 }
@@ -130,7 +131,7 @@ export interface DisplayPlatform {
 export interface AppsPlatform {
   listRunning(): WindowHandle[]
   listInstalled(): Promise<InstalledApp[]>
-  open(name: string, signal?: AbortSignal): Promise<void>
+  open(name: string, signal?: AbortSignal, windowId?: string): Promise<void>
   getFrontmostApp(): FrontmostAppInfo | null
   getAppAtPoint?(x: number, y: number): FrontmostAppInfo | null
   findWindowByTitle(title: string): WindowHandle | null

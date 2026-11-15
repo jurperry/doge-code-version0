@@ -82,3 +82,9 @@ test('liveness-only script skips the activation block entirely', () => {
   expect(script).not.toContain('[CuGuard]::AltNudge')
   expect(script).not.toContain('NOFG|')
 })
+
+test('foreground-only activation does not inject an Alt key', () => {
+  const script = buildEnsureWindowScript(12345, true, 4242, false, false)
+  expect(script).toContain('[CuGuard]::TryForeground')
+  expect(script).not.toContain('[CuGuard]::AltNudge()')
+})

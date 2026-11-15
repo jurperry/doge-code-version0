@@ -11,8 +11,10 @@ const CLIENT_SCRIPT = `
 $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', [string]$request.pipe, [System.IO.Pipes.PipeDirection]::InOut)
 $exitCode = 1
+$stage = 'connect'
 try {
     $pipe.Connect(15000)
+    $stage = 'exchange'
     $writer = [System.IO.BinaryWriter]::new($pipe, [System.Text.Encoding]::UTF8, $true)
     $reader = [System.IO.BinaryReader]::new($pipe, [System.Text.Encoding]::UTF8, $true)
     $writer.Write([string]$request.command)
@@ -24,17 +26,36 @@ try {
     $exitCode = $reader.ReadInt32()
     [Console]::Out.Write($stdout)
     [Console]::Error.Write($stderr)
+} catch {
+    [Console]::Error.WriteLine('[CU_HELPER_' + $stage.ToUpperInvariant() + '] ' + $_.Exception.Message)
+    if ($stage -eq 'connect') { exit 11 }
+    exit 12
 } finally {
     $pipe.Dispose()
 }
 if ($exitCode -ne 0) { exit $exitCode }
 `
 
+// The bootstrap reads one framed script line and leaves the remaining input
+// available to the action through the same console reader.
+const ACTION_BOOTSTRAP = Buffer.from(`${POWER_SHELL_PREFIX}
+$encoded = [Console]::In.ReadLine()
+$script = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
+try {
+    & ([ScriptBlock]::Create($script))
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+`, 'utf16le').toString('base64')
+
 const BROKER_CS = `
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
@@ -42,6 +63,15 @@ using System.Threading;
 using System.Threading.Tasks;
 
 public static class CuElevatedBroker {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern SafeWaitHandle OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForSingleObject(SafeWaitHandle handle, uint milliseconds);
+    const uint Synchronize = 0x00100000;
+    const uint WaitTimeout = 258;
+
     class Result {
         public string Stdout = "";
         public string Stderr = "";
@@ -61,41 +91,61 @@ public static class CuElevatedBroker {
         if (current != null && current.Value != callerSid) {
             security.AddAccessRule(new PipeAccessRule(current, PipeAccessRights.ReadWrite, AccessControlType.Allow));
         }
-        return new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.None, 4096, 4096, security);
+        try {
+            return new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.None, 4096, 4096, security);
+        } catch (Exception error) {
+            int allowRules = security.GetAccessRules(true, false, typeof(SecurityIdentifier)).Count;
+            throw new InvalidOperationException("[CU_HELPER_PIPE_ACL] Could not create the named pipe (" + allowRules + " explicit access rules).", error);
+        }
     }
 
     static Result Execute(NamedPipeServerStream pipe, int ownerPid, long ownerStartTicks, string script, string input) {
-        string path = Path.Combine(Path.GetTempPath(), "doge-cu-" + Guid.NewGuid().ToString("N") + ".ps1");
-        try {
-            File.WriteAllText(path, script, new UTF8Encoding(true));
-            var start = new ProcessStartInfo {
-                FileName = Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\\v1.0\\powershell.exe"),
-                Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + (char)34 + path + (char)34,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8
-            };
-            using (var process = new Process()) {
-                process.StartInfo = start;
-                if (!process.Start()) throw new InvalidOperationException("Could not start the elevated Computer Use action.");
-                Task<string> stdout = process.StandardOutput.ReadToEndAsync();
-                Task<string> stderr = process.StandardError.ReadToEndAsync();
-                process.StandardInput.Write(input);
-                process.StandardInput.Close();
-                while (!process.WaitForExit(50)) {
-                    if (pipe.IsConnected && OwnerAlive(ownerPid, ownerStartTicks)) continue;
-                    try { process.Kill(); } catch {}
-                    throw new InvalidOperationException("The elevated Computer Use action was cancelled.");
-                }
-                process.WaitForExit();
-                return new Result { Stdout = stdout.Result, Stderr = stderr.Result, ExitCode = process.ExitCode };
+        uint clientPid;
+        if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out clientPid)) {
+            throw new InvalidOperationException("Could not identify the Computer Use action client.");
+        }
+        using (var client = OpenProcess(Synchronize, false, clientPid)) {
+            if (client.IsInvalid || WaitForSingleObject(client, 0) != WaitTimeout) {
+                throw new InvalidOperationException("The Computer Use action client is no longer running.");
             }
-        } finally {
-            try { File.Delete(path); } catch {}
+            return RunAction(client, ownerPid, ownerStartTicks, script, input);
+        }
+    }
+
+    static Result RunAction(SafeWaitHandle client, int ownerPid, long ownerStartTicks, string script, string input) {
+        var start = new ProcessStartInfo {
+            FileName = Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\\v1.0\\powershell.exe"),
+            Arguments = "-NoProfile -NonInteractive -EncodedCommand ${ACTION_BOOTSTRAP}",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+        using (var process = new Process()) {
+            process.StartInfo = start;
+            if (!process.Start()) throw new InvalidOperationException("Could not start the elevated Computer Use action.");
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            try {
+                var frame = Encoding.UTF8.GetBytes(Convert.ToBase64String(Encoding.UTF8.GetBytes(script)) + "\\n" + input);
+                Task feeding = Task.Run(() => {
+                    process.StandardInput.BaseStream.Write(frame, 0, frame.Length);
+                    process.StandardInput.Close();
+                });
+                while (!process.WaitForExit(50)) {
+                    if (WaitForSingleObject(client, 0) != WaitTimeout || !OwnerAlive(ownerPid, ownerStartTicks)) {
+                        throw new InvalidOperationException("The elevated Computer Use action was cancelled.");
+                    }
+                    if (feeding.IsFaulted) feeding.GetAwaiter().GetResult();
+                }
+                if (process.ExitCode == 0) feeding.GetAwaiter().GetResult();
+                return new Result { Stdout = stdout.Result, Stderr = stderr.Result, ExitCode = process.ExitCode };
+            } finally {
+                try { if (!process.HasExited) process.Kill(); } catch {}
+            }
         }
     }
 
@@ -107,7 +157,8 @@ public static class CuElevatedBroker {
                     if (!OwnerAlive(ownerPid, ownerStartTicks)) return;
                     Thread.Sleep(100);
                 }
-                connecting.GetAwaiter().GetResult();
+                try { connecting.GetAwaiter().GetResult(); }
+                catch (Exception error) { throw new InvalidOperationException("[CU_HELPER_PIPE_WAIT] Named pipe wait failed.", error); }
 
                 try {
                     var reader = new BinaryReader(pipe, Encoding.UTF8, true);
@@ -115,6 +166,9 @@ public static class CuElevatedBroker {
                     string command = reader.ReadString();
                     string script = Encoding.UTF8.GetString(Convert.FromBase64String(reader.ReadString()));
                     string input = Encoding.UTF8.GetString(Convert.FromBase64String(reader.ReadString()));
+                    if (command != "execute" && command != "ping" && command != "stop") {
+                        throw new InvalidOperationException("Unknown Computer Use transaction command.");
+                    }
                     if (command == "stop") {
                         writer.Write(""); writer.Write(""); writer.Write(0); writer.Flush();
                         return;
@@ -123,13 +177,13 @@ public static class CuElevatedBroker {
                         ? new Result { Stdout = "ready", ExitCode = 0 }
                         : Execute(pipe, ownerPid, ownerStartTicks, script, input);
                     writer.Write(result.Stdout);
-                    writer.Write(result.Stderr);
+                    writer.Write(result.ExitCode == 0 ? result.Stderr : "[CU_HELPER_ACTION] " + result.Stderr);
                     writer.Write(result.ExitCode);
                     writer.Flush();
                 } catch (Exception error) {
                     try {
                         var writer = new BinaryWriter(pipe, Encoding.UTF8, true);
-                        writer.Write(""); writer.Write(error.Message); writer.Write(1); writer.Flush();
+                        writer.Write(""); writer.Write("[CU_HELPER_REQUEST] " + error.Message); writer.Write(21); writer.Flush();
                     } catch {}
                 }
             }
@@ -187,16 +241,24 @@ async function startBroker(elevated: boolean, signal?: AbortSignal): Promise<voi
     try {
       if (elevated) {
         const rawPid = await runPowerShell(`
-$options = @{
-    FilePath = "$PSHOME\\powershell.exe"
-    ArgumentList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', '"${scriptLiteral}"')
-    WindowStyle = 'Hidden'
-    Verb = 'RunAs'
-    PassThru = $true
-    ErrorAction = 'Stop'
+$start = [System.Diagnostics.ProcessStartInfo]::new()
+$start.FileName = "$PSHOME\\powershell.exe"
+$start.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${scriptLiteral}"'
+$start.UseShellExecute = $true
+$start.Verb = 'RunAs'
+$start.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+try {
+    $process = [System.Diagnostics.Process]::Start($start)
+    $process.Id
+} catch {
+    for ($cause = $_.Exception; $cause; $cause = $cause.InnerException) {
+        if ($cause -is [System.ComponentModel.Win32Exception] -and $cause.NativeErrorCode -eq 1223) {
+            [Console]::Error.WriteLine('[CU_HELPER_UAC_CANCELLED] The user declined or dismissed the Windows elevation request.')
+            exit 10
+        }
+    }
+    throw
 }
-$process = Start-Process @options
-$process.Id
 `, 35_000, undefined, signal)
         broker.pid = Number(rawPid.trim())
       } else {
@@ -223,7 +285,8 @@ $process.Id
       if (!detail) {
         try { detail = readFileSync(logPath, 'utf8').trim() } catch {}
       }
-      throw new Error(`${error instanceof Error ? error.message : String(error)}${detail ? ` Helper: ${detail}` : ''}`)
+      const stage = broker.pid > 0 ? 'READINESS' : 'LAUNCH'
+      throw new Error(`[CU_HELPER_${stage}] Windows Computer Use helper failed. ${error instanceof Error ? error.message : String(error)}${detail ? ` Helper: ${detail}` : ''}`)
     } finally {
       try { unlinkSync(scriptPath) } catch {}
       try { unlinkSync(logPath) } catch {}
@@ -241,11 +304,32 @@ export async function ensureElevatedPowerShell(signal?: AbortSignal): Promise<vo
       return
     } catch (error) {
       if (signal?.aborted) throw error
-      if (active === broker) active = undefined
+      forgetBroker(broker)
       throw new Error(`The Windows Computer Use helper is unavailable. No input was sent; retry only after inspecting the target. ${error instanceof Error ? error.message : String(error)}`)
     }
   }
   await startBroker(true, signal)
+}
+
+function forgetBroker(broker: Broker): void {
+  if (active !== broker) return
+  active = undefined
+  targetElevated = false
+}
+
+/** Recover stale routing for cleanup without opening a new UAC prompt. */
+export async function prepareComputerUseRelease(): Promise<void> {
+  if (!targetElevated) return
+  const broker = active
+  if (!broker) {
+    targetElevated = false
+    return
+  }
+  try {
+    await transact(broker, 'ping', 2000)
+  } catch {
+    forgetBroker(broker)
+  }
 }
 
 export function setComputerUseTargetElevated(elevated: boolean): void {
@@ -258,14 +342,16 @@ export function isElevatedPowerShellActive(): boolean {
 
 export function runComputerUsePowerShellSync(script: string, timeoutMs = 10_000): string {
   const broker = active
-  if (!broker || !targetElevated) return runPowerShellSync(script, timeoutMs)
-  return transactSync(broker, 'execute', timeoutMs, POWER_SHELL_PREFIX + script)
+  if (!targetElevated) return runPowerShellSync(script, timeoutMs)
+  if (!broker) throw new Error('The required Windows Computer Use helper is unavailable. No action was sent.')
+  return transactSync(broker, 'execute', timeoutMs, script)
 }
 
 export async function runComputerUsePowerShell(script: string, timeoutMs = 15_000, stdin?: string, signal?: AbortSignal): Promise<string> {
   const broker = active
-  if (!broker || !targetElevated) return runPowerShell(script, timeoutMs, stdin, signal)
-  return transact(broker, 'execute', timeoutMs, POWER_SHELL_PREFIX + script, stdin, signal)
+  if (!targetElevated) return runPowerShell(script, timeoutMs, stdin, signal)
+  if (!broker) throw new Error('The required Windows Computer Use helper is unavailable. No action was sent.')
+  return transact(broker, 'execute', timeoutMs, script, stdin, signal)
 }
 
 export async function stopElevatedPowerShell(): Promise<void> {

@@ -6,6 +6,8 @@ export type {
   ResolvePrepareCaptureResult,
   RunningApp,
   ScreenshotResult,
+  WindowsWindow,
+  TargetPreparation,
 } from "./executor.js";
 
 export type {

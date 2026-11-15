@@ -44,6 +44,20 @@ export interface InstalledApp {
   iconDataUrl?: string
 }
 
+export interface WindowsWindow {
+  hwnd: number
+  pid: number
+  windowId: string
+  bundleId: string
+  title: string
+  className: string
+  visible: boolean
+  minimized: boolean
+  foreground: boolean
+  dpiAwareness: number | null
+  il: string
+}
+
 export interface RunningApp {
   bundleId: string
   displayName: string
@@ -62,6 +76,8 @@ export interface ComputerExecutorCapabilities {
   platform: 'darwin' | 'win32'
   hostBundleId: string
 }
+
+export type TargetPreparation = 'input' | 'capture' | 'hover'
 
 export interface ComputerExecutor {
   capabilities: ComputerExecutorCapabilities
@@ -94,6 +110,7 @@ export interface ComputerExecutor {
     displayId?: number,
     captureOrigin?: { x: number; y: number },
   ): Promise<{ base64: string; width: number; height: number }>
+  validateKeyChord?(parts: string[]): void
   key(keySequence: string, repeat?: number, signal?: AbortSignal): Promise<void>
   holdKey(keyNames: string[], durationMs: number, signal?: AbortSignal): Promise<void>
   type(text: string, opts: { viaClipboard: boolean }, signal?: AbortSignal): Promise<void>
@@ -116,7 +133,8 @@ export interface ComputerExecutor {
   ): Promise<void>
   scroll(x: number, y: number, dx: number, dy: number): Promise<void>
   /** Match the execution context to the authorized Windows target when UIPI requires it. */
-  prepareForTarget?(signal?: AbortSignal): Promise<void>
+  prepareForTarget?(signal?: AbortSignal, purpose?: TargetPreparation): Promise<void>
+  isWindowBound?(): boolean
   getBoundAppId?(): string | null
   getBoundRevision?(): number | undefined
   getFrontmostApp(): Promise<FrontmostApp | null>
@@ -127,7 +145,10 @@ export interface ComputerExecutor {
   listInstalledApps(): Promise<InstalledApp[]>
   getAppIcon(path: string): Promise<string | undefined>
   listRunningApps(): Promise<RunningApp[]>
-  openApp(bundleId: string, signal?: AbortSignal): Promise<void>
+  listWindows?(visibleOnly?: boolean): Promise<WindowsWindow[]>
+  activateWindow?(window: WindowsWindow, signal?: AbortSignal): Promise<boolean>
+  getOwnIntegrity?(): string
+  openApp(bundleId: string, signal?: AbortSignal, windowId?: string): Promise<void>
   /** Windows: leave HWND-bound mode and use display/global coordinates. */
   unbindApp?(): Promise<void>
 }

@@ -68,8 +68,8 @@ describe('Windows geometry', () => {
 
   test('display parsing retains negative virtual-screen origins', () => {
     expect(inputSemantics.parseDisplayEntries('1920,1080,0,-1920,-100,False,1.5|1280,720,1,0,0,True,1')).toEqual([
-      { width: 1920, height: 1080, displayId: 0, originX: -1920, originY: -100, scaleFactor: 1 },
-      { width: 1280, height: 720, displayId: 1, originX: 0, originY: 0, scaleFactor: 1 },
+      { width: 1920, height: 1080, displayId: 0, originX: -1920, originY: -100, scaleFactor: 1, isPrimary: false },
+      { width: 1280, height: 720, displayId: 1, originX: 0, originY: 0, scaleFactor: 1, isPrimary: true },
     ])
     expect(() => inputSemantics.parseDisplayEntries('bad-entry')).toThrow('Invalid display metadata entry')
   })
