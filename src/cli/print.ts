@@ -987,6 +987,9 @@ export async function runHeadless(
             ? lastMessage.errors[0]!
             : 'Execution error')
           break
+        case 'error_interrupted':
+          writeToStdout('Interrupted\n')
+          break
         case 'error_max_turns':
           writeToStdout(`Error: Reached max turns (${options.maxTurns})`)
           break

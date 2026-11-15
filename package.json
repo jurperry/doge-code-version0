@@ -1,6 +1,6 @@
 {
   "name": "@doge-code/cli",
-  "version": "2.1.339",
+  "version": "2.1.340",
   "private": true,
   "description": "Restored Claude Code source tree reconstructed from source maps.",
   "license": "SEE LICENSE IN LICENSE.md",

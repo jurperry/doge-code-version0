@@ -47,10 +47,10 @@ describe('user message replacement authority', () => {
     expect(new UserMessageEditTracker([user('old')]).snapshot().can_replace).toBe(false)
   })
 
-  test('the existing canceled-query error result does not turn an explicit interruption into a model failure', () => {
+  test.each(['error_interrupted', 'error_during_execution'])('%s leaves an explicit thinking-only stop editable', subtype => {
     const tracker = new UserMessageEditTracker([])
     tracker.receive('original'); tracker.interrupt()
-    tracker.observe({ type: 'result', subtype: 'error_during_execution', is_error: true })
+    tracker.observe({ type: 'result', subtype, is_error: true })
     tracker.settle()
     expect(tracker.snapshot().can_replace).toBe(true)
   })

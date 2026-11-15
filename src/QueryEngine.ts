@@ -694,6 +694,7 @@ export class QueryEngine {
     let structuredOutputFromTool: unknown
     // Track the last stop_reason from assistant messages
     let lastStopReason: string | null = null
+    let interrupted = false
     // Reference-based watermark so error_during_execution's errors[] is
     // turn-scoped. A length-based index breaks when the 100-entry ring buffer
     // shift()s during the turn — the index slides. If this entry is rotated
@@ -830,6 +831,7 @@ export class QueryEngine {
           yield* normalizeMessage(message)
           break
         case 'user':
+          if (message.isUserInterruption) interrupted = true
           this.mutableMessages.push(message)
           yield* normalizeMessage(message)
           break
@@ -884,7 +886,7 @@ export class QueryEngine {
             structuredOutputFromTool = message.attachment.data
           }
           // Handle max turns reached signal from query.ts
-          else if (message.attachment.type === 'max_turns_reached') {
+          else if (message.attachment.type === 'max_turns_reached' && !interrupted) {
             if (persistSession) {
               if (
                 isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
@@ -1133,10 +1135,10 @@ export class QueryEngine {
     }
 
     const abortReason = this.abortController.signal.reason
-    if (abortReason instanceof UacTimeoutError || !isResultSuccessful(result, lastStopReason)) {
+    if (interrupted || abortReason instanceof UacTimeoutError || !isResultSuccessful(result, lastStopReason)) {
       yield {
         type: 'result',
-        subtype: 'error_during_execution',
+        subtype: interrupted ? 'error_interrupted' : 'error_during_execution',
         duration_ms: Date.now() - startTime,
         duration_api_ms: getTotalAPIDuration(),
         is_error: true,
@@ -1158,6 +1160,7 @@ export class QueryEngine {
         // errors[] is turn-scoped via the watermark; previously it dumped the
         // entire process's logError buffer (ripgrep timeouts, ENOENT, etc).
         errors: (() => {
+          if (interrupted) return []
           if (abortReason instanceof UacTimeoutError) return [abortReason.message]
           const all = getInMemoryErrors()
           const start = errorLogWatermark

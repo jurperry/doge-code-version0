@@ -1442,6 +1442,7 @@ export const SDKResultErrorSchema = lazySchema(() =>
     type: z.literal('result'),
     subtype: z.enum([
       'error_during_execution',
+      'error_interrupted',
       'error_max_turns',
       'error_max_budget_usd',
       'error_max_structured_output_retries',

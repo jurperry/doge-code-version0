@@ -69,10 +69,10 @@ export class UserMessageEditTracker {
   observe(message: any): void {
     if (hasActivity(message)) this.activity = true
     if (message.type === 'result') {
-      // QueryEngine reports a canceled stream with no completed content as
-      // error_during_execution. Real API errors also carry an error assistant
-      // (activity above); budget/turn failures keep their distinct subtype.
-      if (!this.interrupted || (message.is_error && message.subtype !== 'error_during_execution')) this.completed = true
+      // Keep thinking-only stops editable. Older engine paths may still report
+      // error_during_execution; real API errors also carry an error assistant.
+      const terminalError = message.is_error && message.subtype !== 'error_interrupted' && message.subtype !== 'error_during_execution'
+      if (!this.interrupted || terminalError) this.completed = true
     }
   }
   interrupt(): void { if (this.active && !this.completed) this.interrupted = true }
