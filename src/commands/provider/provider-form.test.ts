@@ -9,7 +9,7 @@ describe('/provider form flow', () => {
     expect(FIRST_FORM_STEP).toBe('name')
   })
 
-  test('step order is the documented 1-15 sequence ending in review', () => {
+  test('step order is the documented 1-11 sequence ending in review', () => {
     expect(STEP_ORDER).toEqual([
       'name',
       'provider',
@@ -21,12 +21,8 @@ describe('/provider form flow', () => {
       'opus',
       'sonnet',
       'haiku',
-      'opusCapabilities',
-      'sonnetCapabilities',
-      'haikuCapabilities',
-      'disableEffort',
       'review',
     ])
-    expect(STEP_ORDER).toHaveLength(15)
+    expect(STEP_ORDER).toHaveLength(11)
   })
 })

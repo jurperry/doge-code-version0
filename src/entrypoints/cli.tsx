@@ -291,10 +291,10 @@ async function main(): Promise<void> {
   startCapturingEarlyInput();
   // One-time repair of provider stores corrupted by the duplicate-provider
   // bug (same providerName on multiple modelProfiles entries): physically
-  // dedupes secure storage AND the .claude.json mirror before anything reads
-  // them. Idempotent — no write when no duplicates exist.
-  const { migrateDuplicateProviderProfiles } = await import('../utils/customApiStorage.js');
-  migrateDuplicateProviderProfiles();
+  // moves legacy customApiEndpoint model config into model-catalog.json and
+  // removes it from .credentials/.claude. Idempotent.
+  const { migrateLegacyModelConfig } = await import('../utils/customApiStorage.js');
+  migrateLegacyModelConfig();
   // Restore tier env (ANTHROPIC_DEFAULT_*_MODEL / tier-selected main model)
   // from persisted custom API storage before any UI or query code reads them.
   // Only fills in vars a start script didn't already set.

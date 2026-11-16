@@ -45,6 +45,7 @@ type OpenAIStreamChunk = {
       role?: 'assistant';
       content?: string | null;
       reasoning_content?: string | null;
+      reasoning?: string | null;
       tool_calls?: Array<{
         index?: number;
         id?: string;
@@ -493,9 +494,10 @@ export async function runSimpleStreamJson(): Promise<void> {
                       completionTokens = chunk.usage.completion_tokens;
                     }
 
-                    // Capture reasoning_content for DeepSeek
-                    if (delta?.reasoning_content) {
-                      reasoningContent += delta.reasoning_content;
+                    // 兼容 reasoning_content / reasoning（vLLM / OpenRouter 等）
+                    const reasoningDelta = delta?.reasoning_content ?? delta?.reasoning;
+                    if (reasoningDelta) {
+                      reasoningContent += reasoningDelta;
                     }
 
                     // Emit text delta

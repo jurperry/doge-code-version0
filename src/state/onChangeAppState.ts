@@ -21,7 +21,24 @@ import {
 import { setCurrentPermissionMode } from '../utils/permissions/currentPermissionMode.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
 import { resolveModelSwitchScope } from '../utils/model/modelSwitchScope.js'
+import {
+  getModelProfile,
+  readCustomApiStorage,
+  writeCustomApiStorage,
+} from '../utils/customApiStorage.js'
+import { getProfileId } from '../utils/model/profileIdentity.js'
 import type { AppState } from './AppStateStore.js'
+
+function persistCatalogModelSelection(model: string): boolean {
+  const profile = getModelProfile(model)
+  if (!profile) return false
+  writeCustomApiStorage({
+    ...readCustomApiStorage(),
+    model,
+    activeProfileId: getProfileId(profile),
+  })
+  return true
+}
 
 // Inverse of the push below — restore on worker restart.
 export function externalMetadataToAppState(
@@ -120,9 +137,13 @@ export function onChangeAppState({
     newState.mainLoopModel !== oldState.mainLoopModel &&
     newState.mainLoopModel !== null
   ) {
-    // Save to settings (global scope only — see above)
+    // Persist the default in the unified catalog (global scope only).
     if (resolveModelSwitchScope() === 'global') {
-      updateSettingsForSource('userSettings', { model: newState.mainLoopModel })
+      if (!persistCatalogModelSelection(newState.mainLoopModel)) {
+        // First-party users have no catalog connection; their default lives in
+        // settings.json.model (custom-provider users must not write it).
+        updateSettingsForSource('userSettings', { model: newState.mainLoopModel })
+      }
     }
     setMainLoopModelOverride(newState.mainLoopModel)
     emitModelChanged()

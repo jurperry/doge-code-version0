@@ -6,7 +6,7 @@ import {
   ModelSwitchError,
 } from './switchModelProfile.js'
 import { PROFILE_MANAGED_ENV_KEYS } from './profileEnvKeys.js'
-import type { ModelProfile } from '../customApiStorage.js'
+import { modelProfileEnvPatch, type ModelProfile } from '../customApiStorage.js'
 
 // Save & restore env around each test so they don't bleed.
 let originalEnv: Record<string, string | undefined> = {}
@@ -24,6 +24,19 @@ afterEach(() => {
     if (v === undefined) delete process.env[key]
     else process.env[key] = v
   }
+})
+
+test('profile patch carries catalog selection ids', () => {
+  const profile = {
+    id: 'c1',
+    connectionId: 'c1',
+    catalogModelId: 'm1',
+    model: 'm'
+  } as ModelProfile
+  const patch = modelProfileEnvPatch(profile)
+  expect(patch.DOGE_ACTIVE_CONNECTION_ID).toBe('c1')
+  expect(patch.DOGE_ACTIVE_MODEL_ID).toBe('m1')
+  expect(patch.DOGE_REASONING_POLICY).toBeUndefined()
 })
 
 test('clearProfileEnvVars deletes every key in the whitelist', () => {
@@ -173,7 +186,6 @@ test('switchTier(haiku) — session commit only; never persists, never syncs dis
     committed = updater({ mainLoopModel: 'deepseek-v4-pro', mainLoopModelForSession: null })
   })
   const syncMock = mock(() => {})
-  const clearLegacyMock = mock(() => {})
 
   const { switchTier } = await import('./switchModelProfile.js')
   switchTier('haiku', {
@@ -181,7 +193,6 @@ test('switchTier(haiku) — session commit only; never persists, never syncs dis
     commitAppState: setAppStateMock,
     resolveTierModel: () => 'deepseek-v4-flash',
     resolveDefaultModel: () => 'unused',
-    clearLegacyTier: clearLegacyMock,
     getStoredMainModel: () => 'deepseek-v4-pro[1m]',
   })
 
@@ -195,7 +206,6 @@ test('switchTier(haiku) — session commit only; never persists, never syncs dis
   expect(committed.mainLoopModel).toBe('deepseek-v4-pro')
   expect(committed.mainLoopModelForSession).toBe('deepseek-v4-flash')
   expect(syncMock).not.toHaveBeenCalled()
-  expect(clearLegacyMock).not.toHaveBeenCalled()
 })
 
 test('switchTier(haiku) global scope — STILL session commit (tiers never persist)', async () => {
@@ -258,7 +268,6 @@ test('switchTier(null) session — unresolvable default (first-party) clears the
 test('switchTier(null) global custom user — scrubs legacy tier state, returns to stored main model', async () => {
   let committed: any = null
   const syncMock = mock(() => {})
-  const clearLegacyMock = mock(() => {})
   const { switchTier } = await import('./switchModelProfile.js')
   switchTier(null, {
     syncToDisk: syncMock,
@@ -267,13 +276,11 @@ test('switchTier(null) global custom user — scrubs legacy tier state, returns 
     },
     resolveTierModel: () => 'unused',
     resolveDefaultModel: () => 'unused',
-    clearLegacyTier: clearLegacyMock,
     getStoredMainModel: () => 'deepseek-v4-pro[1m]',
     sessionScoped: false,
   })
   expect(committed.mainLoopModel).toBe('deepseek-v4-pro[1m]')
   expect(committed.mainLoopModelForSession).toBeNull()
-  expect(clearLegacyMock).toHaveBeenCalledTimes(1)
   // 凭证与主模型槽位不动（不调 syncToDisk）
   expect(syncMock).not.toHaveBeenCalled()
 })

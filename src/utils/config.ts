@@ -17,6 +17,7 @@ import { registerCleanup } from './cleanupRegistry.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
 import { getGlobalClaudeFile } from './env.js'
+import { readCatalogEndpoint, writeCatalogFromEndpoint, type CatalogEndpoint } from './model/modelCatalog.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
 import { ConfigParseError, getErrnoCode } from './errors.js'
 import { writeFileSyncAndFlush_DEPRECATED } from './file.js'
@@ -190,21 +191,6 @@ export type GlobalConfig = {
     savedModels?: string[]
     modelProfiles?: unknown[]
     activeProfileId?: string
-    /**
-     * @deprecated Tier selections are session-scoped (2026-09-07 provider
-     * refactor). No longer written or restored; scrubbed by
-     * clearLegacyTierState().
-     */
-    activeTier?: 'opus' | 'sonnet' | 'haiku'
-    /**
-     * @deprecated Cross-provider global snapshot; tier mappings now live on
-     * each ModelProfile. No longer written or restored.
-     */
-    tierModels?: {
-      opus?: string
-      sonnet?: string
-      haiku?: string
-    }
   }
   /**
    * @deprecated Use settings.apiKeyHelper instead.
@@ -826,6 +812,36 @@ function wouldLoseAuthState(fresh: {
   return lostOauth || lostOnboarding
 }
 
+function overlayCatalogEndpoint(config: GlobalConfig, allowLegacy = false): GlobalConfig {
+  const endpoint = readCatalogEndpoint()
+  if (endpoint) {
+    return { ...config, customApiEndpoint: endpoint as GlobalConfig['customApiEndpoint'] }
+  }
+  // No catalog: never expose the old .claude.json model config to runtime.
+  // Tests may still construct legacy global config directly.
+  if (allowLegacy) return config
+  return { ...config, customApiEndpoint: undefined }
+}
+
+function persistCatalogEndpoint(config: GlobalConfig): GlobalConfig {
+  const endpoint = config.customApiEndpoint
+  if (endpoint) {
+    const hasModelConfig = Boolean(
+      endpoint.model?.trim()
+      || endpoint.baseURL
+      || endpoint.apiKey
+      || endpoint.provider
+      || (Array.isArray(endpoint.modelProfiles) && endpoint.modelProfiles.length > 0)
+    )
+    if (hasModelConfig) {
+      writeCatalogFromEndpoint(endpoint as CatalogEndpoint)
+    }
+    const { customApiEndpoint: _legacy, ...rest } = config
+    return rest as GlobalConfig
+  }
+  return config
+}
+
 export function saveGlobalConfig(
   updater: (currentConfig: GlobalConfig) => GlobalConfig,
 ): void {
@@ -836,6 +852,8 @@ export function saveGlobalConfig(
       return
     }
     Object.assign(TEST_GLOBAL_CONFIG_FOR_TESTING, config)
+    // Tests exercise the same catalog-only storage contract.
+    persistCatalogEndpoint(config)
     return
   }
 
@@ -845,9 +863,10 @@ export function saveGlobalConfig(
       getGlobalClaudeFile(),
       createDefaultGlobalConfig,
       current => {
-        const config = updater(current)
+        const currentWithCatalog = overlayCatalogEndpoint(current)
+        const config = persistCatalogEndpoint(updater(currentWithCatalog))
         // Skip if no changes (same reference returned)
-        if (config === current) {
+        if (config === currentWithCatalog) {
           return current
         }
         written = {
@@ -883,9 +902,10 @@ export function saveGlobalConfig(
       logEvent('tengu_config_auth_loss_prevented', {})
       return
     }
-    const config = updater(currentConfig)
+    const currentWithCatalog = overlayCatalogEndpoint(currentConfig)
+    const config = persistCatalogEndpoint(updater(currentWithCatalog))
     // Skip if no changes (same reference returned)
-    if (config === currentConfig) {
+    if (config === currentWithCatalog) {
       return
     }
     written = {
@@ -1091,7 +1111,7 @@ function writeThroughGlobalConfigCache(config: GlobalConfig): void {
 
 export function getGlobalConfig(): GlobalConfig {
   if (process.env.NODE_ENV === 'test') {
-    return TEST_GLOBAL_CONFIG_FOR_TESTING
+    return overlayCatalogEndpoint(TEST_GLOBAL_CONFIG_FOR_TESTING, true)
   }
 
   // Fast path: pure memory read. After startup, this always hits — our own
@@ -1099,7 +1119,7 @@ export function getGlobalConfig(): GlobalConfig {
   // background freshness watcher (never blocks this path).
   if (globalConfigCache.config) {
     configCacheHits++
-    return globalConfigCache.config
+    return overlayCatalogEndpoint(globalConfigCache.config)
   }
 
   // Slow path: startup load. Sync I/O here is acceptable because it runs
@@ -1113,9 +1133,9 @@ export function getGlobalConfig(): GlobalConfig {
     } catch {
       // File doesn't exist
     }
-    const config = migrateConfigFields(
+    const config = overlayCatalogEndpoint(migrateConfigFields(
       getConfig(getGlobalClaudeFile(), createDefaultGlobalConfig),
-    )
+    ))
     globalConfigCache = {
       config,
       mtime: stats?.mtimeMs ?? Date.now(),
@@ -1127,9 +1147,9 @@ export function getGlobalConfig(): GlobalConfig {
     return config
   } catch {
     // If anything goes wrong, fall back to uncached behavior
-    return migrateConfigFields(
+    return overlayCatalogEndpoint(migrateConfigFields(
       getConfig(getGlobalClaudeFile(), createDefaultGlobalConfig),
-    )
+    ))
   }
 }
 
@@ -1200,9 +1220,9 @@ function saveConfig<A extends object>(
  */
 /**
  * Create a config backup WITHOUT the plaintext API key mirror. The key inside
- * customApiEndpoint is only a convenience MIRROR of secure storage (the
- * credential source of truth — see healStoredCredentials), so stripping it
- * costs nothing on restore, while the rotating backup files (unlike the live
+ * model config/keys now live in model-catalog.json; the legacy
+ * customApiEndpoint field is stripped from backups for the same reason, while
+ * the rotating backup files (unlike the live
  * config write below, which sets 0o600) would otherwise leave 5 world-default
  * -permission plaintext copies of the key in ~/.doge/backups/. Non-JSON or
  * key-less files are byte-copied unchanged.

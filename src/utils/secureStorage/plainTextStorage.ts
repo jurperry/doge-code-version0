@@ -25,7 +25,7 @@ export const plainTextStorage = {
       const data = getFsImplementation().readFileSync(storagePath, {
         encoding: 'utf8',
       })
-      return jsonParse(data)
+      return jsonParse(data.replace(/^\uFEFF/, ''))
     } catch {
       return null
     }
@@ -36,7 +36,7 @@ export const plainTextStorage = {
       const data = await getFsImplementation().readFile(storagePath, {
         encoding: 'utf8',
       })
-      return jsonParse(data)
+      return jsonParse(data.replace(/^\uFEFF/, ''))
     } catch {
       return null
     }

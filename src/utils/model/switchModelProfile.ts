@@ -1,6 +1,5 @@
 import { PROFILE_MANAGED_ENV_KEYS, type ProfileManagedEnvKey } from './profileEnvKeys.js'
 import type { ModelProfile } from '../customApiStorage.js'
-import { clearModelCapabilityOverrideCache } from './modelSupportOverrides.js'
 
 export type ModelSwitchPhase = 'apply' | 'persist' | 'commit'
 
@@ -27,7 +26,6 @@ export function clearProfileEnvVars(): void {
   for (const key of PROFILE_MANAGED_ENV_KEYS) {
     delete process.env[key]
   }
-  clearModelCapabilityOverrideCache()
 }
 
 /**
@@ -54,7 +52,6 @@ export function restoreEnvSnapshot(snapshot: Record<ProfileManagedEnvKey, string
       process.env[key] = value
     }
   }
-  clearModelCapabilityOverrideCache()
 }
 
 /**
@@ -69,6 +66,8 @@ export function restoreEnvSnapshot(snapshot: Record<ProfileManagedEnvKey, string
  */
 const APPLY_EXTRA_ENV_KEYS = [
   'DOGE_ACTIVE_MODEL_PROFILE',
+  'DOGE_ACTIVE_CONNECTION_ID',
+  'DOGE_ACTIVE_MODEL_ID',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_BASE_URL',
   'DOGE_API_KEY',
@@ -145,10 +144,6 @@ export interface SwitchTierDeps {
    *  (first-party user with no custom API config) — the session override is
    *  then simply cleared. */
   resolveDefaultModel: () => string | null
-  /** Scrub deprecated global tier state (activeTier/tierModels) from disk.
-   *  Real binding: clearLegacyTierState. Called on the global-scope default
-   *  path as the migration hook. */
-  clearLegacyTier?: () => void
   /** Return the persisted main model id (custom API users), or undefined for
    *  first-party users with no custom API config.
    *  Real binding: () => readCustomApiStorage().model */
@@ -317,13 +312,11 @@ export function switchTier(tier: TierAlias, deps: SwitchTierDeps): void {
   }
   const storedMainModel = deps.getStoredMainModel()
   if (storedMainModel) {
-    // 自定义 API 用户：清掉废弃的全局层级状态，主循环模型回到持久化的主模型
-    deps.clearLegacyTier?.()
+    // 自定义 API 用户：主循环模型回到 catalog 的默认模型
     deps.commitAppState(commitFields(storedMainModel, false))
     return
   }
   // 官方用户：清 model + 凭证（保持原有语义）
-  deps.clearLegacyTier?.()
   deps.syncToDisk('', true, undefined)
   deps.commitAppState(commitFields(null, false))
 }

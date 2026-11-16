@@ -1,24 +1,19 @@
-import { chmodSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { getGlobalConfig, saveGlobalConfig } from './config.js'
+import { readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { getGlobalClaudeFile } from './env.js'
 import { getSecureStorage } from './secureStorage/index.js'
-import { clearModelCapabilityOverrideCache } from './model/modelSupportOverrides.js'
-import { ACTIVE_PROFILE_ENV, getProfileId, matchModelProfile, resolveProfileReference } from './model/profileIdentity.js'
+import {
+  readCatalogEndpoint,
+  readModelCatalog,
+  writeCatalogFromEndpoint,
+  writeModelCatalog,
+  type CatalogEndpoint,
+  type CatalogProfile,
+} from './model/modelCatalog.js'
+import { ACTIVE_PROFILE_ENV, getProfileId, matchModelProfile } from './model/profileIdentity.js'
 import { getModelEnvironment, readModelApiStorage } from './model/runtimeModelContext.js'
 
 export type TierAliasName = 'opus' | 'sonnet' | 'haiku'
-
-/**
- * Persisted tier→model mapping snapshot. Captured from the process env at
- * the moment a tier switch (or profile switch) happens, so a later bare
- * `doge` launch (no start-script env) can restore the tier configuration
- * instead of falling back every tier to the main model.
- */
-export type TierModelsSnapshot = {
-  opus?: string
-  sonnet?: string
-  haiku?: string
-}
 
 /**
  * Complete model profile that captures ALL environment variables
@@ -26,6 +21,17 @@ export type TierModelsSnapshot = {
  */
 export type ModelProfile = {
   id?: string
+  /** Catalog connection/model identity (derived; never persisted here). */
+  connectionId?: string
+  catalogModelId?: string
+  models?: Array<{
+    id: string
+    upstreamModel: string
+    displayName: string
+    contextWindow?: number
+    maxOutputTokens?: number
+    reasoning?: unknown
+  }>
   model: string
   /**
    * User-facing provider name (e.g. "deepseek官方", "glm官方"). Unique across
@@ -54,22 +60,6 @@ export type ModelProfile = {
   defaultHaikuModel?: string
   /** Override for all sub-agent models */
   subagentModel?: string
-  /** Capabilities string for Opus model */
-  opusCapabilities?: string
-  /** Capabilities string for Sonnet model */
-  sonnetCapabilities?: string
-  /** Capabilities string for Haiku model */
-  haikuCapabilities?: string
-  /** Explicitly disable the effort parameter for this provider's models */
-  disableEffort?: boolean
-
-  // --- Behavior configuration ---
-  /** Disable non-essential network traffic */
-  disableNonessentialTraffic?: boolean
-  /** Disable non-streaming fallback */
-  disableNonstreamingFallback?: boolean
-  /** Effort level (e.g., 'max', 'high') */
-  effortLevel?: string
 }
 
 export type CustomApiStorageData = {
@@ -83,72 +73,103 @@ export type CustomApiStorageData = {
   savedModels?: string[]
   /** Per-model profiles with full provider/credentials config */
   modelProfiles?: ModelProfile[]
-  /**
-   * @deprecated Tier selections are session-scoped since the 2026-09-07
-   * provider refactor; nothing writes or restores this field anymore. Parsed
-   * only so old on-disk payloads stay readable; cleared by
-   * clearLegacyTierState().
-   */
-  activeTier?: TierAliasName
-  /**
-   * @deprecated Cross-provider global snapshot replaced by per-profile tier
-   * fields (defaultOpusModel etc.). Parsed only for backward compatibility;
-   * cleared by clearLegacyTierState().
-   */
-  tierModels?: TierModelsSnapshot
 }
 
 const CUSTOM_API_STORAGE_KEY = 'customApiEndpoint'
 
-export function readCustomApiStorage(): CustomApiStorageData {
+function secureEndpoint(): CatalogEndpoint {
+  const storage = getSecureStorage() as {
+    read?: () => Record<string, unknown> | null
+    update?: (data: Record<string, unknown>) => { success: boolean }
+  }
+  const raw = storage.read?.()?.[CUSTOM_API_STORAGE_KEY]
+  return raw && typeof raw === 'object' ? (raw as CatalogEndpoint) : {}
+}
+
+function scrubLegacyModelConfig(): void {
   const storage = getSecureStorage() as {
     read?: () => Record<string, unknown> | null
     update?: (data: Record<string, unknown>) => { success: boolean }
   }
   const data = storage.read?.() ?? {}
-  const raw = data[CUSTOM_API_STORAGE_KEY]
-  if (!raw || typeof raw !== 'object') return {}
-  return normalizeCustomApiStorageData(parseCustomApiStorage(raw))
+  if (CUSTOM_API_STORAGE_KEY in data) {
+    const { [CUSTOM_API_STORAGE_KEY]: _legacy, ...rest } = data
+    storage.update?.(rest)
+  }
+
+  // .claude.json mirror is no longer source of truth. Write it directly here:
+  // startup migration runs before the global-config auth guard is unlocked.
+  // Scrub it even when secure storage has no customApiEndpoint key.
+  try {
+    const file = getGlobalClaudeFile()
+    const config = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+    if (CUSTOM_API_STORAGE_KEY in config) {
+      delete config[CUSTOM_API_STORAGE_KEY]
+      const tmp = `${file}.doge-tmp`
+      writeFileSync(tmp, `${JSON.stringify(config)}\n`, { encoding: 'utf8', mode: 0o600 })
+      renameSync(tmp, file)
+    }
+  } catch {
+    // A missing/locked legacy mirror is harmless; the catalog is authoritative.
+  }
+
+  try {
+    const hasCatalogModels = Boolean(readModelCatalog()?.connections.some(connection => connection.models.length > 0))
+    if (!hasCatalogModels) return
+    const settingsFile = join(dirname(getGlobalClaudeFile()), 'settings.json')
+    const settings = JSON.parse(readFileSync(settingsFile, 'utf8')) as Record<string, unknown>
+    if ('model' in settings) {
+      delete settings.model
+      const tmp = `${settingsFile}.doge-tmp`
+      writeFileSync(tmp, `${JSON.stringify(settings, null, 2)}\n`, 'utf8')
+      renameSync(tmp, settingsFile)
+    }
+  } catch {
+    // No settings file yet.
+  }
 }
 
-function parseCustomApiStorage(raw: object): CustomApiStorageData {
-  const value = raw as Record<string, unknown>
-  return {
-    activeProfileId: typeof value.activeProfileId === 'string' ? value.activeProfileId : undefined,
-    provider:
-      value.provider === 'openai' || value.provider === 'anthropic' || value.provider === 'responses'
-        ? value.provider
-        : undefined,
-    baseURL: typeof value.baseURL === 'string' ? value.baseURL : undefined,
-    apiKey: typeof value.apiKey === 'string' ? value.apiKey : undefined,
-    authTokenType:
-      value.authTokenType === 'DOGE_API_KEY' || value.authTokenType === 'ANTHROPIC_AUTH_TOKEN'
-        ? value.authTokenType
-        : undefined,
-    model: typeof value.model === 'string' ? value.model : undefined,
-    savedModels: Array.isArray(value.savedModels)
-      ? value.savedModels.filter((item): item is string => typeof item === 'string')
-      : [],
-    modelProfiles: Array.isArray(value.modelProfiles)
-      ? value.modelProfiles.filter(
-          (p): p is ModelProfile =>
-            typeof p === 'object' && p !== null && typeof p.model === 'string',
-        )
-      : [],
-    activeTier:
-      value.activeTier === 'opus' || value.activeTier === 'sonnet' || value.activeTier === 'haiku'
-        ? value.activeTier
-        : undefined,
-    tierModels:
-      value.tierModels && typeof value.tierModels === 'object'
-        ? {
-            opus: typeof value.tierModels.opus === 'string' ? value.tierModels.opus : undefined,
-            sonnet:
-              typeof value.tierModels.sonnet === 'string' ? value.tierModels.sonnet : undefined,
-            haiku: typeof value.tierModels.haiku === 'string' ? value.tierModels.haiku : undefined,
-          }
-        : undefined,
+/**
+ * One-time upgrade: old `.credentials`/`.claude` customApiEndpoint →
+ * model-catalog.json, then remove the legacy model config from both stores.
+ * Never fall back to the old stores once the catalog exists.
+ */
+function legacyGlobalEndpoint(): CatalogEndpoint {
+  try {
+    const raw = JSON.parse(readFileSync(getGlobalClaudeFile(), 'utf8')) as {
+      customApiEndpoint?: CatalogEndpoint
+    }
+    return raw.customApiEndpoint && typeof raw.customApiEndpoint === 'object'
+      ? raw.customApiEndpoint
+      : {}
+  } catch {
+    return {}
   }
+}
+
+let legacyScrubChecked = false
+
+function ensureCatalogMigrated(): void {
+  if (readModelCatalog()) {
+    // A catalog exists: legacy model config is never a runtime fallback.
+    // Scrub once per process (hot path: readCustomApiStorage is called per request).
+    if (!legacyScrubChecked) {
+      scrubLegacyModelConfig()
+      legacyScrubChecked = true
+    }
+    return
+  }
+  const secure = secureEndpoint()
+  const legacy: CatalogEndpoint = { ...legacyGlobalEndpoint(), ...secure }
+  if (!legacy.modelProfiles?.length && !legacy.model?.trim()) return
+  writeCatalogFromEndpoint(legacy)
+  scrubLegacyModelConfig()
+  legacyScrubChecked = true
+}
+
+export function readCustomApiStorage(): CustomApiStorageData {
+  ensureCatalogMigrated()
+  return normalizeCustomApiStorageData((readCatalogEndpoint() ?? {}) as unknown as CustomApiStorageData)
 }
 
 // --- Provider identity (providerName is THE unique key) ---
@@ -245,82 +266,10 @@ export function normalizeCustomApiStorageData(data: CustomApiStorageData): Custo
  * restoreTierStateFromStorage so the credential heal reads repaired data.
  * Returns true when a repair write happened.
  */
-export function migrateDuplicateProviderProfiles(): boolean {
-  let changed = false
-
-  const storage = getSecureStorage() as {
-    read?: () => Record<string, unknown> | null
-    update?: (data: Record<string, unknown>) => { success: boolean }
-  }
-  const data = storage.read?.() ?? {}
-  const raw = data[CUSTOM_API_STORAGE_KEY]
-  let normalized: CustomApiStorageData | undefined
-  if (raw && typeof raw === 'object') {
-    const parsed = parseCustomApiStorage(raw)
-    normalized = normalizeCustomApiStorageData(parsed)
-    if (normalized !== parsed) {
-      storage.update?.({ ...data, [CUSTOM_API_STORAGE_KEY]: normalized })
-      changed = true
-    }
-  }
-
-  try {
-    const claudeFile = getGlobalClaudeFile()
-    const config = JSON.parse(readFileSync(claudeFile, 'utf8')) as Record<string, unknown>
-    const ep = config[CUSTOM_API_STORAGE_KEY]
-    if (ep && typeof ep === 'object') {
-      if (normalized) {
-        // The .claude.json copy is a MIRROR of secure storage: align its
-        // profiles/savedModels with the normalized source of truth. Deduping
-        // only the credentials side leaves the mirror's copy of a dropped
-        // duplicate's model as a phantom /provider menu row (the mirror may
-        // legitimately have fewer profiles than the pre-migration store, so
-        // its own "no duplicates" fast path never prunes it).
-        if (
-          JSON.stringify(ep.modelProfiles) !== JSON.stringify(normalized.modelProfiles) ||
-          JSON.stringify(ep.savedModels) !== JSON.stringify(normalized.savedModels)
-        ) {
-          config[CUSTOM_API_STORAGE_KEY] = {
-            ...ep,
-            modelProfiles: normalized.modelProfiles ?? [],
-            savedModels: normalized.savedModels ?? [],
-          }
-          writeAtomicJson(claudeFile, config)
-          changed = true
-        }
-      } else {
-        // No secure-storage payload to align with — normalize the mirror
-        // standalone (it may predate the credentials store).
-        const parsed = parseCustomApiStorage(ep)
-        const mirrorNormalized = normalizeCustomApiStorageData(parsed)
-        if (mirrorNormalized !== parsed) {
-          config[CUSTOM_API_STORAGE_KEY] = mirrorNormalized
-          writeAtomicJson(claudeFile, config)
-          changed = true
-        }
-      }
-    }
-  } catch {
-    // Missing/unreadable .claude.json — secure storage is the source of truth.
-  }
-
-  return changed
-}
-
-/** tmp + rename write, so a crash mid-migration can't truncate the config.
- *  mode 0o600 at tmp creation + chmod after rename: rename installs the TMP
- *  file's inode, so without this the ~/.doge/.claude.json mirror (which
- *  carries the plaintext key mirror) lands at the umask default 0644 —
- *  compare plainTextStorage/config.ts which both set 0o600 explicitly. */
-function writeAtomicJson(path: string, data: unknown): void {
-  const tmp = `${path}.doge-tmp`
-  writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 })
-  renameSync(tmp, path)
-  try {
-    chmodSync(path, 0o600)
-  } catch {
-    // Platforms without POSIX chmod semantics (Windows maps it to the read-only bit)
-  }
+export function migrateLegacyModelConfig(): boolean {
+  const hadCatalog = Boolean(readModelCatalog())
+  ensureCatalogMigrated()
+  return !hadCatalog && Boolean(readModelCatalog())
 }
 
 // --- Tier selection persistence ---
@@ -346,83 +295,15 @@ function writeAtomicJson(path: string, data: unknown): void {
  *
  * Returns true if a repair write happened.
  */
-export function healStoredCredentials(): boolean {
-  const current = readCustomApiStorage()
-  const model = current.model?.trim()
-  if (!model) return false
-  const profile = (current.activeProfileId ? resolveProfileReference(current.modelProfiles ?? [], current.activeProfileId) : undefined)
-    ?? matchModelProfile(current.modelProfiles ?? [], model, {})
-  if (!profile?.apiKey) return false
-
-  const credsMatch =
-    current.apiKey === profile.apiKey &&
-    current.provider === profile.provider &&
-    current.baseURL === profile.baseURL &&
-    current.authTokenType === profile.authTokenType
-  if (credsMatch) return false
-
-  writeCustomApiStorage({
-    ...current,
-    provider: profile.provider,
-    baseURL: profile.baseURL,
-    apiKey: profile.apiKey,
-    authTokenType: profile.authTokenType,
-  })
-  return true
-}
-
-/**
- * Remove the deprecated global tier state (activeTier / tierModels) from BOTH
- * config stores. Tier selections are session-scoped since the 2026-09-07
- * provider refactor: persisting them globally forced every other terminal
- * (and every new `doge` launch) onto one terminal's Opus/Sonnet/Haiku choice
- * — the cross-terminal "custom model pollution" bug. Tier→model mappings now
- * live exclusively on each ModelProfile's default{Opus,Sonnet,Haiku}Model
- * fields and are injected into env at startup by restoreTierState.
- *
- * No-op when no legacy fields are present. Runtime-safe only (uses
- * saveGlobalConfig — do NOT call before enableConfigs(); startup cleanup
- * writes secure storage directly instead).
- */
-export function clearLegacyTierState(): void {
-  const current = readCustomApiStorage()
-  if (current.activeTier === undefined && current.tierModels === undefined) return
-
-  writeCustomApiStorage({
-    ...current,
-    activeTier: undefined,
-    tierModels: undefined,
-  })
-  saveGlobalConfig(cfg => ({
-    ...cfg,
-    customApiEndpoint: {
-      ...(cfg.customApiEndpoint ?? {}),
-      activeTier: undefined,
-      tierModels: undefined,
-    },
-  }))
-}
-
+/** Persist the in-memory connection view into the unified catalog. */
 export function writeCustomApiStorage(next: CustomApiStorageData): void {
-  const storage = getSecureStorage() as {
-    read?: () => Record<string, unknown> | null
-    update?: (data: Record<string, unknown>) => { success: boolean }
-  }
-  const current = storage.read?.() ?? {}
-  storage.update?.({
-    ...current,
-    customApiEndpoint: next,
-  })
+  ensureCatalogMigrated()
+  writeCatalogFromEndpoint(next as unknown as CatalogEndpoint)
 }
 
 export function clearCustomApiStorage(): void {
-  const storage = getSecureStorage() as {
-    read?: () => Record<string, unknown> | null
-    update?: (data: Record<string, unknown>) => { success: boolean }
-  }
-  const current = storage.read?.() ?? {}
-  const { customApiEndpoint: _, ...rest } = current
-  storage.update?.(rest)
+  writeModelCatalog({ version: 2, connections: [] })
+  scrubLegacyModelConfig()
 }
 
 // --- Model Profile helpers ---
@@ -441,9 +322,9 @@ export function getModelProfile(modelName: string): ModelProfile | undefined {
   return matchModelProfile(readModelApiStorage().modelProfiles ?? [], modelName, getModelEnvironment())
 }
 
-/** Secure storage is authoritative; the global copy is a legacy fallback. */
+/** The catalog is the single source; keep the old API as a thin alias. */
 export function readMergedCustomApiStorage(): CustomApiStorageData {
-  return { ...(getGlobalConfig().customApiEndpoint ?? {}), ...readCustomApiStorage() } as CustomApiStorageData
+  return readCustomApiStorage()
 }
 
 /**
@@ -458,6 +339,8 @@ export function modelProfileEnvPatch(
 ): Record<string, string | undefined> {
   const patch: Record<string, string | undefined> = {
     [ACTIVE_PROFILE_ENV]: getProfileId(profile),
+    DOGE_ACTIVE_CONNECTION_ID: profile.connectionId,
+    DOGE_ACTIVE_MODEL_ID: profile.catalogModelId,
     ANTHROPIC_MODEL: profile.model,
     ANTHROPIC_BASE_URL: profile.baseURL,
     CLAUDE_CODE_COMPATIBLE_API_PROVIDER: profile.provider,
@@ -469,21 +352,6 @@ export function modelProfileEnvPatch(
     ANTHROPIC_DEFAULT_SONNET_MODEL: profile.defaultSonnetModel,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: profile.defaultHaikuModel,
     CLAUDE_CODE_SUBAGENT_MODEL: profile.subagentModel,
-    ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:
-      profile.opusCapabilities,
-    ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
-      profile.sonnetCapabilities,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
-      profile.haikuCapabilities,
-    CLAUDE_CODE_DISABLE_EFFORT: profile.disableEffort ? '1' : undefined,
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: profile
-      .disableNonessentialTraffic
-      ? '1'
-      : undefined,
-    CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: profile
-      .disableNonstreamingFallback
-      ? '1'
-      : undefined,
   }
   if (profile.apiKey) {
     if (profile.authTokenType === 'ANTHROPIC_AUTH_TOKEN') {
@@ -539,9 +407,6 @@ export function applyModelProfile(profile: ModelProfile, opts?: { persist?: bool
       delete process.env[name]
     }
   }
-  // Tier env changed — drop memoized capability overrides (the memo key does
-  // not include env state, see modelSupportOverrides).
-  clearModelCapabilityOverrideCache()
   // NOTE: Do NOT apply CLAUDE_CODE_EFFORT_LEVEL from profile.
   // Effort is a runtime user preference controlled by:
   //   - CLAUDE_CODE_EFFORT_LEVEL env var (set by PS startup scripts)
@@ -569,7 +434,5 @@ export function applyModelProfile(profile: ModelProfile, opts?: { persist?: bool
     ...current,
     model: profile.model,
     activeProfileId: getProfileId(profile),
-    activeTier: undefined,
-    tierModels: undefined,
   })
 }

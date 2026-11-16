@@ -1,7 +1,46 @@
 import { test, expect } from 'bun:test'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { planEffortWire } from './effortGateway.js'
 
 const OPENAI = { protocol: 'openai' as const, baseURL: 'https://api.deepseek.com' }
+
+test('catalog reasoning policy wins over gateway heuristics', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR
+  const dir = join(tmpdir(), `doge-gateway-${process.pid}-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(dir, { recursive: true })
+  process.env.CLAUDE_CONFIG_DIR = dir
+  try {
+    writeFileSync(join(dir, 'model-catalog.json'), JSON.stringify({
+      modelCatalog: {
+        version: 2,
+        connections: [{
+          id: 'c1', name: 'tongji', protocol: 'openai', baseURL: 'https://agi.tongji.edu.cn',
+          models: [{
+            id: 'm1', upstreamModel: 'DeepSeek-V4.1-Flash', displayName: 'DeepSeek-V4.1-Flash',
+            reasoning: {
+              preset: 'deepseek',
+              thinking: { mode: 'always' },
+              effort: { mode: 'named', field: 'reasoning_effort', levels: ['low', 'high', 'max'] },
+              response: { openaiFields: ['reasoning'], display: 'full' },
+            },
+          }],
+          defaultModelId: 'm1',
+        }],
+        defaultModel: { connectionId: 'c1', modelId: 'm1' },
+      },
+    }))
+    expect(planEffortWire({ model: 'DeepSeek-V4.1-Flash', requested: 'high', protocol: 'openai', baseURL: 'https://agi.tongji.edu.cn' }))
+      .toMatchObject({ gateway: 'catalog', extraBody: { reasoning_effort: 'high' }, applied: 'high' })
+    expect(planEffortWire({ model: 'DeepSeek-V4.1-Flash', requested: 'xhigh', protocol: 'openai', baseURL: 'https://agi.tongji.edu.cn' }))
+      .toMatchObject({ gateway: 'catalog', downgraded: true })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = previous
+  }
+})
 
 test('official Anthropic and OpenAI endpoints pass levels through', () => {
   expect(

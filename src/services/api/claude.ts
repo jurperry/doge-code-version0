@@ -25,6 +25,7 @@ import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
+import { getHostReasoningPolicy, hostResponseFields } from 'src/utils/model/reasoningPolicy.js'
 import { recordNetworkRetryUsage } from 'src/utils/sessionStorage.js'
 import {
   convertAnthropicRequestToOpenAI,
@@ -1525,11 +1526,12 @@ async function* queryModel(
     const effortAllowed =
       typeof effort === 'number' ||
       (effort !== undefined && modelSupportsEffort(options.model))
+    const hostPolicy = getHostReasoningPolicy(options.model)
     const plan =
-      effortAllowed && typeof effort === 'string'
+      hostPolicy || (effortAllowed && typeof effort === 'string')
         ? planEffortWire({
             model: options.model,
-            requested: effort,
+            requested: typeof effort === 'string' ? effort : undefined,
             protocol: effortConnection.provider,
             baseURL: effortConnection.baseURL,
             thinkingEnabled:
@@ -1540,6 +1542,7 @@ async function* queryModel(
         : undefined
     currentEffortPlan = plan
     if (typeof effort === 'number') return effort
+    if (hostPolicy) return plan?.wireEffort as EffortValue | undefined
     return effortAllowed && plan
       ? (plan.wireEffort as EffortValue | undefined)
       : undefined
@@ -1653,6 +1656,9 @@ async function* queryModel(
       outputConfig,
       extraBodyParams,
     )
+    // Host policy：thinking/reasoning/enable_thinking 等字段随 compat extra_body
+    // 原样进入请求体（Anthropic 路径也会被 ...extraBodyParams 覆盖 thinking）。
+    if (currentEffortPlan?.extraBody) Object.assign(extraBodyParams, currentEffortPlan.extraBody)
 
     configureTaskBudgetParams(
       options.taskBudget,
@@ -1975,6 +1981,7 @@ async function* queryModel(
             return createAnthropicStreamFromOpenAI({
               reader,
               model: params.model,
+              reasoningFields: hostResponseFields(getHostReasoningPolicy(options.model)),
             }) as unknown as Stream<BetaRawMessageStreamEvent>
           }
 

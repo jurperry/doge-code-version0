@@ -38,7 +38,6 @@ test('host-owned connection never adopts disk defaults or settings routing on re
   expect(process.env.ANTHROPIC_BASE_URL).toBe('https://a.invalid')
   expect(process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER).toBe('openai')
   expect(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('')
-  expect(process.env.CLAUDE_CODE_DISABLE_EFFORT).toBe('')
   expect(process.env.DOGE_API_KEY).toBe('fake-a')
 })
 

@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Box, Text } from '../../ink.js';
 import { Select } from '../../components/CustomSelect/index.js';
-import { saveGlobalConfig, getGlobalConfig } from '../../utils/config.js';
+import { getGlobalConfig } from '../../utils/config.js';
 import {
   applyModelProfile,
   getModelProfile,
@@ -12,7 +12,6 @@ import {
 } from '../../utils/customApiStorage.js';
 import { formatCustomModelLabel } from '../../utils/model/model.js';
 import { PROFILE_MANAGED_ENV_KEYS } from '../../utils/model/profileEnvKeys.js';
-import { updateSettingsForSource } from '../../utils/settings/settings.js';
 import type { LocalJSXCommandOnDone } from '../../types/command.js';
 import { getProviderEntries } from './provider-entries.js';
 import { getProfileId, profileSelection, isProfileSelection, resolveProfileReference } from '../../utils/model/profileIdentity.js';
@@ -44,9 +43,7 @@ export function doRemoveProvider(target: string): { success: boolean; message: s
   const next = { ...stored, model: disk.model, modelProfiles: profiles,
     savedModels: [...new Set(remaining.map(e => e.model))],
     activeProfileId: disk.profile ? getProfileId(disk.profile) : undefined, ...credentials };
-  saveGlobalConfig(current => ({ ...current, customApiEndpoint: { ...current.customApiEndpoint, ...next } }));
   writeCustomApiStorage(next);
-  if (removesDisk && disk.model) updateSettingsForSource('userSettings', { model: disk.model });
   if (entry.isCurrent) {
     if (fallback.profile) applyModelProfile(fallback.profile, { persist: false });
     else {

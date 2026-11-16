@@ -4,8 +4,9 @@
 // the same chain: env sonnet tier → stored main profile's sonnet field →
 // ANTHROPIC_MODEL → stored main model → null.
 import { test, expect, beforeAll, afterAll, describe } from 'bun:test'
-import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
+import { endpointToCatalog, writeModelCatalog } from './modelCatalog.js'
 
 const TMP = join(process.cwd(), 'test', '.tmp-bindings-test')
 
@@ -52,7 +53,14 @@ function clearEnv() {
 }
 
 function writeStorage(customApiEndpoint: Record<string, unknown>) {
-  writeFileSync(join(TMP, '.credentials.json'), JSON.stringify({ customApiEndpoint }))
+  const endpoint = { ...customApiEndpoint } as { modelProfiles?: Array<Record<string, unknown>> }
+  if (endpoint.modelProfiles) {
+    endpoint.modelProfiles = endpoint.modelProfiles.map((profile, index) => ({
+      ...profile,
+      id: profile.id ?? `p-${index}-${String(profile.model ?? '')}`,
+    }))
+  }
+  writeModelCatalog(endpointToCatalog(endpoint as never))
 }
 
 test('env sonnet tier wins over everything else', () => {
@@ -69,11 +77,11 @@ test('falls back to the stored main profile sonnet field when env tier is unset'
     modelProfiles: [
       {
         model: 'deepseek-v4-pro[1m]',
-        defaultSonnetModel: 'deepseek-v4-pro',
+        defaultSonnetModel: 'deepseek-v4-sonnet',
       },
     ],
   })
-  expect(resolveSessionDefaultModel()).toBe('deepseek-v4-pro')
+  expect(resolveSessionDefaultModel()).toBe('deepseek-v4-sonnet')
 })
 
 test('baseline profile sonnet must NOT outrank the active provider main model', () => {

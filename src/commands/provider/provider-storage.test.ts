@@ -5,7 +5,6 @@ import {
   findProviderNameConflict,
   maskSecret,
   normalizeProviderName,
-  parseCapabilityCsv,
   saveAndActivateProvider,
   upsertModelProfile,
   validateProviderForm,
@@ -23,43 +22,6 @@ const VALID_BASE: ProviderFormValues = {
   apiKey: 'sk-1',
   model: 'm1',
 }
-
-// --- effort/thinking capability declarations ---
-
-test('parseCapabilityCsv: empty means no declaration', () => {
-  expect(parseCapabilityCsv(undefined)).toEqual({})
-  expect(parseCapabilityCsv('   ')).toEqual({})
-})
-
-test('parseCapabilityCsv: normalizes, dedupes and rejects unknown tokens', () => {
-  expect(parseCapabilityCsv(' effort, MAX_EFFORT , effort ')).toEqual({
-    value: 'effort,max_effort',
-  })
-  expect(parseCapabilityCsv('effort,telepathy').error).toContain('telepathy')
-})
-
-test('buildModelProfile persists capability declarations and disable flag', () => {
-  const profile = buildModelProfile({
-    ...VALID_BASE,
-    opusCapabilities: 'effort,max_effort',
-    sonnetCapabilities: 'effort',
-    haikuCapabilities: 'thinking',
-    disableEffort: true,
-  })
-  expect(profile.opusCapabilities).toBe('effort,max_effort')
-  expect(profile.sonnetCapabilities).toBe('effort')
-  expect(profile.haikuCapabilities).toBe('thinking')
-  expect(profile.disableEffort).toBe(true)
-})
-
-test('validateProviderForm rejects unknown capability tokens with the field name', () => {
-  const error = validateProviderForm({
-    ...VALID_BASE,
-    opusCapabilities: 'effort,nope',
-  })
-  expect(error).toContain('Opus capabilities')
-  expect(error).toContain('nope')
-})
 
 test('validateProviderForm: missing provider name is rejected', () => {
   expect(validateProviderForm({ ...VALID_BASE, providerName: '  ' })).toContain('Provider name is required')
@@ -344,8 +306,8 @@ test('saveAndActivateProvider persists profile, credentials and saved list, then
   expect(h.getGlobalConfig().customApiEndpoint.apiKey).toBe('sk-test')
   expect(h.getGlobalConfig().customApiEndpoint.savedModels).toEqual(['old-model', 'deepseek-v4-pro'])
 
-  // settings.json model updated
-  expect(h.settingsUpdates).toEqual([{ model: 'deepseek-v4-pro' }])
+  // settings.json no longer owns the model; catalog did the persistence
+  expect(h.settingsUpdates).toEqual([])
 
   // Atomic activation is invoked with the saved profile
   expect(h.getSwitchCall()?.profile).toMatchObject(profile)

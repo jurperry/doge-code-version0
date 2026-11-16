@@ -32,11 +32,20 @@ export function matchModelProfile(
 ): ModelProfile | undefined {
   if (isProfileSelection(model)) return resolveProfileReference(profiles, model)
   const normalized = (name: string) => name.toLowerCase().trim().replace(/\[[12]m\]$/i, '')
-  const matches = profiles.filter(profile => normalized(profile.model) === normalized(model))
+  const wanted = normalized(model)
+  const modelOf = (profile: ModelProfile) => profile.models?.find(
+    m => normalized(m.upstreamModel) === wanted || normalized(m.displayName) === wanted,
+  )
+  const matches = profiles.filter(profile => normalized(profile.model) === wanted || Boolean(modelOf(profile)))
   const active = env[ACTIVE_PROFILE_ENV]
   const key = env.DOGE_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN
-  return (active ? resolveProfileReference(matches, active) : undefined)
+  const candidate = (active ? resolveProfileReference(matches, active) : undefined)
     ?? matches.find(p => env.ANTHROPIC_BASE_URL && p.baseURL?.trim() === env.ANTHROPIC_BASE_URL.trim() && (!p.apiKey || p.apiKey === key))
     ?? matches.find(p => env.ANTHROPIC_BASE_URL && p.baseURL?.trim() === env.ANTHROPIC_BASE_URL.trim())
     ?? matches[0]
+  if (!candidate) return undefined
+  const selected = modelOf(candidate)
+  return selected
+    ? { ...candidate, model: selected.upstreamModel, catalogModelId: selected.id }
+    : candidate
 }

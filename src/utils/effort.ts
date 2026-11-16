@@ -10,6 +10,7 @@ import {
   getEffortCapability,
 } from './model/effortCapabilities.js'
 import { planEffortWire } from './model/effortGateway.js'
+import { getHostReasoningPolicy } from './model/reasoningPolicy.js'
 import { resolveAntModel } from './model/antModels.js'
 
 export type { EffortLevel }
@@ -205,7 +206,14 @@ export function getAppliedEffortValue(
   appStateEffort: EffortValue | undefined,
 ): EffortValue | undefined {
   const resolved = resolveAppliedEffort(model, appStateEffort)
-  if (resolved === undefined) return undefined
+  if (resolved === undefined) {
+    // Host policy 可以声明 defaultLevel：即使 App 送的是 unset/auto，
+    // 实际请求也会按默认档发送，状态栏/applied 必须如实显示。
+    if (getHostReasoningPolicy(model)) {
+      return planEffortWire({ model, requested: undefined }).applied
+    }
+    return undefined
+  }
   return applyEffortForValue(model, resolved).applied
 }
 

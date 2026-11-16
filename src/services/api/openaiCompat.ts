@@ -102,6 +102,7 @@ type OpenAIStreamChunk = {
       role?: 'assistant'
       content?: string | null
       reasoning_content?: string | null
+      reasoning?: string | null
       tool_calls?: Array<{
         index?: number
         id?: string
@@ -624,9 +625,35 @@ function collectSearchResults(
   return true
 }
 
+function reasoningDeltaText(delta: Record<string, unknown> | undefined, fields: string[]): string | undefined {
+  if (!delta) return undefined
+  for (const field of fields) {
+    let value: unknown = delta
+    for (const part of field.split('.')) {
+      if (!value || typeof value !== 'object') { value = undefined; break }
+      value = (value as Record<string, unknown>)[part]
+    }
+    if (typeof value === 'string' && value) return value
+    if (Array.isArray(value)) {
+      const text = value.map((entry) => typeof entry === 'string'
+        ? entry
+        : entry && typeof entry === 'object'
+          ? String((entry as { text?: unknown; content?: unknown; reasoning?: unknown }).text
+            ?? (entry as { content?: unknown }).content
+            ?? (entry as { reasoning?: unknown }).reasoning
+            ?? '')
+          : '').filter(Boolean).join('')
+      if (text) return text
+    }
+  }
+  return undefined
+}
+
 export async function* createAnthropicStreamFromOpenAI(input: {
   reader: ReadableStreamDefaultReader<Uint8Array>
   model: string
+  /** 优先读取的思维字段；缺省同时接受 reasoning_content / reasoning。 */
+  reasoningFields?: string[]
 }): AsyncGenerator<BetaRawMessageStreamEvent, BetaMessage, void> {
   const decoder = new TextDecoder()
   let buffer = ''
@@ -735,7 +762,13 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           } as BetaRawMessageStreamEvent
         }
 
-        if (delta?.reasoning_content) {
+        const reasoningDelta = reasoningDeltaText(
+          delta as Record<string, unknown> | undefined,
+          input.reasoningFields !== undefined
+            ? input.reasoningFields
+            : ['reasoning_content', 'reasoning'],
+        )
+        if (reasoningDelta) {
           if (!reasoningStarted) {
             reasoningStarted = true
             reasoningContentIndex = nextContentIndex
@@ -754,7 +787,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
             index: reasoningContentIndex ?? 0,
             delta: {
               type: 'thinking_delta',
-              thinking: delta.reasoning_content,
+              thinking: reasoningDelta,
             },
           } as BetaRawMessageStreamEvent
           emittedAnyContent = true

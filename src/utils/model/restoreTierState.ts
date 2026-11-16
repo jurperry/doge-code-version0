@@ -1,11 +1,8 @@
 import {
   getModelProfile,
-  healStoredCredentials,
   readCustomApiStorage,
-  writeCustomApiStorage,
   type TierAliasName,
 } from '../customApiStorage.js'
-import { clearModelCapabilityOverrideCache } from './modelSupportOverrides.js'
 
 const TIER_ENV_KEYS: Record<TierAliasName, string> = {
   opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
@@ -72,22 +69,6 @@ export function restoreTierStateFromStorage(options?: { restoreTiers?: boolean }
   // First-party users have no custom API config to restore.
   if (!mainModel) return
 
-  // One-time migration: scrub deprecated global tier state (secure storage
-  // only — saveGlobalConfig is not safe before enableConfigs() at startup).
-  // Runs BEFORE the credential heal so the heal reads the post-scrub state.
-  if (storage.activeTier !== undefined || storage.tierModels !== undefined) {
-    writeCustomApiStorage({
-      ...storage,
-      activeTier: undefined,
-      tierModels: undefined,
-    })
-  }
-
-  // Self-heal first: repair top-level credentials wiped by profile switches
-  // (pre-clearCredentials behavior) from the intact modelProfiles entry, so a
-  // bare `doge` launch can authenticate again without manual re-setup.
-  healStoredCredentials()
-
   // The CLI restores the complete profile later in managedEnv, after settings
   // are available. Do not pre-fill disk-baseline tiers before that selection.
   if (options?.restoreTiers === false) return
@@ -100,6 +81,4 @@ export function restoreTierStateFromStorage(options?: { restoreTiers?: boolean }
     const model = resolveTierModel(tier, mainModel)
     if (model) process.env[envKey] = model
   }
-  // Tier env (re)populated — drop any memoized capability overrides.
-  clearModelCapabilityOverrideCache()
 }

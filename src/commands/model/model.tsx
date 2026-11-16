@@ -23,7 +23,6 @@ import { type ModelSwitchScope, resolveModelSwitchScope } from '../../utils/mode
 import { formatCustomModelLabel, getDefaultMainLoopModelSetting, isOpus1mMergeEnabled, parseUserSpecifiedModel, renderDefaultModelSetting } from '../../utils/model/model.js';
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js';
 import { validateModel } from '../../utils/model/validateModel.js';
-import { matchesTierModel as isTierModelMatch } from '../../utils/model/modelSupportOverrides.js';
 import { getAPIProvider } from '../../utils/model/providers.js';
 function ModelPickerWrapper(t0) {
   const $ = _c(17);

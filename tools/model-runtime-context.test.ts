@@ -45,13 +45,17 @@ test('snapshot captures missing env fallback once and explicit anthropic outrank
   delete process.env.ANTHROPIC_AUTH_TOKEN
   delete process.env.ANTHROPIC_BASE_URL
   process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER = 'anthropic'
-  writeFileSync(join(dir, '.credentials.json'), JSON.stringify({ customApiEndpoint: {
-    provider: 'openai', baseURL: 'https://old.invalid', apiKey: 'old-key',
-  } }))
+  const writeCatalog = (provider, baseURL, apiKey) => writeFileSync(join(dir, 'model-catalog.json'), JSON.stringify({
+    modelCatalog: {
+      version: 2,
+      connections: [{ id: 'c1', name: 'catalog', protocol: provider, baseURL, apiKey,
+        models: [{ id: 'm1', upstreamModel: 'shared', displayName: 'shared' }], defaultModelId: 'm1' }],
+      defaultModel: { connectionId: 'c1', modelId: 'm1' },
+    },
+  }))
+  writeCatalog('openai', 'https://old.invalid', 'old-key')
   const snapshot = ctx.captureModelEnvironment()
-  writeFileSync(join(dir, '.credentials.json'), JSON.stringify({ customApiEndpoint: {
-    provider: 'responses', baseURL: 'https://new.invalid', apiKey: 'new-key',
-  } }))
+  writeCatalog('responses', 'https://new.invalid', 'new-key')
   ctx.runWithModelEnvironment(snapshot, () => {
     expect(ctx.readModelApiStorage().apiKey).toBe('old-key')
     expect(ctx.getModelConnection().provider).toBe('anthropic')

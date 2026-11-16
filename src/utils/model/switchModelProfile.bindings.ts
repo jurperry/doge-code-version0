@@ -19,7 +19,7 @@
  * session-scoped in BOTH modes (they never persist — see switchTier).
  */
 import { logForDebugging } from '../debug.js'
-import { applyModelProfile, clearLegacyTierState, getModelProfile, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
+import { applyModelProfile, getModelProfile, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
 import {
   switchModelProfileAtomic as switchModelProfileAtomicCore,
   switchTier as switchTierCore,
@@ -185,7 +185,6 @@ export function switchTierBound(
     sessionScoped,
     resolveTierModel: t => resolveActiveTier(t) || t,
     resolveDefaultModel: resolveSessionDefaultModel,
-    clearLegacyTier: clearLegacyTierState,
     getStoredMainModel: () => {
       // Persisted main model from custom API storage; trimmed, may be ''.
       const stored = readCustomApiStorage().model?.trim()

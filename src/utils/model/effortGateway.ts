@@ -1,5 +1,6 @@
 import type { EffortLevel } from './effortCapabilities.js'
 import { getModelEnvironment } from './runtimeModelContext.js'
+import { getHostReasoningPolicy, planHostReasoning } from './reasoningPolicy.js'
 
 /**
  * Gateway-aware effort wire mapping.
@@ -26,6 +27,7 @@ export type EffortGatewayKind =
   | 'openrouter'
   | 'xai'
   | 'gemini'
+  | 'catalog'
   | 'generic'
 
 export interface EffortWirePlan {
@@ -262,6 +264,25 @@ export function planEffortWire(input: {
   /** Output-token ceiling, used to cap Qwen thinking_budget. */
   maxOutputTokens?: number
 }): EffortWirePlan {
+  // Catalog policy 优先：CLI 不再按模型名/网关猜测。
+  const catalogPolicy = getHostReasoningPolicy(input.model)
+  if (catalogPolicy) {
+    const catalogPlan = planHostReasoning({
+      policy: catalogPolicy,
+      requested: input.requested,
+      maxOutputTokens: input.maxOutputTokens,
+    })
+    return {
+      gateway: 'catalog',
+      ...(catalogPlan.wireEffort ? { wireEffort: catalogPlan.wireEffort } : {}),
+      ...(catalogPlan.extraBody ? { extraBody: catalogPlan.extraBody } : {}),
+      ...(catalogPlan.applied ? { applied: catalogPlan.applied } : {}),
+      downgraded: catalogPlan.downgraded,
+      ...(catalogPlan.warnings.length
+        ? { reason: 'gateway-clamped' as const, detail: catalogPlan.warnings.join('; ') }
+        : {}),
+    }
+  }
   const protocol = resolveProtocol(input.protocol)
   const baseURL = resolveBaseURL(input.baseURL)
   const model = input.model.toLowerCase()

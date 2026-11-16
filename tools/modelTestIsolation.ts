@@ -20,12 +20,16 @@ const ROUTING_ENV_KEYS = [
 export async function resetModelTestState(options: { managed?: boolean } = {}): Promise<void> {
   for (const key of ROUTING_ENV_KEYS) delete process.env[key]
 
-  const [{ getGlobalClaudeFile }, config, settingsCache, runtime] = await Promise.all([
+  const [{ getGlobalClaudeFile }, config, settingsCache, runtime, catalog] = await Promise.all([
     import('../src/utils/env.js'),
     import('../src/utils/config.js'),
     import('../src/utils/settings/settingsCache.js'),
     import('../src/utils/model/runtimeModelContext.js'),
+    import('../src/utils/model/modelCatalog.js'),
   ])
+  const { rmSync } = await import('node:fs')
+  rmSync(catalog.catalogFilePath(), { force: true })
+  rmSync(`${catalog.catalogFilePath()}.bak`, { force: true })
   getGlobalClaudeFile.cache.clear()
   config._resetGlobalConfigForTesting()
   runtime._resetModelRuntimeContextForTesting()

@@ -36,7 +36,9 @@ test('settings selecting same-model endpoint B survive both startup phases with 
   const { applySafeConfigEnvironmentVariables, applyConfigEnvironmentVariables } = await import('../src/utils/managedEnv.js')
   applySafeConfigEnvironmentVariables()
   applyConfigEnvironmentVariables()
-  expect(process.env.DOGE_ACTIVE_MODEL_PROFILE).toBe('b')
+  const { readCustomApiStorage } = await import('../src/utils/customApiStorage.js')
+  const expectedProfileId = readCustomApiStorage().modelProfiles?.find(p => p.providerName?.startsWith('B'))?.id
+  expect(process.env.DOGE_ACTIVE_MODEL_PROFILE).toBe(expectedProfileId)
   expect(process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER).toBe('responses')
   expect(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('b-fast')
   applyConfigEnvironmentVariables()

@@ -37,21 +37,21 @@ describe('modelProfileEnvPatch', () => {
     expect(patch.DOGE_API_KEY).toBeUndefined()
   })
 
-  test('tier/subagent models and behavior flags round-trip', () => {
+  test('catalog selection ids and tier models round-trip', () => {
     const patch = modelProfileEnvPatch({
+      id: 'c1',
+      connectionId: 'c1',
+      catalogModelId: 'm1',
       model: 'deepseek-chat',
       defaultOpusModel: 'deepseek-reasoner',
       defaultSonnetModel: 'deepseek-chat',
       subagentModel: 'deepseek-chat',
-      opusCapabilities: 'vision',
-      disableNonessentialTraffic: true,
     })
+    expect(patch.DOGE_ACTIVE_CONNECTION_ID).toBe('c1')
+    expect(patch.DOGE_ACTIVE_MODEL_ID).toBe('m1')
     expect(patch.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('deepseek-reasoner')
     expect(patch.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('deepseek-chat')
     expect(patch.CLAUDE_CODE_SUBAGENT_MODEL).toBe('deepseek-chat')
     expect(patch.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBeUndefined()
-    expect(patch.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES).toBe('vision')
-    expect(patch['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']).toBe('1')
-    expect(patch['CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK']).toBeUndefined()
   })
 })

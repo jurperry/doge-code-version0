@@ -1,7 +1,7 @@
 import { getModelEnvironment } from './runtimeModelContext.js'
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl, type APIProvider } from './providers.js'
-import { get3PModelCapabilityOverride, matchesTierModel } from './modelSupportOverrides.js'
 import { planEffortWire } from './effortGateway.js'
+import { clearHostReasoningDisables, disableHostReasoningPolicy, getHostReasoningPolicy, hostReasoningLevels, hostReasoningThinking } from './reasoningPolicy.js'
 import { getCanonicalName } from './model.js'
 import { resolveAntModel } from './antModels.js'
 import { isEnvTruthy } from '../envUtils.js'
@@ -31,10 +31,12 @@ const rejectedEffortModels = new Set<string>()
 
 export function recordEffortRejection(model: string): void {
   rejectedEffortModels.add(model.trim().toLowerCase().replace(/\[.*?\]$/, ''))
+  disableHostReasoningPolicy(model)
 }
 
 export function clearEffortRejections(): void {
   rejectedEffortModels.clear()
+  clearHostReasoningDisables()
 }
 
 /** Levels that need no `max_effort` declaration. */
@@ -44,10 +46,8 @@ export type CapabilityProtocol = 'anthropic' | 'openai' | 'responses'
 export type ThinkingMode = 'adaptive' | 'budget' | 'none'
 export type CapabilitySource =
   | 'disabled-env'
-  | 'capabilities-env'
   | 'always-env'
-  | 'tier-env'
-  | 'custom-endpoint'
+  | 'catalog'
   | 'builtin'
   | 'default'
 
@@ -111,14 +111,6 @@ function isMaxEffortModel(name: string): boolean {
   return /claude-opus-4-8(?:$|-)/.test(name)
 }
 
-/** Known non-Anthropic gateways whose own strength ladder includes max/xhigh. */
-function isKnownMaxGateway(name: string, baseURL: string): boolean {
-  return (
-    /deepseek|glm-|kimi|qwen|grok/.test(name) ||
-    /openrouter/.test(baseURL)
-  )
-}
-
 export function getEffortCapability(model: string): EffortCapability {
   const env = getModelEnvironment()
   const provider = getAPIProvider()
@@ -126,6 +118,21 @@ export function getEffortCapability(model: string): EffortCapability {
   const customEndpoint = Boolean(
     env.ANTHROPIC_BASE_URL && !isFirstPartyAnthropicBaseUrl(),
   )
+  const hostPolicy = getHostReasoningPolicy(model)
+  if (hostPolicy) {
+    const levels = isEnvTruthy(env.CLAUDE_CODE_DISABLE_EFFORT) ? [] : hostReasoningLevels(hostPolicy)
+    return {
+      model,
+      provider,
+      protocol,
+      customEndpoint,
+      supportsEffort: levels.length > 0 && hostPolicy.effort.mode !== 'none',
+      supportsMax: levels.includes('max'),
+      levels,
+      thinking: hostReasoningThinking(hostPolicy),
+      source: 'catalog',
+    }
+  }
   const rawName = model.toLowerCase().trim()
   // [1m]/[2m] are local context-window suffixes; @date is the Vertex ID form.
   // Neither reaches the API, so strip them before anchored family regexes.
@@ -135,15 +142,6 @@ export function getEffortCapability(model: string): EffortCapability {
 
   const disabled = isEnvTruthy(env.CLAUDE_CODE_DISABLE_EFFORT)
   const alwaysEnabled = isEnvTruthy(env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT)
-  const effortOverride = get3PModelCapabilityOverride(model, 'effort')
-  const maxOverride = get3PModelCapabilityOverride(model, 'max_effort')
-  const thinkingOverride = get3PModelCapabilityOverride(model, 'thinking')
-  const adaptiveOverride = get3PModelCapabilityOverride(
-    model,
-    'adaptive_thinking',
-  )
-  const tierMatch =
-    (provider !== 'firstParty' || customEndpoint) && matchesTierModel(model)
 
   let source: CapabilitySource = 'builtin'
   let supportsEffort: boolean
@@ -155,9 +153,6 @@ export function getEffortCapability(model: string): EffortCapability {
     // it for the rest of the session.
     supportsEffort = false
     source = 'default'
-  } else if (effortOverride !== undefined) {
-    supportsEffort = effortOverride
-    source = 'capabilities-env'
   } else if (alwaysEnabled) {
     supportsEffort = true
     source = 'always-env'
@@ -171,29 +166,20 @@ export function getEffortCapability(model: string): EffortCapability {
     // parameter (Sonnet 4.5 / Haiku 4.5 etc. error on it) — including when a
     // custom endpoint merely proxies Anthropic model names.
     supportsEffort = false
-  } else if (tierMatch) {
-    supportsEffort = true
-    source = 'tier-env'
   } else if (customEndpoint) {
-    // D3: unknown non-Claude models on custom endpoints default to allow;
-    // the wire mapper below narrows this to gateways that actually accept it.
-    supportsEffort = true
-    source = 'custom-endpoint'
+    // Custom gateway models must declare effort in the catalog. Without a
+    // catalog policy there is no safe wire mapping, so stay conservative.
+    supportsEffort = false
+    source = 'default'
   } else {
     supportsEffort = provider === 'firstParty'
     if (!supportsEffort) source = 'default'
   }
 
-  const envBaseURL = (env.ANTHROPIC_BASE_URL ?? '').toLowerCase()
   let supportsMax = false
-  if (!disabled) {
-    if (maxOverride !== undefined) supportsMax = maxOverride
-    else if (isMaxEffortModel(name)) supportsMax = true
+  if (!disabled && supportsEffort) {
+    if (isMaxEffortModel(name)) supportsMax = true
     else if (env.USER_TYPE === 'ant' && resolveAntModel(model)) supportsMax = true
-    else if (tierMatch) supportsMax = true
-    else if (customEndpoint && isKnownMaxGateway(name, envBaseURL)) {
-      supportsMax = true
-    }
   }
 
   const thinkingBase =
@@ -208,16 +194,14 @@ export function getEffortCapability(model: string): EffortCapability {
       ? false
       : provider === 'foundry' || (provider === 'firstParty' && !customEndpoint)
 
-  const thinkingEnabled =
-    thinkingOverride !== undefined ? thinkingOverride : thinkingBase
-  const adaptiveEnabled =
-    adaptiveOverride !== undefined ? adaptiveOverride : adaptiveBase
+  const thinkingEnabled = thinkingBase
+  const adaptiveEnabled = adaptiveBase
 
-  let thinking: ThinkingMode
-  if (thinkingOverride === false && adaptiveOverride !== true) thinking = 'none'
-  else if (adaptiveEnabled) thinking = 'adaptive'
-  else if (thinkingEnabled) thinking = 'budget'
-  else thinking = 'none'
+  const thinking: ThinkingMode = adaptiveEnabled
+    ? 'adaptive'
+    : thinkingEnabled
+      ? 'budget'
+      : 'none'
 
   // Only advertise levels this gateway/model combination can actually send.
   // This keeps App/CLI menus honest: e.g. GLM's Anthropic endpoint and Kimi's

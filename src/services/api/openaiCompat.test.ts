@@ -211,6 +211,27 @@ async function collectStreamEvents(sse: string): Promise<BetaRawMessageStreamEve
   return events
 }
 
+test('openai vllm reasoning alias becomes a thinking block', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      { choices: [{ index: 0, delta: { reasoning: '先想' }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { reasoning: '一下' }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { content: '答案' }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } },
+    ]),
+  )
+  const thinking = events
+    .filter((event) => event.type === 'content_block_delta' && event.delta.type === 'thinking_delta')
+    .map((event) => (event.delta as { thinking: string }).thinking)
+    .join('')
+  expect(thinking).toBe('先想一下')
+  const text = events
+    .filter((event) => event.type === 'content_block_delta' && event.delta.type === 'text_delta')
+    .map((event) => (event.delta as { text: string }).text)
+    .join('')
+  expect(text).toBe('答案')
+})
+
 test('parallel tool calls with no preceding text get distinct content-block indices', async () => {
   const events = await collectStreamEvents(
     sseOf([
