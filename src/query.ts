@@ -119,6 +119,9 @@ import { createBudgetTracker, checkTokenBudget } from './query/tokenBudget.js'
 import { count } from './utils/array.js'
 import { BackgroundTaskCloseout } from './utils/task/backgroundTaskCloseout.js'
 import { TASK_STOP_TOOL_NAME } from './tools/TaskStopTool/prompt.js'
+import { desktopBrowserPreference } from './utils/playwrightMcp/common.js'
+import { browserTurnRoute, desktopBrowserToolMode, latestBrowserIntent, previousBrowserMode } from './utils/playwrightMcp/browserIntent.js'
+import { getToolNameForPermissionCheck } from './services/mcp/mcpStringUtils.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const snipModule = feature('HISTORY_SNIP')
@@ -286,6 +289,27 @@ async function* queryLoop(
   // progress summaries (every N calls) to the paired IM user. Wrapping at
   // this single permission gate covers both the TUI and headless modes.
   // No-op unless the session attached to `doge im`.
+  const context = params.toolUseContext
+  const preference = desktopBrowserPreference()
+  const intent = preference && !context.agentId &&
+    (querySource === 'sdk' || querySource.startsWith('repl_main_thread'))
+    ? latestBrowserIntent(params.messages)
+    : undefined
+  // A browser mode has 24 tools per brand. Expose one mode per request to keep
+  // the tool count comparable to standalone Playwright's two-mode budget.
+  const browserMode = preference
+    ? intent?.mode ?? previousBrowserMode(params.messages) ??
+      (context.options.tools.some(tool => desktopBrowserToolMode(tool.name) === 'headless') ? 'headless' : 'visible')
+    : undefined
+  const browserRoute = preference && intent ? browserTurnRoute({ ...intent, mode: browserMode }, preference) : undefined
+  const filterBrowserTools = (tools: ToolUseContext['options']['tools']) => {
+    if (!browserMode) return tools
+    return tools.filter(tool => {
+      const name = getToolNameForPermissionCheck(tool)
+      const mode = desktopBrowserToolMode(name)
+      return (!mode || mode === browserMode) && !browserRoute?.hideTool(name)
+    })
+  }
   const canUseTool = wrapImRemoteToolCounter(rawCanUseTool)
 
   // Mutable cross-iteration state. The loop body destructures this at the top
@@ -293,7 +317,16 @@ async function* queryLoop(
   // Continue sites write `state = { ... }` instead of 9 separate assignments.
   let state: State = {
     messages: params.messages,
-    toolUseContext: params.toolUseContext,
+    toolUseContext: browserMode ? {
+      ...context,
+      turnToolError: browserRoute
+        ? tool => browserRoute.toolError(getToolNameForPermissionCheck(tool))
+        : context.turnToolError,
+      options: {
+        ...context.options,
+        tools: filterBrowserTools(context.options.tools),
+      },
+    } : context,
     maxOutputTokensOverride: params.maxOutputTokensOverride,
     autoCompactTracking: undefined,
     stopHookActive: undefined,
@@ -472,9 +505,10 @@ async function* queryLoop(
       messagesForQuery = collapseResult.messages
     }
 
-    const fullSystemPrompt = asSystemPrompt(
-      appendSystemContext(systemPrompt, systemContext),
-    )
+    const fullSystemPrompt = asSystemPrompt([
+      ...appendSystemContext(systemPrompt, systemContext),
+      ...(browserRoute ? [browserRoute.prompt(toolUseContext.options.tools)] : []),
+    ])
 
     queryCheckpoint('query_autocompact_start')
     const { compactionResult, consecutiveFailures } = await deps.autocompact(
@@ -721,7 +755,7 @@ async function* queryLoop(
                 !!toolUseContext.options.appendSystemPrompt,
               maxOutputTokensOverride,
               fetchOverride: dumpPromptsFetch,
-              mcpTools: appState.mcp.tools,
+              mcpTools: filterBrowserTools(appState.mcp.tools),
               hasPendingMcpServers: appState.mcp.clients.some(
                 c => c.type === 'pending',
               ),
@@ -1743,7 +1777,7 @@ async function* queryLoop(
 
     // Refresh tools between turns so newly-connected MCP servers become available
     if (updatedToolUseContext.options.refreshTools) {
-      const refreshedTools = updatedToolUseContext.options.refreshTools()
+      const refreshedTools = filterBrowserTools(updatedToolUseContext.options.refreshTools())
       if (refreshedTools !== updatedToolUseContext.options.tools) {
         updatedToolUseContext = {
           ...updatedToolUseContext,

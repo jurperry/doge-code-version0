@@ -2,8 +2,9 @@ import { existsSync } from 'fs'
 import { createRequire } from 'module'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
+import type { DesktopBrowser } from './common.js'
 
-type BrowserName = 'chromium' | 'firefox' | 'webkit'
+type BrowserName = 'chromium' | 'firefox' | 'webkit' | 'chrome' | 'msedge'
 
 /**
  * Why this server runs as a Node subprocess instead of in-process.
@@ -23,7 +24,7 @@ type BrowserName = 'chromium' | 'firefox' | 'webkit'
  */
 
 function parseBrowserName(raw: string | undefined): BrowserName {
-  if (raw === 'firefox' || raw === 'webkit') return raw
+  if (raw === 'firefox' || raw === 'webkit' || raw === 'chrome' || raw === 'msedge') return raw
   return 'chromium'
 }
 
@@ -141,22 +142,22 @@ export interface PlaywrightMcpCommand {
  * Returns undefined when there is no Node on this machine — the caller then
  * registers no server at all rather than one that would fail to start.
  */
-export function buildPlaywrightMcpCommand(options: { headless?: boolean } = {}): PlaywrightMcpCommand | undefined {
+export function buildPlaywrightMcpCommand(options: {
+  headless?: boolean
+  desktop?: { browser: DesktopBrowser; executablePath: string }
+} = {}): PlaywrightMcpCommand | undefined {
   const command = findNodeExecutable()
   const cliPath = resolvePlaywrightCliPath()
   if (!command || !cliPath) return undefined
 
-  const browser = parseBrowserName(process.env.DOGE_PLAYWRIGHT_BROWSER?.trim())
+  const browser = options.desktop?.browser ?? parseBrowserName(process.env.DOGE_PLAYWRIGHT_BROWSER?.trim())
   const headless = options.headless ?? process.env.DOGE_PLAYWRIGHT_HEADLESS?.trim() !== '0'
 
   const explicitPath = process.env.DOGE_PLAYWRIGHT_EXECUTABLE_PATH?.trim()
-  const systemBrowser =
-    process.env.DOGE_PLAYWRIGHT_USE_SYSTEM_BROWSER?.trim() === '0'
-      ? undefined
-      : detectSystemBrowser()
-
-  const executablePath =
-    explicitPath || (browser === 'chromium' ? systemBrowser : undefined)
+  const executablePath = options.desktop?.executablePath ?? (explicitPath ||
+    (browser === 'chromium' && process.env.DOGE_PLAYWRIGHT_USE_SYSTEM_BROWSER?.trim() !== '0'
+      ? detectSystemBrowser()
+      : undefined))
 
   const args = [
     cliPath,

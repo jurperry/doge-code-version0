@@ -19,6 +19,8 @@ import { getChicagoCoordinateMode } from './gates.js'
 export const COMPUTER_USE_MCP_PROMPT_HINT = `<computer-use-availability>
 The mcp__computer-use__* tools give you direct control of the user's screen: taking screenshots, moving and clicking the mouse, typing, pressing keys, scrolling, dragging, and managing the clipboard and applications.
 
+Use built-in Playwright MCP first for browser automation requests such as 浏览器自动化, 浏览器操作, Browser Use or Playwright. Use Computer Use for explicit desktop interaction, including when the user specifically asks to control an existing browser window through the desktop.
+
 How to work with them:
 1. Call request_access first — it asks the user which application you may control this session.
 2. Take a screenshot to see the current screen before acting. Never act blind.

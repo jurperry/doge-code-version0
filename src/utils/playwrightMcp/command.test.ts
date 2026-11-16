@@ -95,6 +95,30 @@ test('an explicit executable path wins over auto-detection', () => {
   expect(cmd.args).toContain('C:\\custom\\chrome.exe')
 })
 
+test.each(['chrome', 'msedge'] as const)('uses the %s channel in both modes without auto-detection', (browser) => {
+  process.env.DOGE_PLAYWRIGHT_BROWSER = browser
+  for (const headless of [true, false]) {
+    const cmd = buildPlaywrightMcpCommand({ headless })!
+    expect(cmd.args.slice(1, 3)).toEqual(['--browser', browser])
+    expect(cmd.args.includes('--headless')).toBe(headless)
+    expect(cmd.args).not.toContain('--executable-path')
+  }
+})
+
+test('desktop server launch uses the supplied brand and executable over standalone settings', () => {
+  process.env.DOGE_PLAYWRIGHT_BROWSER = 'firefox'
+  process.env.DOGE_PLAYWRIGHT_EXECUTABLE_PATH = 'C:\\custom\\firefox.exe'
+  const edgePath = 'C:\\custom\\msedge.exe'
+  const cmd = buildPlaywrightMcpCommand({
+    desktop: { browser: 'msedge', executablePath: edgePath },
+    headless: false,
+  })!
+  expect(cmd.args.slice(1, 3)).toEqual(['--browser', 'msedge'])
+  expect(cmd.args).toContain(edgePath)
+  expect(cmd.args).not.toContain('--headless')
+  expect(buildPlaywrightMcpCommand()!.browser).toBe('firefox')
+})
+
 test('auto-detected system browser is used for chromium', () => {
   const detected = detectSystemBrowser()
   const cmd = buildPlaywrightMcpCommand()!

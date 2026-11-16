@@ -1672,7 +1672,7 @@ async function run(): Promise<CommanderCommand> {
       try {
         const {
           setupPlaywrightMCP,
-          PLAYWRIGHT_MCP_PROMPT_HINT
+          playwrightMcpPromptHint
         } = await import('src/utils/playwrightMcp/setup.js');
         const {
           mcpConfig,
@@ -1686,7 +1686,8 @@ async function run(): Promise<CommanderCommand> {
           allowedTools.push(...pwTools);
           // Same rationale as the Computer Use hint above: custom/translated
           // endpoints don't get the server-side availability hint.
-          appendSystemPrompt = appendSystemPrompt ? `${appendSystemPrompt}\n\n${PLAYWRIGHT_MCP_PROMPT_HINT}` : PLAYWRIGHT_MCP_PROMPT_HINT;
+          const hint = playwrightMcpPromptHint();
+          appendSystemPrompt = appendSystemPrompt ? `${appendSystemPrompt}\n\n${hint}` : hint;
         }
       } catch (error) {
         logForDebugging(`[Playwright MCP] Setup failed: ${errorMessage(error)}`);

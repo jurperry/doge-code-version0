@@ -1,10 +1,25 @@
+import { existsSync } from 'fs'
 import type { ScopedMcpServerConfig } from '../../services/mcp/types.js'
 
 import { logForDebugging } from '../debug.js'
-import { PLAYWRIGHT_HEADED_MCP_SERVER_NAME, PLAYWRIGHT_MCP_SERVER_NAME } from './common.js'
-import { buildPlaywrightMcpCommand } from './command.js'
+import {
+  DESKTOP_PLAYWRIGHT_BROWSERS,
+  desktopBrowserPreference,
+  PLAYWRIGHT_HEADED_MCP_SERVER_NAME,
+  PLAYWRIGHT_MCP_PROMPT_HINT,
+  PLAYWRIGHT_MCP_SERVER_NAME,
+  type DesktopBrowser,
+} from './common.js'
+import { buildPlaywrightMcpCommand, type PlaywrightMcpCommand } from './command.js'
 
 export { PLAYWRIGHT_MCP_PROMPT_HINT } from './common.js'
+
+export function playwrightMcpPromptHint(): string {
+  const preference = desktopBrowserPreference()
+  return preference && preference !== 'auto'
+    ? `${PLAYWRIGHT_MCP_PROMPT_HINT}\nThe user has set ${DESKTOP_PLAYWRIGHT_BROWSERS[preference].label} as their desktop browser preference. Use it for ordinary browser tasks unless the user explicitly names another browser or requests both.`
+    : PLAYWRIGHT_MCP_PROMPT_HINT
+}
 
 /**
  * Server-level allow rule: `mcp__playwright__*`.
@@ -19,6 +34,7 @@ function serverWideAllowRule(serverName: string): string {
 
 /** Set DOGE_PLAYWRIGHT_MCP=0 to opt out entirely. */
 export function isPlaywrightMCPEnabled(): boolean {
+  if (desktopBrowserPreference() && process.env.DOGE_APP_PLAYWRIGHT_DISABLED === '1') return false
   const raw = process.env.DOGE_PLAYWRIGHT_MCP?.trim().toLowerCase()
   return raw !== '0' && raw !== 'false' && raw !== 'off'
 }
@@ -45,39 +61,30 @@ export function setupPlaywrightMCP(): {
     return { mcpConfig: {}, allowedTools: [] }
   }
 
-  const headless = buildPlaywrightMcpCommand()
-  const headed = buildPlaywrightMcpCommand({ headless: false })
-  if (!headless || !headed) {
-    // No Node on this machine — better to register nothing than a server that
-    // fails to start and shows up as a red entry in /mcp.
-    logForDebugging(
-      '[Playwright MCP] no Node executable found; server not registered',
-    )
-    return { mcpConfig: {}, allowedTools: [] }
+  const mcpConfig: Record<string, ScopedMcpServerConfig> = {}
+  const register = (name: string, command: PlaywrightMcpCommand | undefined): void => {
+    if (command) {
+      mcpConfig[name] = { type: 'stdio', command: command.command, args: command.args, scope: 'dynamic' }
+    }
   }
-
-  logForDebugging(
-    `[Playwright MCP] stdio servers: ${headless.command} (headless + visible)`,
-  )
+  if (desktopBrowserPreference()) {
+    for (const browser of Object.keys(DESKTOP_PLAYWRIGHT_BROWSERS) as DesktopBrowser[]) {
+      const spec = DESKTOP_PLAYWRIGHT_BROWSERS[browser]
+      const executablePath = process.env[spec.pathEnv]
+      if (!executablePath || !existsSync(executablePath)) continue
+      const desktop = { browser, executablePath }
+      register(spec.headless, buildPlaywrightMcpCommand({ desktop, headless: true }))
+      register(spec.visible, buildPlaywrightMcpCommand({ desktop, headless: false }))
+    }
+  } else {
+    register(PLAYWRIGHT_MCP_SERVER_NAME, buildPlaywrightMcpCommand())
+    register(PLAYWRIGHT_HEADED_MCP_SERVER_NAME, buildPlaywrightMcpCommand({ headless: false }))
+  }
+  const names = Object.keys(mcpConfig)
+  logForDebugging(`[Playwright MCP] stdio servers: ${names.join(', ') || 'none available'}`)
 
   return {
-    mcpConfig: {
-      [PLAYWRIGHT_MCP_SERVER_NAME]: {
-        type: 'stdio',
-        command: headless.command,
-        args: headless.args,
-        scope: 'dynamic',
-      } as const,
-      [PLAYWRIGHT_HEADED_MCP_SERVER_NAME]: {
-        type: 'stdio',
-        command: headed.command,
-        args: headed.args,
-        scope: 'dynamic',
-      } as const,
-    },
-    allowedTools: [
-      serverWideAllowRule(PLAYWRIGHT_MCP_SERVER_NAME),
-      serverWideAllowRule(PLAYWRIGHT_HEADED_MCP_SERVER_NAME),
-    ],
+    mcpConfig,
+    allowedTools: names.map(serverWideAllowRule),
   }
 }

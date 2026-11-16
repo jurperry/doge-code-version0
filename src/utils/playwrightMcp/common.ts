@@ -12,9 +12,42 @@ import { normalizeNameForMCP } from '../../services/mcp/normalization.js'
 export const PLAYWRIGHT_MCP_SERVER_NAME = 'playwright'
 export const PLAYWRIGHT_HEADED_MCP_SERVER_NAME = 'playwright-headed'
 
+export const DESKTOP_PLAYWRIGHT_BROWSERS = {
+  chrome: {
+    label: 'Chrome',
+    headless: 'playwright-chrome',
+    visible: 'playwright-chrome-headed',
+    pathEnv: 'DOGE_APP_PLAYWRIGHT_CHROME_PATH',
+  },
+  msedge: {
+    label: 'Edge',
+    headless: 'playwright-edge',
+    visible: 'playwright-edge-headed',
+    pathEnv: 'DOGE_APP_PLAYWRIGHT_EDGE_PATH',
+  },
+} as const
+
+export type DesktopBrowser = keyof typeof DESKTOP_PLAYWRIGHT_BROWSERS
+export type BrowserMode = 'headless' | 'visible'
+export const DESKTOP_PLAYWRIGHT_SERVER_MODES: ReadonlyMap<string, BrowserMode> = new Map<string, BrowserMode>(
+  Object.values(DESKTOP_PLAYWRIGHT_BROWSERS).flatMap(({ headless, visible }) => [
+    [headless, 'headless'] as const,
+    [visible, 'visible'] as const,
+  ]),
+)
+export const PLAYWRIGHT_MCP_SERVER_NAMES: ReadonlySet<string> = new Set([
+  PLAYWRIGHT_MCP_SERVER_NAME,
+  PLAYWRIGHT_HEADED_MCP_SERVER_NAME,
+  ...DESKTOP_PLAYWRIGHT_SERVER_MODES.keys(),
+])
+
+export function desktopBrowserPreference(): 'auto' | DesktopBrowser | undefined {
+  const value = process.env.DOGE_APP_PLAYWRIGHT_PREFERENCE
+  return value === 'chrome' || value === 'msedge' || value === 'auto' ? value : undefined
+}
+
 export function isPlaywrightMCPServer(name: string): boolean {
-  const normalized = normalizeNameForMCP(name)
-  return normalized === PLAYWRIGHT_MCP_SERVER_NAME || normalized === PLAYWRIGHT_HEADED_MCP_SERVER_NAME
+  return PLAYWRIGHT_MCP_SERVER_NAMES.has(normalizeNameForMCP(name))
 }
 
 /**
@@ -25,11 +58,14 @@ export function isPlaywrightMCPServer(name: string): boolean {
  * exist, so without a local hint the model may never reach for the browser.
  */
 export const PLAYWRIGHT_MCP_PROMPT_HINT = `<browser-automation-availability>
-The mcp__playwright__* tools drive a headless Chromium browser, while mcp__playwright-headed__* tools provide the same operations in a visible browser window. Both support navigating, clicking, typing, filling forms, reading the accessibility snapshot, taking screenshots, listing console/network activity, and managing tabs.
+Requests for 浏览器自动化, 浏览器操作, Browser Use, Playwright, or Playwright MCP mean the built-in Playwright MCP. Use its tools first for the browser task. Computer Use handles explicit desktop interaction, such as an existing desktop window or a native dialog.
+
+Desktop sessions expose installed browsers by name: mcp__playwright-chrome__* and mcp__playwright-edge__* are headless, and their -headed variants open visible windows. Select the named browser when the user specifies one. In Auto, choose among the available browsers based on the task. A Chrome token in a user agent also appears in Edge; Edg/ identifies desktop Edge.
+Standalone sessions use mcp__playwright__* for the configured headless browser and mcp__playwright-headed__* for the configured visible browser.
 
 Choose the browser mode before starting a task:
-- Use mcp__playwright__* for code tests, background automation, and when no visible window is needed.
-- Use mcp__playwright-headed__* when the user asks to open or watch a real browser, or when visible interaction matters.
+- Use a headless server for background automation and when no visible window is needed.
+- Use a -headed server when the user asks to open or watch a browser, or when visible interaction matters.
 - Follow an explicit user request for headless or visible mode. The two servers have independent browser sessions; do not mix them within one task unless the user asks.
 - Legacy compatibility: when DOGE_PLAYWRIGHT_HEADLESS=0 is explicitly set, mcp__playwright__* also runs a visible browser, so both servers are visible. Unset that variable when headless operation is needed.
 
@@ -49,5 +85,6 @@ Guidance:
 - Prefer browser_snapshot over browser_take_screenshot for reading text; screenshots cost far more tokens.
 - Use browser_console_messages and browser_network_requests to debug a page that isn't behaving.
 - The selected browser starts on the first call to its server; browser_close shuts that server's browser down when you're done.
+- If the requested browser is missing or its server fails, report the exact problem. In the desktop app, check Settings → MCP for installation status, download links, and the switch. Use the command interpreter for local prerequisites, then use the browser MCP for navigation and page interaction. Do not substitute shell-based browser launch, local Playwright imports, another browser, or Computer Use.
 - Do not use these tools to bypass a site's access controls or terms of service.
 </browser-automation-availability>`

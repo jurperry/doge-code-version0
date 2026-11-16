@@ -8,6 +8,7 @@
  *   4. live round-trip: navigate to a real page, snapshot it, close
  *
  * Usage: bun tools/e2e-playwright-mcp.ts
+ * Set DOGE_PLAYWRIGHT_BROWSER=chrome or msedge to require a live run for that channel.
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -110,7 +111,9 @@ async function verifyServer(
       navError = error instanceof Error ? error.message : String(error)
     }
 
-    if (/is not installed|Executable doesn't exist/i.test(navError)) {
+    const browser = process.env.DOGE_PLAYWRIGHT_BROWSER?.trim()
+    const requireBrowser = browser === 'chrome' || browser === 'msedge'
+    if (!requireBrowser && /is not installed|Executable doesn't exist/i.test(navError)) {
       console.log(`SKIP  ${serverName}: live browser round-trip — no browser binary available.`)
     } else if (navError) {
       check(`${serverName}: browser_navigate succeeded`, false, navError.split('\n')[0])

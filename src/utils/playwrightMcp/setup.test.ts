@@ -18,10 +18,13 @@ import { isPlaywrightMCPEnabled, PLAYWRIGHT_MCP_PROMPT_HINT, setupPlaywrightMCP 
 // so no disk writes. Reset both toggles to avoid leaking state between cases.
 const originalOptOut = process.env.DOGE_PLAYWRIGHT_MCP
 const originalHeadless = process.env.DOGE_PLAYWRIGHT_HEADLESS
+const desktopEnv = ['DOGE_APP_PLAYWRIGHT_PREFERENCE', 'DOGE_APP_PLAYWRIGHT_CHROME_PATH', 'DOGE_APP_PLAYWRIGHT_EDGE_PATH', 'DOGE_APP_PLAYWRIGHT_DISABLED'] as const
+const originalDesktopEnv = desktopEnv.map(key => process.env[key])
 
 beforeEach(() => {
   delete process.env.DOGE_PLAYWRIGHT_MCP
   delete process.env.DOGE_PLAYWRIGHT_HEADLESS
+  for (const key of desktopEnv) delete process.env[key]
   saveCurrentProjectConfig(current => ({
     ...current,
     disabledMcpServers: [],
@@ -30,6 +33,11 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  for (const [index, key] of desktopEnv.entries()) {
+    const value = originalDesktopEnv[index]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
   if (originalOptOut === undefined) {
     delete process.env.DOGE_PLAYWRIGHT_MCP
   } else {
@@ -86,6 +94,33 @@ test('legacy DOGE_PLAYWRIGHT_HEADLESS=0 keeps the original server visible', () =
   expect(original.args).not.toContain('--headless')
   expect(headed.args).not.toContain('--headless')
   expect(PLAYWRIGHT_MCP_PROMPT_HINT).toContain('DOGE_PLAYWRIGHT_HEADLESS=0')
+})
+
+test.each(['auto', 'chrome', 'msedge'])('desktop %s keeps both installed browsers available in the same session', preference => {
+  process.env.DOGE_APP_PLAYWRIGHT_PREFERENCE = preference
+  process.env.DOGE_APP_PLAYWRIGHT_CHROME_PATH = process.execPath
+  process.env.DOGE_APP_PLAYWRIGHT_EDGE_PATH = process.execPath
+  const { mcpConfig, allowedTools } = setupPlaywrightMCP()
+  expect(Object.keys(mcpConfig).sort()).toEqual(['playwright-chrome', 'playwright-chrome-headed', 'playwright-edge', 'playwright-edge-headed'])
+  for (const [name, config] of Object.entries(mcpConfig)) {
+    if (config.type !== 'stdio') throw new Error('Expected stdio server')
+    expect(config.args).toContain(name.startsWith('playwright-edge') ? 'msedge' : 'chrome')
+    expect(config.args).toContain(process.execPath)
+    expect(config.args?.includes('--headless')).toBe(!name.endsWith('-headed'))
+    expect(allowedTools).toContain(`mcp__${name}__*`)
+    expect(isPlaywrightMCPServer(name)).toBe(true)
+  }
+})
+
+test('desktop setup only publishes installed browsers and honors off', () => {
+  process.env.DOGE_APP_PLAYWRIGHT_PREFERENCE = 'auto'
+  expect(setupPlaywrightMCP().mcpConfig).toEqual({})
+  process.env.DOGE_APP_PLAYWRIGHT_EDGE_PATH = process.execPath
+  process.env.DOGE_APP_PLAYWRIGHT_CHROME_PATH = 'missing-chrome-path'
+  expect(Object.keys(setupPlaywrightMCP().mcpConfig)).toEqual(['playwright-edge', 'playwright-edge-headed'])
+  process.env.DOGE_PLAYWRIGHT_MCP = '1'
+  process.env.DOGE_APP_PLAYWRIGHT_DISABLED = '1'
+  expect(setupPlaywrightMCP().mcpConfig).toEqual({})
 })
 
 test('setupPlaywrightMCP allow rules cover every tool from both servers', () => {

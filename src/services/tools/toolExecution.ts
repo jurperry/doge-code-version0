@@ -410,6 +410,23 @@ export async function* runToolUse(
     return
   }
 
+  const turnError = toolUseContext.turnToolError?.(tool)
+  if (turnError) {
+    yield {
+      message: createUserMessage({
+        content: [{
+          type: 'tool_result',
+          content: `<tool_use_error>${turnError}</tool_use_error>`,
+          is_error: true,
+          tool_use_id: toolUse.id,
+        }],
+        toolUseResult: turnError,
+        sourceToolAssistantUUID: assistantMessage.uuid,
+      }),
+    }
+    return
+  }
+
   const toolInput = toolUse.input as { [key: string]: string }
   try {
     if (toolUseContext.abortController.signal.aborted) {

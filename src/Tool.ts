@@ -160,6 +160,8 @@ export type CompactProgressEvent =
 export type ToolUseContext = {
   /** Main query controller, shared by child tool controllers in this turn. */
   mainTurnAbortController?: AbortController
+  /** Reject an incompatible tool before this turn's permission hooks run. */
+  turnToolError?: (tool: Tool) => string | undefined
   options: {
     commands: Command[]
     debug: boolean
