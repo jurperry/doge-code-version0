@@ -32,11 +32,11 @@ const STEP_META: Record<Exclude<FormStep, 'review'>, { title: string; hint: stri
   },
   provider: {
     title: 'API format',
-    hint: 'Protocol used at the API boundary. anthropic = /v1/messages, openai = /v1/chat/completions, responses = /v1/responses.',
+    hint: 'Protocol used at the API boundary. anthropic = /v1/messages, openai = /chat/completions, responses = /responses.',
   },
   baseURL: {
     title: 'Base URL',
-    hint: 'API endpoint, e.g. https://api.deepseek.com. Leave empty to use the official Anthropic endpoint.',
+    hint: 'API root. For OpenAI and Responses, include any version path required by the provider (e.g. /v1). Anthropic can use the official endpoint if left blank.',
   },
   apiKey: {
     title: 'API key',
@@ -70,8 +70,8 @@ const STEP_META: Record<Exclude<FormStep, 'review'>, { title: string; hint: stri
 
 const PROVIDER_OPTIONS: { value: ProviderFormat; label: string; description: string }[] = [
   { value: 'anthropic', label: 'anthropic', description: 'Anthropic Messages format (/v1/messages)' },
-  { value: 'openai', label: 'openai', description: 'OpenAI Chat Completions (/v1/chat/completions)' },
-  { value: 'responses', label: 'responses', description: 'OpenAI Responses (/v1/responses)' },
+  { value: 'openai', label: 'openai', description: 'OpenAI Chat Completions (/chat/completions)' },
+  { value: 'responses', label: 'responses', description: 'OpenAI Responses (/responses)' },
 ]
 
 const AUTH_TOKEN_TYPE_OPTIONS: { value: AuthTokenType; label: string; description: string }[] = [
@@ -361,7 +361,7 @@ export function ProviderForm({ existing, initialModel, onDone }: ProviderFormPro
       // Key the option by step so each step gets a fresh input buffer.
       value: `input:${step}`,
       label: meta.title,
-      placeholder: prefill || (step === 'baseURL' ? 'https://api.example.com' : meta.title),
+      placeholder: prefill || (step === 'baseURL' ? (values.provider === 'anthropic' ? 'https://api.example.com' : 'https://api.example.com/v1') : meta.title),
       initialValue: prefill,
       allowEmptySubmitToCancel: true,
       onChange: (value: string) => { typedRef.current = value },

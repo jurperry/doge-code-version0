@@ -49,8 +49,9 @@ export function ProviderMenu({ onDone }: ProviderMenuProps): React.ReactNode {
     }
     if (value.startsWith('edit:')) {
       const model = value.slice('edit:'.length)
-      // Entries without a stored profile still open the form with the model prefilled.
-      setEditProfile(getModelProfile(model) ?? { model })
+      const profile = getModelProfile(model)
+      if (!profile) return
+      setEditProfile(profile)
       setView('edit')
     }
   }, [])
@@ -66,8 +67,8 @@ export function ProviderMenu({ onDone }: ProviderMenuProps): React.ReactNode {
   const entries = getProviderEntries()
   const options = [
     ...entries.map(e => ({
-      value: `edit:${e.profile ? profileSelection(e.profile) : e.model}`,
-      label: formatCustomModelLabel(e.model),
+      value: `edit:${profileSelection(e.profile)}`,
+      label: e.model ? formatCustomModelLabel(e.model) : e.profile.providerName ?? 'Provider',
       description: e.isCurrent
         ? `${describeProviderEntry(e)} · currently active`
         : describeProviderEntry(e),

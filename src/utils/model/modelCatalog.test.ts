@@ -2,6 +2,12 @@ import { test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { getModelOptions } from './modelOptions.js'
+import { matchModelProfile, profileSelection } from './profileIdentity.js'
+import { getEffortCapability } from './effortCapabilities.js'
+import { persistCatalogModelSelection } from './syncModelConfig.js'
+import { getProviderEntries } from '../../commands/provider/provider-entries.js'
+import { enableConfigs } from '../config.js'
 import {
   endpointToCatalog,
   catalogToEndpoint,
@@ -44,6 +50,41 @@ function catalogWithThreeModels(): ModelCatalog {
     defaultModel: { connectionId: 'c1', modelId: 'm1' },
   }
 }
+
+test('model and provider menus preserve connection identity, including same-name models', () => {
+  const catalog = catalogWithThreeModels()
+  const [first] = catalog.connections
+  first.models[1].contextWindow = 300_000
+  first.models[1].reasoning = {
+    preset: 'generic',
+    thinking: { mode: 'always' },
+    effort: { mode: 'named', field: 'reasoning_effort', levels: ['low', 'xhigh'], defaultLevel: 'xhigh' },
+    response: { openaiFields: [], display: 'none' },
+  }
+  catalog.connections.push({
+    ...first, id: 'c/2:x', name: 'second', apiKey: 'different-fake-key', defaultModelId: 'm2',
+    models: [{ ...first.models[1], reasoning: { ...first.models[1].reasoning, effort: { mode: 'none' } } }],
+  })
+  writeModelCatalog(catalog)
+  enableConfigs()
+  const profiles = catalogToEndpoint(catalog).modelProfiles!
+  const firstChoice = profileSelection(profiles[0], 'm2')
+  const secondChoice = profileSelection(profiles[1], 'm2')
+  expect(getModelOptions().filter(option => option.label === 'B')).toEqual([
+    expect.objectContaining({ value: firstChoice, description: 'Custom model(provider)' }),
+    expect.objectContaining({ value: secondChoice, description: 'Custom model(second)' }),
+  ])
+  expect(getProviderEntries().map(entry => [entry.profile.id, entry.model])).toEqual([['c1', 'model-a'], ['c/2:x', 'model-b']])
+  expect(getEffortCapability(firstChoice)).toMatchObject({ levels: ['low', 'xhigh'], defaultLevel: 'xhigh' })
+  expect(getEffortCapability(secondChoice).levels).toEqual([])
+  expect(matchModelProfile(profiles, secondChoice, {})).toMatchObject({
+    model: 'model-b', catalogModelId: 'm2', apiKey: 'different-fake-key', contextWindow: 300_000,
+  })
+  expect(persistCatalogModelSelection(secondChoice)).toBe(true)
+  const saved = readModelCatalog()!
+  expect(saved.defaultModel).toEqual({ connectionId: 'c/2:x', modelId: 'm2' })
+  expect(saved.connections).toEqual(catalog.connections)
+})
 
 test('projection never fabricates roles and preserves models + reasoning', () => {
   const catalog = catalogWithThreeModels()

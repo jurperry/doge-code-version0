@@ -1,5 +1,5 @@
 /** Local HTTP integration of the real API pipeline. No external API or credentials. */
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { ensureBootstrapMacro } from '../src/bootstrapMacro.js'
 
@@ -68,7 +68,7 @@ try {
 
   for (const provider of ['anthropic', 'openai', 'responses'] as const) {
     const profile = { id: provider, providerName: provider, model: `${provider}-main`, provider,
-      baseURL: `http://127.0.0.1:${server.port}/${provider}`, apiKey: `local-${provider}`, defaultHaikuModel: `${provider}-fast` }
+      baseURL: `http://127.0.0.1:${server.port}/${provider}${provider === 'responses' ? '/v1/' : ''}`,  apiKey: `local-${provider}`, defaultHaikuModel: `${provider}-fast` }
     for (const [key, value] of Object.entries(modelProfileEnvPatch(profile))) {
       if (value) process.env[key] = value; else delete process.env[key]
     }
@@ -81,8 +81,8 @@ try {
       check(model === `${provider}-fast`, `${provider}: agent tier`)
       await ask(model)
       const sent = requests.at(-1)!
-      const suffix = provider === 'anthropic' ? '/v1/messages' : provider === 'openai' ? '/v1/chat/completions' : '/v1/responses'
-      check(sent.path === `/${provider}${suffix}` && sent.model === model, `${provider}: actual endpoint and model stay pinned (${sent.path}, ${sent.model})`)
+      const suffix = provider === 'anthropic' ? '/v1/messages' : provider === 'openai' ? '/chat/completions' : '/responses'
+      check(sent.path === `/${provider}${provider === 'responses' ? '/v1' : ''}${suffix}` && sent.model === model, `${provider}: actual endpoint and model stay pinned (${sent.path}, ${sent.model})`)
       check(provider === 'anthropic' ? sent.key === `local-${provider}` : sent.auth === `Bearer local-${provider}`, `${provider}: actual auth stays pinned`)
       check(profileStepModel(profile, 'inherit') === profile.model, `${provider}: workflow inherit`)
       const inherited = buildInheritedEnvVars()
@@ -113,6 +113,20 @@ try {
   check(requests.some(request => request.path.startsWith('/startup/') && request.model === 'b-fast' && request.key === 'fake-b'), 'source CLI Explore uses explicit B tier and B credentials')
   check(!requests.some(request => request.path.startsWith('/startup/') && request.model === 'a-fast'), 'source CLI never uses disk A tier')
   check(stdout.includes('ok'), 'source CLI returns final result after the real agent tool')
+  const persisted = JSON.parse(await readFile(join(startupDir, 'model-catalog.json'), 'utf8')).modelCatalog
+  const fast = persisted.connections.find(connection => connection.id === 'b').models.find(model => model.upstreamModel === 'b-fast')
+  const beforeSelection = requests.length
+  const selection = Bun.spawn([process.execPath, 'run', join(root, 'src/bootstrap-entry.ts'), '-p', 'Say ok',
+    '--model', `profile:b:${fast.id}`, '--tools', '', '--no-session-persistence', '--output-format', 'json'],
+    { cwd: sandbox, env: { ...env, ANTHROPIC_MODEL: 'a-main', DOGE_API_KEY: 'fake-a' }, stdout: 'pipe', stderr: 'pipe' })
+  const selectionTimeout = setTimeout(() => selection.kill(), 30_000)
+  const [selectionOut, selectionError, selectionExit] = await Promise.all([
+    new Response(selection.stdout).text(), new Response(selection.stderr).text(), selection.exited,
+  ])
+  clearTimeout(selectionTimeout)
+  check(selectionExit === 0 && selectionOut.includes('ok'), `explicit model reference starts successfully (${selectionExit}, ${selectionError.slice(-120)})`)
+  check(requests.slice(beforeSelection).some(request => request.model === 'b-fast' && request.key === 'fake-b'),
+    'explicit model reference routes a non-default model with its connection credentials')
   // The production transport launches a native CLI executable. A tiny native
   // test launcher forwards to this checkout's source so this exercises the
   // actual workflow engine and subprocess transport without an installed CLI.

@@ -257,7 +257,7 @@ async function run(provider: Provider): Promise<{
         TEMP: tempDir,
         TMP: tempDir,
         DOGE_API_KEY: 'sk-e2e-dummy',
-        ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}${provider === 'anthropic' ? '' : '/v1'}`,
         ANTHROPIC_MODEL: 'mock-search-model',
         ANTHROPIC_SMALL_FAST_MODEL: 'mock-search-model',
         CLAUDE_CODE_COMPATIBLE_API_PROVIDER: provider,

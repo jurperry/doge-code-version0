@@ -52,9 +52,12 @@ import { getSubscriptionType, isClaudeAISubscriber, prefetchAwsCredentialsAndBed
 import { checkHasTrustDialogAccepted, getGlobalConfig, getRemoteControlAtStartup, isAutoUpdaterDisabled, saveGlobalConfig } from './utils/config.js';
 import { seedEarlyInput, stopCapturingEarlyInput } from './utils/earlyInput.js';
 import { getInitialEffortSetting, parseEffortValue } from './utils/effort.js';
-import { seedEffortMemory } from './utils/effortMemory.js';
+import { activeEffortConnectionId, seedEffortMemory } from './utils/effortMemory.js';
 import { getInitialFastModeSetting, isFastModeEnabled, prefetchFastModeStatus, resolveFastModeStatusFromCache } from './utils/fastMode.js';
 import { applyConfigEnvironmentVariables } from './utils/managedEnv.js';
+import { isModelAllowed } from './utils/model/modelAllowlist.js';
+import { isProfileSelection } from './utils/model/profileIdentity.js';
+import { applyProfileForModelIfMatch } from './utils/model/switchModelProfile.bindings.js';
 import { createSystemMessage, createUserMessage } from './utils/messages.js';
 import { getPlatform } from './utils/platform.js';
 import { getBaseRenderOptions } from './utils/renderOptions.js';
@@ -1672,7 +1675,7 @@ async function run(): Promise<CommanderCommand> {
       try {
         const {
           setupPlaywrightMCP,
-          playwrightMcpPromptHint
+          PLAYWRIGHT_MCP_PROMPT_HINT
         } = await import('src/utils/playwrightMcp/setup.js');
         const {
           mcpConfig,
@@ -1686,7 +1689,7 @@ async function run(): Promise<CommanderCommand> {
           allowedTools.push(...pwTools);
           // Same rationale as the Computer Use hint above: custom/translated
           // endpoints don't get the server-side availability hint.
-          const hint = playwrightMcpPromptHint();
+          const hint = PLAYWRIGHT_MCP_PROMPT_HINT;
           appendSystemPrompt = appendSystemPrompt ? `${appendSystemPrompt}\n\n${hint}` : hint;
         }
       } catch (error) {
@@ -2081,7 +2084,14 @@ async function run(): Promise<CommanderCommand> {
 
     // Special case the default model with the null keyword
     // NOTE: Model resolution happens after setup() to ensure trust is established before AWS auth
-    const userSpecifiedModel = options.model === 'default' ? getDefaultMainLoopModel() : options.model;
+    let userSpecifiedModel = options.model === 'default' ? getDefaultMainLoopModel() : options.model;
+    if (typeof userSpecifiedModel === 'string' && isProfileSelection(userSpecifiedModel)) {
+      if (!isModelAllowed(userSpecifiedModel) || !await applyProfileForModelIfMatch(userSpecifiedModel)) {
+        process.stderr.write('Could not select the configured provider and model.\n');
+        process.exit(1);
+      }
+      userSpecifiedModel = parseUserSpecifiedModel(userSpecifiedModel);
+    }
     const userSpecifiedFallbackModel = fallbackModel === 'default' ? getDefaultMainLoopModel() : fallbackModel;
 
     // Reuse preSetupCwd unless setup() chdir'd (worktreeEnabled). Saves a
@@ -2707,7 +2717,7 @@ async function run(): Promise<CommanderCommand> {
         },
         toolPermissionContext,
         effortValue: initialEffortValue,
-        effortByModel: seedEffortMemory(resolvedInitialModel, initialEffortValue),
+        effortByModel: seedEffortMemory(resolvedInitialModel, initialEffortValue, activeEffortConnectionId()),
         ...(isFastModeEnabled() && {
           fastMode: getInitialFastModeSetting(effectiveModel ?? null)
         }),
@@ -3118,7 +3128,7 @@ async function run(): Promise<CommanderCommand> {
         })
       } : null,
       effortValue: initialEffortValue,
-      effortByModel: seedEffortMemory(resolvedInitialModel, initialEffortValue),
+      effortByModel: seedEffortMemory(resolvedInitialModel, initialEffortValue, activeEffortConnectionId()),
       activeOverlays: new Set<string>(),
       fastMode: getInitialFastModeSetting(resolvedInitialModel),
       ...(isAdvisorEnabled() && advisorModel && {

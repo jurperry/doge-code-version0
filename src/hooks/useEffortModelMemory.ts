@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useAppState, useSetAppState } from '../state/AppState.js'
 import {
+  activeEffortConnectionId,
   effortModelKey,
   getRememberedEffort,
 } from '../utils/effortMemory.js'
@@ -30,7 +31,8 @@ export function useEffortModelMemory(): void {
   const raw =
     mainLoopModelForSession ?? mainLoopModel ?? getDefaultMainLoopModelSetting()
   const resolvedModel = parseUserSpecifiedModel(raw)
-  const modelKey = effortModelKey(resolvedModel)
+  const connectionId = activeEffortConnectionId()
+  const modelKey = effortModelKey(resolvedModel, connectionId)
   const previousModelKey = useRef<string | undefined>(modelKey)
 
   useEffect(() => {
@@ -44,7 +46,7 @@ export function useEffortModelMemory(): void {
     }
     previousModelKey.current = modelKey
     setAppState(prev => {
-      const remembered = getRememberedEffort(prev.effortByModel, resolvedModel)
+      const remembered = getRememberedEffort(prev.effortByModel, resolvedModel, connectionId)
       const next =
         remembered === undefined
           ? getInitialEffortSetting()
@@ -52,5 +54,5 @@ export function useEffortModelMemory(): void {
       if (next === prev.effortValue) return prev
       return { ...prev, effortValue: next }
     })
-  }, [modelKey, resolvedModel, setAppState])
+  }, [modelKey, resolvedModel, connectionId, setAppState])
 }

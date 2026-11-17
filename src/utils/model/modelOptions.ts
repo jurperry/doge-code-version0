@@ -317,17 +317,11 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   // active model. Start scripts set ANTHROPIC_MODEL for the session but
   // don't write to .claude.json — if we read .claude.json first we'd show
   // stale data from the previous session after switching start scripts.
-  const customConfiguredModel =
-    process.env.ANTHROPIC_MODEL?.trim() ||
-    getGlobalConfig().customApiEndpoint?.model?.trim()
-  const savedModels = (getGlobalConfig().customApiEndpoint?.savedModels ?? [])
-    .map(model => model.trim())
-    .filter(Boolean)
-  // Every stored profile is one switchable provider ("有多少 provider 就显示
-  // 多少"). Profiles are the source of truth for the provider rows.
-  const providerProfiles = readCustomApiStorage().modelProfiles ?? []
+  const catalogView = readCustomApiStorage()
+  const customConfiguredModel = process.env.ANTHROPIC_MODEL?.trim() || catalogView.model
+  const providerProfiles = catalogView.modelProfiles ?? []
 
-  if (customConfiguredModel || savedModels.length > 0 || providerProfiles.length > 0) {
+  if (customConfiguredModel || providerProfiles.some(profile => profile.model)) {
     // Build tier-aware model options for custom API configurations.
     // Resolve Opus/Sonnet/Haiku tiers with priority:
     // 1. Environment variables (set by start scripts or applyModelProfile)
@@ -337,7 +331,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     // it was captured from whichever terminal last switched and could describe
     // a DIFFERENT provider, leaking that provider's tier models into this
     // terminal's picker (cross-terminal "custom model" pollution).
-    const mainModel = customConfiguredModel || savedModels[0] || ''
+    const mainModel = customConfiguredModel || providerProfiles.find(profile => profile.model)?.model || ''
     const activeProfile = customConfiguredModel ? getModelProfile(customConfiguredModel) : undefined
     // Explicitly-configured tier values (non-fallback). Used to decide
     // whether a tier equals the main model because it was CONFIGURED that
@@ -363,9 +357,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       options.push({
         value: customConfiguredModel,
         label: formatCustomModelLabel(customConfiguredModel),
-        description: activeProfile?.providerName
-          ? `Custom model(${activeProfile.providerName}) · current main model`
-          : 'Current main model',
+        description: 'Current main model',
         descriptionForModel: `Main model — ${customConfiguredModel}`,
       })
     }
@@ -394,45 +386,15 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       },
     )
 
-    // Provider rows: every OTHER stored profile switches the whole provider
-    // (model + credentials + tiers + context window) when selected. Labeled
-    // with the user-chosen provider name so multiple third-party endpoints
-    // stay distinguishable.
-    const activeKey = customConfiguredModel
-      ? normalizeModelName(customConfiguredModel)
-      : undefined
-    const shownKeys = new Set(activeKey ? [activeKey] : [])
     for (const profile of providerProfiles) {
-      const key = normalizeModelName(profile.model)
-      shownKeys.add(key)
-      options.push({
-        value: profileSelection(profile),
-        label: formatCustomModelLabel(profile.model),
-        description: profile.providerName
-          ? `Custom model(${profile.providerName})`
-          : 'Custom model',
-        descriptionForModel: profile.providerName
-          ? `${profile.providerName} — ${profile.model}`
-          : `Custom provider — ${profile.model}`,
-      })
-    }
-
-    // Legacy rows: savedModels entries without a stored profile (pre-profile
-    // era), deduped against the tier models and everything already shown.
-    const tierValues = new Set([
-      normalizeModelName(opusModel),
-      normalizeModelName(sonnetModel),
-      normalizeModelName(haikuModel),
-    ])
-    for (const model of savedModels) {
-      const key = normalizeModelName(model)
-      if (tierValues.has(key) || shownKeys.has(key)) continue
-      shownKeys.add(key)
-      options.push({
-        value: model,
-        label: formatCustomModelLabel(model),
-        description: 'Custom model',
-      })
+      for (const model of profile.models ?? []) {
+        options.push({
+          value: profileSelection(profile, model.id),
+          label: model.displayName,
+          description: profile.providerName ? `Custom model(${profile.providerName})` : 'Custom model',
+          descriptionForModel: `${profile.providerName ?? 'Custom provider'} — ${model.upstreamModel}`,
+        })
+      }
     }
 
     return options

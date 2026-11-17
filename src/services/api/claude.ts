@@ -26,6 +26,8 @@ import {
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
 import { getCatalogReasoningPolicy, getHostReasoningPolicy, hostResponseFields, removeEffortFields } from 'src/utils/model/reasoningPolicy.js'
+import { desktopBrowserPreference } from 'src/utils/playwrightMcp/common.js'
+import { limitBrowserToolSchemas, previousBrowserServer } from 'src/utils/playwrightMcp/browserIntent.js'
 import { suppressEffort } from 'src/utils/effortContext.js'
 import { recordNetworkRetryUsage } from 'src/utils/sessionStorage.js'
 import {
@@ -1229,6 +1231,9 @@ async function* queryModel(
     filteredTools = tools.filter(
       t => !toolMatchesName(t, TOOL_SEARCH_TOOL_NAME),
     )
+    if (desktopBrowserPreference()) {
+      filteredTools = limitBrowserToolSchemas(filteredTools, previousBrowserServer(messages))
+    }
   }
 
   // Add tool search beta header if enabled - required for defer_loading to be accepted

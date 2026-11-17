@@ -33,6 +33,13 @@ test('lookup distinguishes "no memory" from explicit auto', () => {
   expect(getRememberedEffort(map, 'claude-opus-4-8')).toBeUndefined()
 })
 
+test('same-name models remember different effort on distinct connections', () => {
+  let memory = seedEffortMemory('shared-model', 'high', 'provider-A')
+  memory = rememberEffortForModel(memory, 'shared-model[1m]', 'low', 'provider-B')
+  expect(getRememberedEffort(memory, 'shared-model', 'provider-A')).toBe('high')
+  expect(getRememberedEffort(memory, 'shared-model', 'provider-B')).toBe('low')
+})
+
 test('seedEffortMemory seeds the startup model, empty for auto', () => {
   expect(seedEffortMemory('Claude-Opus-4-8[1m]', 'high')).toEqual({
     'claude-opus-4-8': 'high',

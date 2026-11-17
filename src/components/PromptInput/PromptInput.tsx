@@ -73,7 +73,7 @@ import { cacheImagePath, storeImage } from '../../utils/imageStore.js';
 import { isMacosOptionChar, MACOS_OPTION_SPECIAL_CHARS } from '../../utils/keyboardShortcuts.js';
 import { logError } from '../../utils/log.js';
 import { isOpus1mMergeEnabled, modelDisplayString, parseUserSpecifiedModel, getDefaultMainLoopModel } from '../../utils/model/model.js';
-import { rememberEffortForModel } from '../../utils/effortMemory.js';
+import { activeEffortConnectionId, rememberEffortForModel } from '../../utils/effortMemory.js';
 import { MODEL_FAMILY_ALIASES } from '../../utils/model/aliases.js';
 import { type ModelSwitchScope, resolveModelSwitchScope } from '../../utils/model/modelSwitchScope.js';
 import { syncModelConfigToDisk } from '../../utils/model/syncModelConfig.js';
@@ -2041,11 +2041,12 @@ function PromptInput({
       // Write effort only after the switch committed; a failed switch must not
       // attribute the new level to the old model.
       if (effort !== undefined) {
+        delete process.env.CLAUDE_CODE_EFFORT_LEVEL;
         const targetModel = parseUserSpecifiedModel(model ?? resolveSessionDefaultModel() ?? getDefaultMainLoopModel())
         setAppState(prev => ({
           ...prev,
           effortValue: effort,
-          effortByModel: rememberEffortForModel(prev.effortByModel, targetModel, effort),
+          effortByModel: rememberEffortForModel(prev.effortByModel, targetModel, effort, activeEffortConnectionId()),
         }))
       }
     }).catch(e => {

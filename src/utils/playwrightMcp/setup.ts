@@ -14,13 +14,6 @@ import { buildPlaywrightMcpCommand, type PlaywrightMcpCommand } from './command.
 
 export { PLAYWRIGHT_MCP_PROMPT_HINT } from './common.js'
 
-export function playwrightMcpPromptHint(): string {
-  const preference = desktopBrowserPreference()
-  return preference && preference !== 'auto'
-    ? `${PLAYWRIGHT_MCP_PROMPT_HINT}\nThe user has set ${DESKTOP_PLAYWRIGHT_BROWSERS[preference].label} as their desktop browser preference. Use it for ordinary browser tasks unless the user explicitly names another browser or requests both.`
-    : PLAYWRIGHT_MCP_PROMPT_HINT
-}
-
 /**
  * Server-level allow rule: `mcp__playwright__*`.
  *
@@ -68,6 +61,8 @@ export function setupPlaywrightMCP(): {
     }
   }
   if (desktopBrowserPreference()) {
+    // Keep installed browser servers available for preference changes in a running App session.
+    // The query route controls which of them can be advertised or called.
     for (const browser of Object.keys(DESKTOP_PLAYWRIGHT_BROWSERS) as DesktopBrowser[]) {
       const spec = DESKTOP_PLAYWRIGHT_BROWSERS[browser]
       const executablePath = process.env[spec.pathEnv]

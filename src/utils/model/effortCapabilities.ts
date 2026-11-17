@@ -1,3 +1,5 @@
+import { getModelProfile, modelProfileEnvPatch } from '../customApiStorage.js'
+import { isProfileSelection } from './profileIdentity.js'
 import { getModelEnvironment } from './runtimeModelContext.js'
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl, type APIProvider } from './providers.js'
 import { planEffortWire } from './effortGateway.js'
@@ -56,6 +58,7 @@ export interface EffortCapability {
   supportsMax: boolean
   /** Accepted levels for the UI, already trimmed by the gates above. */
   levels: EffortLevel[]
+  defaultLevel?: EffortLevel
   thinking: ThinkingMode
   source: CapabilitySource
 }
@@ -105,16 +108,18 @@ function isMaxEffortModel(name: string): boolean {
   return /claude-opus-4-8(?:$|-)/.test(name)
 }
 
-export function getEffortCapability(model: string): EffortCapability {
-  const env = getModelEnvironment()
+export function getEffortCapability(model: string, env = getModelEnvironment()): EffortCapability {
+  const profile = isProfileSelection(model) ? getModelProfile(model) : undefined
+  if (profile) return getEffortCapability(profile.model, { ...env, ...modelProfileEnvPatch(profile) })
   const provider = getAPIProvider()
   const protocol = resolveProtocol(env)
   const customEndpoint = Boolean(
-    env.ANTHROPIC_BASE_URL && !isFirstPartyAnthropicBaseUrl(),
+    env.ANTHROPIC_BASE_URL && !isFirstPartyAnthropicBaseUrl(env),
   )
-  const hostPolicy = getHostReasoningPolicy(model)
+  const hostPolicy = getHostReasoningPolicy(model, env)
   if (hostPolicy) {
-    const levels = isEnvTruthy(env.CLAUDE_CODE_DISABLE_EFFORT) ? [] : hostReasoningLevels(hostPolicy)
+    const levels = isEnvTruthy(env.CLAUDE_CODE_DISABLE_EFFORT) ? [] : hostReasoningLevels(hostPolicy, !isEnvTruthy(env.CLAUDE_CODE_DISABLE_THINKING))
+    const defaultLevel = hostPolicy.effort.mode === 'none' ? undefined : hostPolicy.effort.defaultLevel
     return {
       model,
       provider,
@@ -123,6 +128,7 @@ export function getEffortCapability(model: string): EffortCapability {
       supportsEffort: levels.length > 0 && hostPolicy.effort.mode !== 'none',
       supportsMax: levels.includes('max'),
       levels,
+      defaultLevel: defaultLevel && levels.includes(defaultLevel) ? defaultLevel : undefined,
       thinking: hostReasoningThinking(hostPolicy),
       source: 'catalog',
     }
@@ -131,7 +137,7 @@ export function getEffortCapability(model: string): EffortCapability {
   // [1m]/[2m] are local context-window suffixes; @date is the Vertex ID form.
   // Neither reaches the API, so strip them before anchored family regexes.
   const name = rawName.replace(/\[(?:1|2)m\]$/i, '').replace(/@\d+$/, '')
-  const rejectedAtRuntime = wasEffortRejected(model)
+  const rejectedAtRuntime = wasEffortRejected(model, env)
   const canonical = getCanonicalName(name).toLowerCase()
 
   const disabled = isEnvTruthy(env.CLAUDE_CODE_DISABLE_EFFORT)

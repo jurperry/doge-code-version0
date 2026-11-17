@@ -1,4 +1,5 @@
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { joinBaseUrl } from './joinBaseUrl.js'
 import { requestFetch } from './requestLifecycle.js'
 import { streamAPIError } from './streamErrors.js'
 import type {
@@ -150,10 +151,6 @@ function openaiUsageCache(usage: OpenAIStreamChunk['usage']): { cacheRead: numbe
   const write = details?.cache_write_tokens ?? details?.cache_creation_input_tokens
   const pos = (v: unknown): number => (typeof v === 'number' && v > 0 ? v : 0)
   return { cacheRead: pos(read), cacheWrite: pos(write) }
-}
-
-export function joinBaseUrl(baseURL: string, path: string): string {
-  return `${baseURL.replace(/\/$/, '')}${path}`
 }
 
 export function contentToText(content: BetaMessageParam['content']): string {
@@ -484,7 +481,7 @@ export async function createOpenAICompatStream(
   let response: Response
   try {
     response = await requestFetch(config.fetch ?? globalThis.fetch,
-      joinBaseUrl(config.baseURL, '/v1/chat/completions'),
+      joinBaseUrl(config.baseURL, 'chat/completions'),
       {
         method: 'POST',
         signal,

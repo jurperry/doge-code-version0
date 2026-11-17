@@ -21,24 +21,8 @@ import {
 import { setCurrentPermissionMode } from '../utils/permissions/currentPermissionMode.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
 import { resolveModelSwitchScope } from '../utils/model/modelSwitchScope.js'
-import {
-  getModelProfile,
-  readCustomApiStorage,
-  writeCustomApiStorage,
-} from '../utils/customApiStorage.js'
-import { getProfileId } from '../utils/model/profileIdentity.js'
+import { persistCatalogModelSelection } from '../utils/model/syncModelConfig.js'
 import type { AppState } from './AppStateStore.js'
-
-function persistCatalogModelSelection(model: string): boolean {
-  const profile = getModelProfile(model)
-  if (!profile) return false
-  writeCustomApiStorage({
-    ...readCustomApiStorage(),
-    model,
-    activeProfileId: getProfileId(profile),
-  })
-  return true
-}
 
 // Inverse of the push below — restore on worker restart.
 export function externalMetadataToAppState(

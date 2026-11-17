@@ -11,7 +11,7 @@ import { useAppState, useSetAppState } from '../../state/AppState.js';
 import { useMainLoopModel } from '../../hooks/useMainLoopModel.js';
 import type { LocalJSXCommandCall } from '../../types/command.js';
 import type { EffortLevel } from '../../utils/effort.js';
-import { rememberEffortForModel } from '../../utils/effortMemory.js';
+import { activeEffortConnectionId, rememberEffortForModel } from '../../utils/effortMemory.js';
 import { isBilledAsExtraUsage } from '../../utils/extraUsage.js';
 import { clearFastModeCooldown, isFastModeAvailable, isFastModeEnabled, isFastModeSupportedByModel } from '../../utils/fastMode.js';
 import { MODEL_ALIASES, MODEL_FAMILY_ALIASES } from '../../utils/model/aliases.js';
@@ -77,21 +77,18 @@ function ModelPickerWrapper(t0) {
         // Only write effort after the model switch actually committed; a
         // failed switch must not pollute the previous model's memory.
         if (effort !== undefined) {
+          delete process.env.CLAUDE_CODE_EFFORT_LEVEL;
           const targetModel = parseUserSpecifiedModel(model ?? getDefaultMainLoopModelSetting());
           setAppState(prev => ({
             ...prev,
             effortValue: effort,
-            effortByModel: rememberEffortForModel(prev.effortByModel, targetModel, effort)
+            effortByModel: rememberEffortForModel(prev.effortByModel, targetModel, effort, activeEffortConnectionId())
           }));
         }
       }).catch((e) => {
         // eslint-disable-next-line no-console
         console.error('Model switch failed:', e);
       });
-      // NOTE: CLAUDE_CODE_EFFORT_LEVEL is handled by ModelPicker.handleSelect
-      // (only deleted when user explicitly toggles effort via ← → keys).
-      // When the user did NOT toggle, the env var is preserved and wins via
-      // resolveAppliedEffort() priority. No unconditional delete here.
       let message = `Set model to ${chalk.bold(renderModelLabel(model))}`;
       if (scope === 'session') {
         if (model !== null && (MODEL_FAMILY_ALIASES as readonly string[]).includes(model)) {

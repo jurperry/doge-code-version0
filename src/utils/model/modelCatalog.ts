@@ -31,7 +31,7 @@ export type ThinkingPolicy =
   | { mode: 'none' }
   | { mode: 'always' }
   | { mode: 'value'; field: string; value: unknown }
-  | { mode: 'toggle'; field: string; on: unknown; off: unknown }
+  | { mode: 'toggle'; field: string; on: unknown; off: unknown; defaultEnabled?: boolean }
   | { mode: 'budget'; field: string; budgetTokens?: number }
 
 export type EffortPolicy =
@@ -284,43 +284,11 @@ export function defaultCatalogSelection(catalog: ModelCatalog | undefined): {
   const preferred = catalog.defaultModel
     ? catalog.connections.find(c => c.id === catalog.defaultModel!.connectionId)
     : undefined
-  const connection = preferred ?? catalog.connections[0]
+  const connection = preferred ?? catalog.connections.find(c => c.models.length > 0)
+  if (!connection) return {}
   const model = connection.models.find(m => m.id === (preferred ? catalog.defaultModel!.modelId : connection.defaultModelId))
     ?? connection.models[0]
   return { connection, model }
-}
-
-function envSelection(catalog: ModelCatalog): { connection?: CatalogConnection; model?: CatalogModel } {
-  const connectionId = process.env.DOGE_ACTIVE_CONNECTION_ID?.trim()
-  const modelId = process.env.DOGE_ACTIVE_MODEL_ID?.trim()
-  const profile = process.env.DOGE_ACTIVE_MODEL_PROFILE?.trim()
-  if (connectionId) {
-    const connection = catalog.connections.find(c => c.id === connectionId)
-    if (connection) {
-      const model = connection.models.find(m => m.id === modelId)
-        ?? connection.models.find(m => m.id === connection.defaultModelId)
-        ?? connection.models[0]
-      return { connection, model }
-    }
-  }
-  if (profile) {
-    const [candidateConnection, candidateModel] = profile.split(':')
-    const connection = catalog.connections.find(c => c.id === candidateConnection)
-    if (connection) {
-      const model = connection.models.find(m => m.id === candidateModel)
-        ?? connection.models[0]
-      return { connection, model }
-    }
-  }
-  return defaultCatalogSelection(catalog)
-}
-
-export function resolveCatalogSelection(catalog: ModelCatalog | undefined): {
-  connection?: CatalogConnection
-  model?: CatalogModel
-} {
-  if (!catalog) return {}
-  return envSelection(catalog)
 }
 
 export function catalogPolicyForModel(
@@ -422,7 +390,7 @@ function ensureConnectionModel(connection: CatalogConnection, upstream: string):
 /** Catalog → one in-memory profile per connection (never per model). */
 export function catalogToEndpoint(catalog: ModelCatalog | undefined): CatalogEndpoint {
   if (!catalog || !catalog.connections.length) return { modelProfiles: [], savedModels: [] }
-  const selection = resolveCatalogSelection(catalog)
+  const selection = defaultCatalogSelection(catalog)
   const profiles: CatalogProfile[] = []
   const savedModels: string[] = []
   for (const connection of catalog.connections) {
@@ -511,8 +479,7 @@ export function endpointToCatalog(endpoint: CatalogEndpoint, existing?: ModelCat
     }
     if (target) {
       const endpointChanged = Boolean(
-        (endpoint.provider && endpoint.provider !== target.protocol)
-        || (endpoint.baseURL !== undefined && endpoint.baseURL !== target.baseURL)
+        endpoint.provider && endpoint.provider !== target.protocol
       )
       if (endpoint.provider) target.protocol = endpoint.provider
       if (endpoint.baseURL !== undefined) target.baseURL = endpoint.baseURL
@@ -550,9 +517,8 @@ export function endpointToCatalog(endpoint: CatalogEndpoint, existing?: ModelCat
     const first = activeFirst[0]!
     const existingConnection = connections.find(c => c.id === (first.connectionId ?? first.id))
       ?? connections.find(c => normalizeModelName(c.name) === normalizeModelName(first.providerName ?? ''))
-      ?? connections.find(c => c.baseURL && c.baseURL === first.baseURL && c.protocol === first.provider)
     const connection: CatalogConnection = existingConnection ?? {
-      id: first.connectionId ?? hashId('c', key),
+      id: first.connectionId ?? first.id ?? hashId('c', key),
       name: first.providerName?.trim() || first.baseURL?.trim() || 'provider',
       protocol: first.provider ?? 'anthropic',
       ...(first.baseURL !== undefined ? { baseURL: first.baseURL } : {}),
@@ -560,10 +526,7 @@ export function endpointToCatalog(endpoint: CatalogEndpoint, existing?: ModelCat
       ...(first.authTokenType !== undefined ? { authTokenType: first.authTokenType } : {}),
       models: [],
     }
-    const endpointChanged = Boolean(existingConnection && (
-      (first.provider && first.provider !== existingConnection.protocol)
-      || (first.baseURL !== undefined && first.baseURL !== existingConnection.baseURL)
-    ))
+    const protocolChanged = Boolean(existingConnection && first.provider && first.provider !== existingConnection.protocol)
     connection.name = first.providerName?.trim() || connection.name
     connection.protocol = first.provider ?? connection.protocol
     if (first.baseURL !== undefined) connection.baseURL = first.baseURL
@@ -609,8 +572,8 @@ export function endpointToCatalog(endpoint: CatalogEndpoint, existing?: ModelCat
     }
     if (Object.keys(roles).length) connection.roles = roles
     else delete connection.roles
-    if (endpointChanged) {
-      // Wire fields changed protocol/baseURL: old materialized policy is invalid.
+    if (protocolChanged) {
+      // A protocol change invalidates the old request fields.
       for (const model of connection.models) delete model.reasoning
     }
 
@@ -635,8 +598,7 @@ export function endpointToCatalog(endpoint: CatalogEndpoint, existing?: ModelCat
   // Top-level edits from /config and ConsoleOAuthFlow target the active
   // connection; apply them here instead of silently dropping them.
   const topLevelEndpointChanged = Boolean(
-    (endpoint.provider && endpoint.provider !== activeConnection.protocol)
-    || (endpoint.baseURL !== undefined && endpoint.baseURL !== activeConnection.baseURL)
+    endpoint.provider && endpoint.provider !== activeConnection.protocol
   )
   if (endpoint.provider) activeConnection.protocol = endpoint.provider
   if (endpoint.baseURL !== undefined) activeConnection.baseURL = endpoint.baseURL

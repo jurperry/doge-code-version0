@@ -1,4 +1,5 @@
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { joinBaseUrl } from './joinBaseUrl.js'
 import { requestFetch } from './requestLifecycle.js'
 import { streamAPIError } from './streamErrors.js'
 import type {
@@ -14,7 +15,6 @@ import {
   contentToText,
   imageBlockToImageURL,
   isTransientUpstreamError,
-  joinBaseUrl,
   splitToolResultContent,
   toBlocks,
 } from './openaiCompat.js'
@@ -443,7 +443,7 @@ export async function createResponsesCompatStream(
   let response: Response
   try {
     response = await requestFetch(config.fetch ?? globalThis.fetch,
-      joinBaseUrl(config.baseURL, '/v1/responses'),
+      joinBaseUrl(config.baseURL, 'responses'),
       {
         method: 'POST',
         signal,

@@ -122,7 +122,7 @@ function applyEffortForValue(
     return { applied: value }
   }
   const clamped =
-    (value === 'max' || value === 'xhigh') && !capability.supportsMax
+    capability.source !== 'catalog' && (value === 'max' || value === 'xhigh') && !capability.supportsMax
       ? 'high'
       : value
   const plan = planEffortWire({ model, requested: clamped, thinkingEnabled })
@@ -194,7 +194,7 @@ export function resolveAppliedEffort(
   // otherwise fall back to high (the API's usual default).
   if (
     (resolved === 'max' || resolved === 'xhigh') &&
-    !modelSupportsMaxEffort(model)
+    !getHostReasoningPolicy(model) && !modelSupportsMaxEffort(model)
   ) {
     return 'high'
   }

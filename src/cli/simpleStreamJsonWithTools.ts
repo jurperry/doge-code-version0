@@ -1,5 +1,6 @@
 // Enhanced stream-json handler with tool support for Bun on Windows
 // Workaround for Bun bug where print.ts cannot be loaded
+import { joinBaseUrl } from '../services/api/joinBaseUrl.js';
 import { createInterface } from 'readline';
 import Anthropic from '@anthropic-ai/sdk';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
@@ -72,7 +73,7 @@ async function callOpenAICompatAPI(
   messages: OpenAIChatMessage[],
   tools?: any[],
 ): Promise<{ stream: ReadableStreamDefaultReader<Uint8Array>; model: string }> {
-  const url = `${baseURL.replace(/\/$/, '')}/v1/chat/completions`;
+  const url = joinBaseUrl(baseURL, 'chat/completions');
 
   // Convert Anthropic tools to OpenAI format
   const openaiTools = tools?.map(tool => ({

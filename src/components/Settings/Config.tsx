@@ -20,6 +20,9 @@ import { isBridgeEnabled } from '../../bridge/bridgeEnabled.js';
 import { ThemePicker } from '../ThemePicker.js';
 import { useAppState, useSetAppState, useAppStateStore } from '../../state/AppState.js';
 import { ModelPicker } from '../ModelPicker.js';
+import { applyModelProfile, getModelProfile } from '../../utils/customApiStorage.js';
+import { isProfileSelection } from '../../utils/model/profileIdentity.js';
+import { captureApplyEnvSnapshot, captureEnvSnapshot, restoreApplyEnvSnapshot, restoreEnvSnapshot } from '../../utils/model/switchModelProfile.js';
 import { modelDisplayString, isOpus1mMergeEnabled } from '../../utils/model/model.js';
 import { isBilledAsExtraUsage } from '../../utils/extraUsage.js';
 import { ClaudeMdExternalIncludesDialog } from '../ClaudeMdExternalIncludesDialog.js';
@@ -204,7 +207,18 @@ export function Config({
   const memoryFiles = React.use(getMemoryFiles(true));
   const shouldShowExternalIncludesToggle = hasExternalClaudeMdIncludes(memoryFiles);
   const autoUpdaterDisabledReason = getAutoUpdaterDisabledReason();
+  const restoreModelEnvironment = React.useRef<(() => void) | undefined>(undefined);
   function onChangeMainModelConfig(value: string | null): void {
+    if (value && isProfileSelection(value)) {
+      const profile = getModelProfile(value);
+      if (!profile) return;
+      if (!restoreModelEnvironment.current) {
+        const tiers = captureEnvSnapshot();
+        const connection = captureApplyEnvSnapshot();
+        restoreModelEnvironment.current = () => { restoreEnvSnapshot(tiers); restoreApplyEnvSnapshot(connection); };
+      }
+      applyModelProfile(profile, { persist: false });
+    }
     const previousModel = mainLoopModel;
     logEvent('tengu_config_model_changed', {
       from_model: previousModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -1301,6 +1315,7 @@ export function Config({
     });
     // AppState: batch-restore all possibly-touched fields.
     const ia = initialAppState;
+    restoreModelEnvironment.current?.();
     setAppState(prev_23 => ({
       ...prev_23,
       mainLoopModel: ia.mainLoopModel,

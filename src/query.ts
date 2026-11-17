@@ -121,7 +121,7 @@ import { count } from './utils/array.js'
 import { BackgroundTaskCloseout } from './utils/task/backgroundTaskCloseout.js'
 import { TASK_STOP_TOOL_NAME } from './tools/TaskStopTool/prompt.js'
 import { desktopBrowserPreference } from './utils/playwrightMcp/common.js'
-import { browserTurnRoute, desktopBrowserToolMode, latestBrowserIntent, previousBrowserMode } from './utils/playwrightMcp/browserIntent.js'
+import { browserTurnRoute, latestBrowserIntent } from './utils/playwrightMcp/browserIntent.js'
 import { getToolNameForPermissionCheck } from './services/mcp/mcpStringUtils.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -296,21 +296,12 @@ async function* queryLoop(
     (querySource === 'sdk' || querySource.startsWith('repl_main_thread'))
     ? latestBrowserIntent(params.messages)
     : undefined
-  // A browser mode has 24 tools per brand. Expose one mode per request to keep
-  // the tool count comparable to standalone Playwright's two-mode budget.
-  const browserMode = preference
-    ? intent?.mode ?? previousBrowserMode(params.messages) ??
-      (context.options.tools.some(tool => desktopBrowserToolMode(tool.name) === 'headless') ? 'headless' : 'visible')
+  const browserRoute = preference
+    ? browserTurnRoute(intent, preference, process.env.DOGE_APP_PLAYWRIGHT_DISABLED !== '1')
     : undefined
-  const browserRoute = preference && intent ? browserTurnRoute({ ...intent, mode: browserMode }, preference) : undefined
-  const filterBrowserTools = (tools: ToolUseContext['options']['tools']) => {
-    if (!browserMode) return tools
-    return tools.filter(tool => {
-      const name = getToolNameForPermissionCheck(tool)
-      const mode = desktopBrowserToolMode(name)
-      return (!mode || mode === browserMode) && !browserRoute?.hideTool(name)
-    })
-  }
+  const filterBrowserTools = (tools: ToolUseContext['options']['tools']) => browserRoute
+    ? tools.filter(tool => !browserRoute.hideTool(getToolNameForPermissionCheck(tool)))
+    : tools
   const canUseTool = wrapImRemoteToolCounter(rawCanUseTool)
 
   // Mutable cross-iteration state. The loop body destructures this at the top
@@ -318,11 +309,9 @@ async function* queryLoop(
   // Continue sites write `state = { ... }` instead of 9 separate assignments.
   let state: State = {
     messages: params.messages,
-    toolUseContext: browserMode ? {
+    toolUseContext: browserRoute ? {
       ...context,
-      turnToolError: browserRoute
-        ? tool => browserRoute.toolError(getToolNameForPermissionCheck(tool))
-        : context.turnToolError,
+      turnToolError: tool => browserRoute.toolError(getToolNameForPermissionCheck(tool)) ?? context.turnToolError?.(tool),
       options: {
         ...context.options,
         tools: filterBrowserTools(context.options.tools),
@@ -508,7 +497,7 @@ async function* queryLoop(
 
     const fullSystemPrompt = asSystemPrompt([
       ...appendSystemContext(systemPrompt, systemContext),
-      ...(browserRoute ? [browserRoute.prompt(toolUseContext.options.tools)] : []),
+      ...(intent && browserRoute ? [browserRoute.prompt(toolUseContext.options.tools)] : []),
     ])
 
     queryCheckpoint('query_autocompact_start')

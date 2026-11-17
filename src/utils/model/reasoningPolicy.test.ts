@@ -230,6 +230,16 @@ test('catalog limits and reasoning never fall through to an unrelated connection
   expect(catalogModelForRequest('same', { DOGE_ACTIVE_CONNECTION_ID: 'deleted' })).toBeUndefined()
 })
 
+test('catalog thinking defaults send an independent switch in auto and gate effort when off', () => {
+  if (qwen.thinking.mode !== 'toggle') throw new Error('Expected a toggle policy')
+  const on = { ...qwen, thinking: { ...qwen.thinking, defaultEnabled: true } }
+  const off = { ...qwen, thinking: { ...qwen.thinking, defaultEnabled: false } }
+  expect(planHostReasoning({ policy: on, requested: undefined }).extraBody).toEqual({ enable_thinking: true })
+  expect(planHostReasoning({ policy: off, requested: 'xhigh' })).toMatchObject({
+    extraBody: { enable_thinking: false }, levels: [], supportsEffort: false,
+  })
+})
+
 test('disabled thinking turns off a gateway toggle without sending a budget', () => {
   const plan = planHostReasoning({ policy: qwen, requested: 'high', thinkingEnabled: false })
   expect(plan.extraBody).toEqual({ enable_thinking: false })

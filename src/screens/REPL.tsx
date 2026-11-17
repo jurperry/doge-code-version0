@@ -276,7 +276,7 @@ const WebBrowserPanelModule = feature('WEB_BROWSER_TOOL') ? require('../tools/We
 import { IssueFlagBanner } from '../components/PromptInput/IssueFlagBanner.js';
 import { useIssueFlagBanner } from '../hooks/useIssueFlagBanner.js';
 import { useEffortModelMemory } from '../hooks/useEffortModelMemory.js';
-import { rememberEffortForModel } from '../utils/effortMemory.js';
+import { activeEffortConnectionId, rememberEffortForModel } from '../utils/effortMemory.js';
 import { CompanionSprite, CompanionFloatingBubble, MIN_COLS_FOR_FULL_SPRITE } from '../buddy/CompanionSprite.js';
 import { fireCompanionObserver } from '../buddy/observer.js';
 import { DevBar } from '../components/DevBar.js';
@@ -4964,7 +4964,7 @@ export function REPL({
               setAppState(prev => ({
                 ...prev,
                 effortValue: selection,
-                effortByModel: rememberEffortForModel(prev.effortByModel, mainLoopModel, selection)
+                effortByModel: rememberEffortForModel(prev.effortByModel, mainLoopModel, selection, activeEffortConnectionId())
               }));
             }
           }} />}

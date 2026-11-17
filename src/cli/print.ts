@@ -298,7 +298,6 @@ import {
 import { applyProfileForModelIfMatch } from 'src/utils/model/switchModelProfile.bindings.js'
 import { getModelOptions } from 'src/utils/model/modelOptions.js'
 import {
-  modelSupportsEffort,
   getAppliedEffortValue,
   getEffortEnvOverride,
   resolveAppliedEffort,
@@ -306,7 +305,7 @@ import {
 import { getEffortCapability } from 'src/utils/model/effortCapabilities.js'
 import { planEffortWire } from 'src/utils/model/effortGateway.js'
 import { getModelConnection } from 'src/utils/model/runtimeModelContext.js'
-import { modelSupportsAdaptiveThinking } from 'src/utils/thinking.js'
+import { isProfileSelection } from 'src/utils/model/profileIdentity.js'
 import { modelSupportsAutoMode } from 'src/utils/betas.js'
 import { ensureModelStringsInitialized } from 'src/utils/model/modelStrings.js'
 import {
@@ -1290,20 +1289,18 @@ function runHeadlessStreaming(
       modelId === 'default'
         ? getDefaultMainLoopModel()
         : parseUserSpecifiedModel(modelId)
-    const hasEffort = modelSupportsEffort(resolvedModel)
-    const capability = getEffortCapability(resolvedModel)
-    const hasAdaptiveThinking = modelSupportsAdaptiveThinking(resolvedModel)
+    const capability = getEffortCapability(isProfileSelection(modelId) ? modelId : resolvedModel)
     const hasFastMode = isFastModeSupportedByModel(option.value)
     const hasAutoMode = modelSupportsAutoMode(resolvedModel)
     return {
       value: modelId,
       displayName: option.label,
       description: option.description,
-      ...(hasEffort && {
+      ...(capability.supportsEffort && {
         supportsEffort: true,
         supportedEffortLevels: capability.levels,
       }),
-      ...(hasAdaptiveThinking && { supportsAdaptiveThinking: true }),
+      ...(capability.thinking === 'adaptive' && { supportsAdaptiveThinking: true }),
       ...(hasFastMode && { supportsFastMode: true }),
       ...(hasAutoMode && { supportsAutoMode: true }),
     }
@@ -4173,7 +4170,7 @@ function runHeadlessStreaming(
           // so it mirrors what actually goes to the API.
           const thinkingEnabled = options.thinkingConfig?.type !== 'disabled' && !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_THINKING)
           const effort = getAppliedEffortValue(model, currentAppState.effortValue, thinkingEnabled)
-          const capability = getEffortCapability(model)
+          const capability = getEffortCapability(model, thinkingEnabled ? process.env : { ...process.env, CLAUDE_CODE_DISABLE_THINKING: '1' })
           const modelConnection = getModelConnection()
           const requested = resolveAppliedEffort(model, currentAppState.effortValue)
           const effortWirePlan =

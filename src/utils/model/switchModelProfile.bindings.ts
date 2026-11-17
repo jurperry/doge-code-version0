@@ -18,6 +18,8 @@
  * persist-to-disk behavior (e.g. /model <name> --save). Tier aliases are
  * session-scoped in BOTH modes (they never persist — see switchTier).
  */
+import { getInitialEffortSetting } from '../effort.js'
+import { activeEffortConnectionId, getRememberedEffort } from '../effortMemory.js'
 import { logForDebugging } from '../debug.js'
 import { isEnvTruthy } from '../envUtils.js'
 import { applyModelProfile, getModelProfile, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
@@ -114,9 +116,12 @@ export async function switchModelProfileAtomicBound(
 ): Promise<void> {
   const sessionScoped = deps.sessionScoped ?? true
   return switchModelProfileAtomicCore(profile, {
-    applyProfile: (p) => applyModelProfile(p, { persist: !sessionScoped }),
+    applyProfile: (p) => applyModelProfile(p, { persist: false }),
     syncToDisk: sessionScoped ? noopSyncToDisk : deps.syncToDisk,
-    commitAppState: bindCommit(deps.setAppState),
+    commitAppState: update => deps.setAppState(prev => {
+      const level = getRememberedEffort(prev.effortByModel, profile.model, activeEffortConnectionId())
+      return { ...update(prev), effortValue: level === undefined ? getInitialEffortSetting() : level ?? undefined }
+    }),
     sessionScoped,
   })
 }

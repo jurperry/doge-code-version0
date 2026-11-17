@@ -1,7 +1,7 @@
 import { c as _c } from "react/compiler-runtime";
 import * as React from 'react';
 import { useMainLoopModel } from '../../hooks/useMainLoopModel.js';
-import { rememberEffortForModel } from '../../utils/effortMemory.js';
+import { activeEffortConnectionId, rememberEffortForModel } from '../../utils/effortMemory.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { useAppState, useSetAppState } from '../../state/AppState.js';
 import type { LocalJSXCommandOnDone } from '../../types/command.js';
@@ -128,7 +128,7 @@ function ApplyEffortAndClose(t0) {
         setAppState(prev => ({
           ...prev,
           effortValue: effortUpdate.value,
-          effortByModel: rememberEffortForModel(prev.effortByModel, model, effortUpdate.value)
+          effortByModel: rememberEffortForModel(prev.effortByModel, model, effortUpdate.value, activeEffortConnectionId())
         }));
       }
       // Surface capability mismatches instead of letting the send-time silent

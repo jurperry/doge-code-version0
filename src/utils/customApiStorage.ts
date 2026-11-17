@@ -9,6 +9,7 @@ import {
   writeModelCatalog,
   type CatalogEndpoint,
   type CatalogProfile,
+  type CatalogModel,
 } from './model/modelCatalog.js'
 import { ACTIVE_PROFILE_ENV, getProfileId, matchModelProfile } from './model/profileIdentity.js'
 import { getModelEnvironment, readModelApiStorage } from './model/runtimeModelContext.js'
@@ -24,14 +25,7 @@ export type ModelProfile = {
   /** Catalog connection/model identity (derived; never persisted here). */
   connectionId?: string
   catalogModelId?: string
-  models?: Array<{
-    id: string
-    upstreamModel: string
-    displayName: string
-    contextWindow?: number
-    maxOutputTokens?: number
-    reasoning?: unknown
-  }>
+  models?: CatalogModel[]
   model: string
   /**
    * User-facing provider name (e.g. "deepseek官方", "glm官方"). Unique across

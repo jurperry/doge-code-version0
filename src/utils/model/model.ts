@@ -107,7 +107,9 @@ export function getBestModel(): ModelName {
 // @[MODEL LAUNCH]: Update the default Opus model (3P providers may lag so keep defaults unchanged).
 function resolveDefaultTier(tier: 'opus' | 'sonnet' | 'haiku', fallback: string): ModelName {
   const selected = getUserSpecifiedModelSetting()
-  const main = selected && !isModelAlias(selected) ? selected : getModelEnvironment().ANTHROPIC_MODEL
+  const main = selected && !isModelAlias(selected)
+    ? (isProfileSelection(selected) ? getModelProfile(selected)?.model : selected)
+    : getModelEnvironment().ANTHROPIC_MODEL
   return resolveTierModel({ tier, env: getModelEnvironment(),
     mainModel: main && !isModelAlias(main) ? main : undefined, fallback })!
 }

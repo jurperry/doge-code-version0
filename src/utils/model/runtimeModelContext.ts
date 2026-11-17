@@ -104,9 +104,10 @@ export function getModelConnection() {
     ?? (env.ANTHROPIC_MODEL ? matchModelProfile(profiles, env.ANTHROPIC_MODEL, env) : undefined)
   const fallback = profile ?? stored
   const rawProvider = env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER ?? fallback.provider
+  const provider = rawProvider === 'openai' || rawProvider === 'responses' ? rawProvider : 'anthropic'
   return {
-    provider: rawProvider === 'openai' || rawProvider === 'responses' ? rawProvider : 'anthropic' as const,
-    baseURL: env.ANTHROPIC_BASE_URL || fallback.baseURL || 'https://api.anthropic.com',
+    provider,
+    baseURL: env.ANTHROPIC_BASE_URL || fallback.baseURL || (provider === 'anthropic' ? 'https://api.anthropic.com' : ''),
     apiKey: env.DOGE_API_KEY || env.ANTHROPIC_AUTH_TOKEN || fallback.apiKey || null,
     authTokenType: env.DOGE_API_KEY ? 'DOGE_API_KEY' : env.ANTHROPIC_AUTH_TOKEN ? 'ANTHROPIC_AUTH_TOKEN'
       : fallback.authTokenType ?? 'DOGE_API_KEY',

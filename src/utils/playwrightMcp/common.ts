@@ -60,7 +60,7 @@ export function isPlaywrightMCPServer(name: string): boolean {
 export const PLAYWRIGHT_MCP_PROMPT_HINT = `<browser-automation-availability>
 Requests for 浏览器自动化, 浏览器操作, Browser Use, Playwright, or Playwright MCP mean the built-in Playwright MCP. Use its tools first for the browser task. Computer Use handles explicit desktop interaction, such as an existing desktop window or a native dialog.
 
-Desktop sessions expose installed browsers by name: mcp__playwright-chrome__* and mcp__playwright-edge__* are headless, and their -headed variants open visible windows. Select the named browser when the user specifies one. In Auto, choose among the available browsers based on the task. A Chrome token in a user agent also appears in Edge; Edg/ identifies desktop Edge.
+Desktop sessions use mcp__playwright-chrome__* and mcp__playwright-edge__* for headless mode. The -headed server names indicate visible windows. Settings can limit available tools to one browser. In Auto, follow the user's named browser or choose from the tools available for this request. A Chrome token in a user agent also appears in Edge; Edg/ identifies desktop Edge.
 Standalone sessions use mcp__playwright__* for the configured headless browser and mcp__playwright-headed__* for the configured visible browser.
 
 Choose the browser mode before starting a task:

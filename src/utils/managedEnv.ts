@@ -88,9 +88,14 @@ function withoutCcdSpawnEnvKeys(
 function filterSettingsEnv(
   env: Record<string, string> | undefined,
 ): Record<string, string> {
-  return withoutCcdSpawnEnvKeys(
+  const filtered = withoutCcdSpawnEnvKeys(
     withoutHostManagedProviderVars(withoutSSHTunnelVars(env)),
   )
+  if (process.env.DOGE_APP_WORKSPACE_MARKER !== '1') return filtered
+  return Object.fromEntries(Object.entries(filtered).filter(([key]) => {
+    const name = key.toUpperCase()
+    return name !== 'DOGE_APP_WORKSPACE_MARKER' && !name.startsWith('DOGE_APP_PLAYWRIGHT_')
+  }))
 }
 
 /**
@@ -249,7 +254,11 @@ function applyPersistedCustomApiEndpointEnv(overrides: Record<string, string> = 
     ? resolveProfileReference(profiles, sourceEnv.DOGE_ACTIVE_MODEL_PROFILE) : undefined
   const savedProfile = !explicitMain && !sourceEnv.ANTHROPIC_BASE_URL && stored.activeProfileId
     ? resolveProfileReference(profiles, stored.activeProfileId) : undefined
-  const profile = explicitProfile ?? savedProfile ?? matchModelProfile(profiles, explicitMain || stored.model || '', sourceEnv)
+  const selectedProfile = explicitProfile ?? savedProfile
+  const selectedModel = explicitMain || (savedProfile && !explicitProfile ? stored.model : undefined)
+  const profile = selectedProfile
+    ? (selectedModel ? matchModelProfile([selectedProfile], selectedModel, sourceEnv) : undefined) ?? selectedProfile
+    : matchModelProfile(profiles, explicitMain || stored.model || '', sourceEnv)
   const patch = profile ? modelProfileEnvPatch(profile) : {
     ANTHROPIC_MODEL: stored.model, ANTHROPIC_BASE_URL: stored.baseURL,
     CLAUDE_CODE_COMPATIBLE_API_PROVIDER: stored.provider,
