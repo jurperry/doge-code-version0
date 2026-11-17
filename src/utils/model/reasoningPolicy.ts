@@ -1,5 +1,6 @@
 import type { EffortLevel } from './effortCapabilities.js'
 import { catalogPolicyForModel } from './modelCatalog.js'
+import { getModelEnvironment } from './runtimeModelContext.js'
 
 /**
  * Reasoning policy read directly from the unified Model Catalog.
@@ -74,7 +75,7 @@ const LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const disabledHostModels = new Set<string>()
 
 export function disableHostReasoningPolicy(model: string): void {
-  disabledHostModels.add(normalizeModelId(model))
+  disabledHostModels.add(reasoningRouteKey(model))
 }
 
 export function clearHostReasoningDisables(): void {
@@ -83,6 +84,20 @@ export function clearHostReasoningDisables(): void {
 
 function normalizeModelId(model: string): string {
   return model.toLowerCase().trim().replace(/\[(?:1|2)m\]$/i, '').replace(/@\d+$/i, '')
+}
+
+function reasoningRouteKey(model: string): string {
+  const env = getModelEnvironment()
+  return JSON.stringify([
+    env.DOGE_ACTIVE_CONNECTION_ID || env.DOGE_ACTIVE_MODEL_PROFILE,
+    env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER,
+    env.ANTHROPIC_BASE_URL?.trim().replace(/\/+$/, ''),
+    normalizeModelId(model),
+  ])
+}
+
+export function wasEffortRejected(model: string): boolean {
+  return disabledHostModels.has(reasoningRouteKey(model))
 }
 
 function isLevel(value: unknown): value is EffortLevel {
@@ -97,13 +112,18 @@ function isPolicy(value: unknown): value is HostReasoningPolicy {
 
 /** Read the model's policy from the catalog (active connection first). */
 export function getHostReasoningPolicy(model: string): HostReasoningPolicy | undefined {
-  if (disabledHostModels.has(normalizeModelId(model))) return undefined
-  const policy = catalogPolicyForModel(model)
+  return wasEffortRejected(model) ? undefined : getCatalogReasoningPolicy(model)
+}
+
+/** Response display rules still apply after a wire-parameter rejection. */
+export function getCatalogReasoningPolicy(model: string): HostReasoningPolicy | undefined {
+  const policy = catalogPolicyForModel(model, undefined, getModelEnvironment())
   return isPolicy(policy) ? policy : undefined
 }
 
 export function hostReasoningLevels(policy: HostReasoningPolicy | undefined): EffortLevel[] {
-  if (!policy || policy.effort.mode === 'none') return []
+  if (!policy || policy.effort.mode === 'none' || !isReasoningFieldPath(policy.effort.field) || !Array.isArray(policy.effort.levels)) return []
+  if ('field' in policy.thinking && pathsOverlap(policy.thinking.field, policy.effort.field)) return []
   return policy.effort.levels.filter(isLevel)
 }
 
@@ -124,8 +144,8 @@ export function hostResponseFields(policy: HostReasoningPolicy | undefined): str
 }
 
 function setPath(target: Record<string, unknown>, path: string, value: unknown): void {
-  const parts = path.split('.').filter(Boolean)
-  if (!parts.length) return
+  if (!isReasoningFieldPath(path)) return
+  const parts = path.split('.')
   let cursor = target
   for (let i = 0; i < parts.length - 1; i++) {
     const key = parts[i]!
@@ -133,6 +153,37 @@ function setPath(target: Record<string, unknown>, path: string, value: unknown):
     cursor = cursor[key] as Record<string, unknown>
   }
   cursor[parts.at(-1)!] = value
+}
+
+function isReasoningFieldPath(path: unknown): path is string {
+  return typeof path === 'string' && path.split('.').every(part =>
+    /^[a-zA-Z_][\w-]*$/.test(part) && !Object.hasOwn(Object.prototype, part) && part !== 'prototype')
+}
+
+function pathsOverlap(a: unknown, b: string): boolean {
+  return typeof a === 'string' && (a === b || a.startsWith(`${b}.`) || b.startsWith(`${a}.`))
+}
+
+function deletePath(target: Record<string, unknown>, path: string): void {
+  const [key, ...parts] = path.split('.')
+  if (!key || !Object.hasOwn(target, key)) return
+  if (!parts.length) {
+    delete target[key]
+    return
+  }
+  const value = target[key]
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return
+  const next = { ...(value as Record<string, unknown>) }
+  deletePath(next, parts.join('.'))
+  if (Object.keys(next).length) target[key] = next
+  else delete target[key]
+}
+
+export function removeEffortFields(target: Record<string, unknown>, policy?: HostReasoningPolicy): void {
+  for (const path of ['output_config.effort', 'reasoning.effort', 'reasoning_effort', 'anthropic_internal.effort_override']) {
+    deletePath(target, path)
+  }
+  if (policy && 'field' in policy.effort && isReasoningFieldPath(policy.effort.field)) deletePath(target, policy.effort.field)
 }
 
 function clone<T>(value: T): T {
@@ -162,10 +213,16 @@ export function planHostReasoning(input: {
   policy: HostReasoningPolicy
   requested: EffortLevel | undefined
   maxOutputTokens?: number
+  suppressEffort?: boolean
+  thinkingEnabled?: boolean
 }): HostReasoningPlan {
-  const { policy, requested } = input
-  const levels = hostReasoningLevels(policy)
+  const { policy } = input
+  const effortOff = input.suppressEffort || (input.thinkingEnabled === false &&
+    (policy.thinking.mode === 'toggle' || policy.effort.mode === 'budget'))
+  const levels = effortOff ? [] : hostReasoningLevels(policy)
+  const requested = effortOff ? undefined : input.requested
   const extraBody: Record<string, unknown> = { ...(policy.extraBody ? clone(policy.extraBody) : {}) }
+  if (effortOff) removeEffortFields(extraBody, policy)
   let wireEffort: string | undefined
   let applied: EffortLevel | undefined
   let downgraded = false
@@ -191,13 +248,18 @@ export function planHostReasoning(input: {
     setPath(extraBody, policy.effort.field, budgetFor(policy.effort, effective, input.maxOutputTokens))
   }
 
-  if (policy.thinking.mode === 'value') {
+  if (input.thinkingEnabled === false) {
+    if ('field' in policy.thinking && isReasoningFieldPath(policy.thinking.field)) deletePath(extraBody, policy.thinking.field)
+    if (policy.thinking.mode === 'toggle') setPath(extraBody, policy.thinking.field, clone(policy.thinking.off))
+  } else if (policy.thinking.mode === 'value') {
     if (policy.thinking.field !== 'output_config.effort') setPath(extraBody, policy.thinking.field, clone(policy.thinking.value))
   } else if (policy.thinking.mode === 'budget') {
     const raw = policy.thinking.budgetTokens ?? 4096
     const limit = input.maxOutputTokens
     const budget = limit === undefined ? raw : Math.min(Math.max(1, limit - 1), Math.max(1, raw))
-    setPath(extraBody, policy.thinking.field, { type: 'enabled', budget_tokens: budget })
+    if (policy.thinking.field !== 'thinking' || budget >= 1024) {
+      setPath(extraBody, policy.thinking.field, { type: 'enabled', budget_tokens: budget })
+    }
   } else if (policy.thinking.mode === 'toggle' && effective) {
     setPath(extraBody, policy.thinking.field, clone(policy.thinking.on))
   }

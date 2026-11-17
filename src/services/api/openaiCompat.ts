@@ -59,6 +59,7 @@ export type OpenAIChatRequest = {
   }>
   tool_choice?: 'auto' | { type: 'function'; function: { name: string } }
   max_tokens?: number
+  max_completion_tokens?: number
   /**
    * Standard Chat Completions reasoning control (o-series / gpt-5 family).
    * Sent for all OpenAI-compatible providers; gateways that do not understand
@@ -247,6 +248,7 @@ export function convertAnthropicRequestToOpenAI(input: {
   tool_choice?: BetaToolChoiceAuto | BetaToolChoiceTool
   temperature?: number
   max_tokens?: number
+  baseURL?: string
   output_config?: { effort?: string }
   /** Provider-specific thinking controls (e.g. Qwen enable_thinking). */
   extra_body?: Record<string, unknown>
@@ -397,7 +399,8 @@ export function convertAnthropicRequestToOpenAI(input: {
   // Handle model-specific max_tokens limits
   let maxTokens = input.max_tokens
   // DeepSeek API has a max_tokens limit of 8192, can be adjusted to 32000 for newer models
-  if (maxTokens && maxTokens > 32000 && process.env.ANTHROPIC_BASE_URL?.includes('deepseek')) {
+  const endpoint = input.baseURL ?? process.env.ANTHROPIC_BASE_URL
+  if (maxTokens && maxTokens > 32000 && endpoint?.includes('deepseek')) {
     maxTokens = 32000
   }
 
@@ -417,7 +420,9 @@ export function convertAnthropicRequestToOpenAI(input: {
     model: targetModel,
     messages,
     temperature: input.temperature,
-    max_tokens: maxTokens,
+    ...(/^https?:\/\/api\.openai\.com(?:[/:]|$)/i.test(endpoint ?? '') && /^(?:o\d(?:$|[.-])|gpt-5)/i.test(targetModel)
+      ? { max_completion_tokens: maxTokens }
+      : { max_tokens: maxTokens }),
     ...(getToolDefinitions(input.tools)
       ? { tools: getToolDefinitions(input.tools) }
       : {}),

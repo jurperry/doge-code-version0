@@ -160,6 +160,8 @@ type ResponsesStreamEvent = {
   }
   item?: ResponsesItem
   output_index?: number
+  summary_index?: number
+  content_index?: number
   item_id?: string
   delta?: string
   text?: string
@@ -626,14 +628,16 @@ function getToolKey(event: ResponsesStreamEvent): string | undefined {
 export async function* createAnthropicStreamFromResponses(input: {
   reader: ReadableStreamDefaultReader<Uint8Array>
   model: string
+  reasoningDisplay?: 'full' | 'summary' | 'none'
+  allowRawReasoningFallback?: boolean
 }): AsyncGenerator<BetaRawMessageStreamEvent, BetaMessage, void> {
   const decoder = new TextDecoder()
   let buffer = ''
   let started = false
   let textStarted = false
   let textStopped = false
-  const textContentIndex = 0
-  let nextContentIndex = 1
+  let textContentIndex = -1
+  let nextContentIndex = 0
   let promptTokens = 0
   let completionTokens = 0
   let cacheReadTokens = 0
@@ -643,6 +647,34 @@ export async function* createAnthropicStreamFromResponses(input: {
   let finalStopReason: BetaMessage['stop_reason'] = 'end_turn'
   const toolStates = new Map<string, ToolCallState>()
   const toolOrder: string[] = []
+  const thinkingBlocks = new Map<string, { index: number; stopped: boolean }>()
+  const rawFallback: Array<{ event: ResponsesStreamEvent; type: string }> = []
+  let gotSummary = false
+
+  function* streamReasoning(event: ResponsesStreamEvent, type: string): Generator<BetaRawMessageStreamEvent> {
+    const summary = type.startsWith('response.reasoning_summary_text.')
+    const done = type.endsWith('.done')
+    if (!done && !type.endsWith('.delta')) return
+    const key = `${summary}:${event.item_id ?? event.output_index ?? 0}:${event.summary_index ?? event.content_index ?? 0}`
+    let block = thinkingBlocks.get(key)
+    const text = done ? (block ? undefined : event.text) : event.delta
+    if (text && !block) {
+      block = { index: nextContentIndex++, stopped: false }
+      thinkingBlocks.set(key, block)
+      emittedAnyContent = true
+      yield {
+        type: 'content_block_start', index: block.index,
+        content_block: { type: 'thinking', thinking: '', signature: '' },
+      }
+    }
+    if (block && !block.stopped) {
+      if (text) yield { type: 'content_block_delta', index: block.index, delta: { type: 'thinking_delta', thinking: text } }
+      if (done) {
+        block.stopped = true
+        yield { type: 'content_block_stop', index: block.index }
+      }
+    }
+  }
   // Server-side web search synthesis state: tracks web_search_call output items
   // (mapped to server_tool_use blocks) and url_citation annotations (collected
   // into synthesized web_search_tool_result blocks at stream end).
@@ -737,6 +769,22 @@ export async function* createAnthropicStreamFromResponses(input: {
         if (details?.cached_tokens !== undefined && details.cached_tokens > 0) cacheReadTokens = details.cached_tokens
         if (details?.cache_write_tokens !== undefined && details.cache_write_tokens > 0) cacheWriteTokens = details.cache_write_tokens
 
+        const summary = eventType.startsWith('response.reasoning_summary_text.')
+        const rawReasoning = eventType.startsWith('response.reasoning_text.')
+        if (summary || rawReasoning) {
+          if (input.reasoningDisplay === 'none') continue
+          if (rawReasoning && input.reasoningDisplay === 'summary') {
+            if (input.allowRawReasoningFallback && !gotSummary) rawFallback.push({ event, type: eventType })
+            continue
+          }
+          if (summary && (event.delta || event.text)) {
+            gotSummary = true
+            rawFallback.length = 0
+          }
+          yield* streamReasoning(event, eventType)
+          continue
+        }
+
         if (eventType === 'response.output_text.annotation.added') {
           // Streamed url_citation annotations (OpenAI-style). Collected
           // deduped by url for the synthesized web_search_tool_result blocks
@@ -755,6 +803,7 @@ export async function* createAnthropicStreamFromResponses(input: {
         if (eventType === 'response.output_text.delta') {
           const textDelta = event.delta ?? event.text ?? ''
           if (textDelta) {
+            if (!textStarted) textContentIndex = nextContentIndex++
             const startEvent = ensureTextBlockStarted(textStarted, textContentIndex)
             if (startEvent) {
               textStarted = true
@@ -963,7 +1012,13 @@ export async function* createAnthropicStreamFromResponses(input: {
             }
           }
 
+          for (const { event: raw, type } of rawFallback) yield* streamReasoning(raw, type)
+          for (const block of thinkingBlocks.values()) {
+            if (!block.stopped) yield { type: 'content_block_stop', index: block.index }
+          }
+
           if (!emittedAnyContent) {
+            textContentIndex = nextContentIndex++
             const startEvent = ensureTextBlockStarted(textStarted, textContentIndex)
             if (startEvent) {
               textStarted = true

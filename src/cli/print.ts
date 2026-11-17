@@ -301,6 +301,7 @@ import {
   modelSupportsEffort,
   getAppliedEffortValue,
   getEffortEnvOverride,
+  resolveAppliedEffort,
 } from 'src/utils/effort.js'
 import { getEffortCapability } from 'src/utils/model/effortCapabilities.js'
 import { planEffortWire } from 'src/utils/model/effortGateway.js'
@@ -4170,16 +4171,19 @@ function runHeadlessStreaming(
           const model = getMainLoopModel()
           // Applied effort already includes capability clamp + gateway mapping,
           // so it mirrors what actually goes to the API.
-          const effort = getAppliedEffortValue(model, currentAppState.effortValue)
+          const thinkingEnabled = options.thinkingConfig?.type !== 'disabled' && !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_THINKING)
+          const effort = getAppliedEffortValue(model, currentAppState.effortValue, thinkingEnabled)
           const capability = getEffortCapability(model)
           const modelConnection = getModelConnection()
+          const requested = resolveAppliedEffort(model, currentAppState.effortValue)
           const effortWirePlan =
             typeof effort === 'string'
               ? planEffortWire({
                   model,
-                  requested: effort,
+                  requested: typeof requested === 'string' ? requested : undefined,
                   protocol: modelConnection.provider,
                   baseURL: modelConnection.baseURL,
+                  thinkingEnabled,
                 })
               : undefined
           // Requested value: env override wins over session state, mirroring

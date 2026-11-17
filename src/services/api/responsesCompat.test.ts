@@ -235,6 +235,49 @@ function streamFromText(sseText: string): ReadableStreamDefaultReader<Uint8Array
   return stream.getReader()
 }
 
+test('streams Responses thinking before the answer and avoids repeating completed text', async () => {
+  const part = { item_id: 'rs_test', output_index: 0, summary_index: 0 }
+  const sse = [
+    { type: 'response.reasoning_summary_text.delta', ...part, delta: 'First' },
+    { type: 'response.reasoning_summary_text.done', ...part, text: 'First' },
+    { type: 'response.reasoning_summary_text.done', ...part, summary_index: 1, text: 'Second' },
+    { type: 'response.reasoning_text.delta', item_id: 'raw', delta: 'Raw' },
+    { type: 'response.output_text.delta', delta: 'Answer' },
+    { type: 'response.completed' },
+  ].map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+
+  for (const [display, expected] of [['full', ['First', 'Second', 'Raw']], ['summary', ['First', 'Second']], ['none', []]] as const) {
+    const starts: string[] = []
+    const stops: number[] = []
+    const thinking: string[] = []
+    for await (const event of createAnthropicStreamFromResponses({ reader: streamFromText(sse), model: 'test', reasoningDisplay: display })) {
+      if (event.type === 'content_block_start') {
+        expect(event.index).toBe(starts.length)
+        starts.push(event.content_block.type)
+      }
+      if (event.type === 'content_block_stop') stops.push(event.index)
+      if (event.type === 'content_block_delta' && event.delta.type === 'thinking_delta') thinking.push(event.delta.thinking)
+    }
+    expect(thinking).toEqual([...expected])
+    expect(starts).toEqual([...expected.map(() => 'thinking'), 'text'])
+    expect(stops).toEqual(starts.map((_, i) => i))
+  }
+})
+
+test('summary display can use configured raw fallback when no summary arrives', async () => {
+  const sse = [
+    { type: 'response.reasoning_text.delta', item_id: 'raw', delta: 'Fallback' },
+    { type: 'response.reasoning_text.done', item_id: 'raw', text: 'Fallback' },
+    { type: 'response.output_text.delta', delta: 'Answer' },
+    { type: 'response.completed' },
+  ].map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+  const reasoning: string[] = []
+  for await (const event of createAnthropicStreamFromResponses({ reader: streamFromText(sse), model: 'test', reasoningDisplay: 'summary', allowRawReasoningFallback: true })) {
+    if (event.type === 'content_block_delta' && event.delta.type === 'thinking_delta') reasoning.push(event.delta.thinking)
+  }
+  expect(reasoning).toEqual(['Fallback'])
+})
+
 test('web_search_call + url citations synthesize server_tool_use and web_search_tool_result blocks', async () => {
   const sse = [
     'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}\n\n',

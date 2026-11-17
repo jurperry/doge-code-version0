@@ -37,13 +37,12 @@
 | `ANTHROPIC_CUSTOM_HEADERS` | 每行 `Name: Value`，为每个 API 请求追加自定义头 |
 | `ANTHROPIC_MODEL` | 默认模型；`[1m]`/`[2m]` 后缀仅本地剥离用于上下文窗口计算，不发给 API |
 | `ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_MODEL` | 各层级 Agent 模型（未设时 fallback 到主模型） |
-| `CLAUDE_CODE_SUBAGENT_MODEL` | Task/subagent 层模型覆盖 |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | Task/subagent 层模型覆盖。留空或 `inherit` 时按工具参数、Agent 定义和父模型解析 |
 | `ANTHROPIC_SMALL_FAST_MODEL` | 轻量后台任务（haiku 层）模型 |
 | `CLAUDE_CODE_MODEL_CONTEXT_WINDOW` | 覆盖上下文窗口大小（token 数，如 `200000`） |
-| `CLAUDE_CODE_EFFORT_LEVEL` | 努力等级：`low` / `medium` / `high` / `xhigh` / `max`；优先级最高，`unset`/`auto` 表示不发送 effort（xhigh/max 仅会话级，不落盘） |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `low` / `medium` / `high` / `xhigh` / `max`。独立 CLI 中 `unset`/`auto` 省略档位，工作流仍可显式指定请求级档位。桌面宿主的自动档采用模型目录默认值（xhigh/max 仅会话级） |
 | `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | 无视模型名单，强制启用 effort 参数（不放开 max/xhigh 门禁） |
-| `ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_MODEL_SUPPORTED_CAPABILITIES` | 档位模型能力声明 CSV：`effort,max_effort,thinking,adaptive_thinking,interleaved_thinking`；仅 3P/自定义端点且模型与档位 env 精确匹配时生效 |
-| `CLAUDE_CODE_DISABLE_EFFORT` | 显式关闭 effort（profile 能力声明；自定义端点默认放行，仅在端点拒绝/误读 effort 时开启） |
+| `CLAUDE_CODE_DISABLE_EFFORT` | 禁用显式档位和目录默认档。自定义端点的档位与思考能力由 `~/.doge/model-catalog.json` 声明 |
 | `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` | 子进程密钥清理三态：未设=默认清除 doge 凭证；truthy=全量清单；falsy=关闭 |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | 设 truthy（如 `1`）启用 teammate 群聊（亦可 `--agent-teams` 或 `/agent-teams`） |
 | `DOGE_MODEL_SCOPE` | 模型切换作用域：`session`（默认）/ `global` |

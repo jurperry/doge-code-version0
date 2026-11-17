@@ -137,7 +137,6 @@ export function applySafeConfigEnvironmentVariables(): void {
   // filterSettingsEnv strips keys that were in the spawn env snapshot so
   // the desktop host's operational vars (OTEL, etc.) are not overridden.
   Object.assign(process.env, filterSettingsEnv(getGlobalConfig().env))
-  applyPersistedCustomApiEndpointEnv(filterSettingsEnv(getGlobalConfig().env))
 
   // Apply ALL env vars from trusted setting sources, policySettings last.
   // Gate on isSettingSourceEnabled so SDK settingSources: [] (isolation mode)
@@ -152,6 +151,8 @@ export function applySafeConfigEnvironmentVariables(): void {
     )
   }
 
+  applyPersistedCustomApiEndpointEnv()
+
   // Compute remote-managed-settings eligibility now, with userSettings and
   // flagSettings env applied. Eligibility reads CLAUDE_CODE_USE_BEDROCK,
   // ANTHROPIC_BASE_URL — both settable via settings.env.
@@ -160,10 +161,16 @@ export function applySafeConfigEnvironmentVariables(): void {
   // dependency visible: non-policy env → eligibility → policy env.
   isRemoteManagedSettingsEligible()
 
-  Object.assign(
-    process.env,
-    filterSettingsEnv(getSettingsForSource('policySettings')?.env),
-  )
+  const policyEnv = filterSettingsEnv(getSettingsForSource('policySettings')?.env)
+  if (policyEnv.DOGE_API_KEY || policyEnv.ANTHROPIC_AUTH_TOKEN) {
+    for (const key of ['DOGE_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) {
+      if (restoredProfileEnv.has(key) && restoredProfileEnv.get(key) === process.env[key]) {
+        delete process.env[key]
+        restoredProfileEnv.delete(key)
+      }
+    }
+  }
+  Object.assign(process.env, policyEnv)
 
   // Apply only safe env vars from the fully-merged settings (which includes
   // project-scoped sources). For safe vars that also exist in trusted sources,
@@ -248,9 +255,9 @@ function applyPersistedCustomApiEndpointEnv(overrides: Record<string, string> = 
     CLAUDE_CODE_COMPATIBLE_API_PROVIDER: stored.provider,
     [stored.authTokenType === 'ANTHROPIC_AUTH_TOKEN' ? 'ANTHROPIC_AUTH_TOKEN' : 'DOGE_API_KEY']: stored.apiKey,
   }
-  const hasExplicitKey = !!(process.env.DOGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN)
+  const hasExplicitKey = !!(sourceEnv.DOGE_API_KEY || sourceEnv.ANTHROPIC_AUTH_TOKEN)
   for (const [key, value] of Object.entries(patch)) {
-    if (!value || process.env[key]) continue
+    if (!value || process.env[key] || Object.hasOwn(overrides, key)) continue
     if (hasExplicitKey && (key === 'DOGE_API_KEY' || key === 'ANTHROPIC_AUTH_TOKEN')) continue
     process.env[key] = value
     restoredProfileEnv.set(key, value)

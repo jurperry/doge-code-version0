@@ -19,6 +19,7 @@
  * session-scoped in BOTH modes (they never persist — see switchTier).
  */
 import { logForDebugging } from '../debug.js'
+import { isEnvTruthy } from '../envUtils.js'
 import { applyModelProfile, getModelProfile, readCustomApiStorage, type ModelProfile } from '../customApiStorage.js'
 import {
   switchModelProfileAtomic as switchModelProfileAtomicCore,
@@ -78,6 +79,7 @@ export function findProfileByModel(
  * override, matching the previous behavior.
  */
 export async function applyProfileForModelIfMatch(model: string): Promise<boolean> {
+  if (isEnvTruthy(process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST)) return false
   const profile = findProfileByModel(model)
   if (!profile) return false
   try {

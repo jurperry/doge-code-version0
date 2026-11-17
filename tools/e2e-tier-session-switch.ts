@@ -1,4 +1,4 @@
-// 临时功能验证（验证后删除）：档位切换一律会话级 + Default=当前 provider 的 sonnet 档。
+// 档位切换一律会话级，默认档采用当前连接的 sonnet。
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 
@@ -41,6 +41,7 @@ process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'deepseek-v4-pro'
 process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'deepseek-v4-flash'
 
 const { switchTierBound, resolveSessionDefaultModel } = await import('../src/utils/model/switchModelProfile.bindings.js')
+const { defaultCatalogSelection, readModelCatalog } = await import('../src/utils/model/modelCatalog.js')
 
 let state: { mainLoopModel: string | null, mainLoopModelForSession: string | null } = {
   mainLoopModel: 'deepseek-v4-pro[1m]',
@@ -72,10 +73,10 @@ check(state.mainLoopModelForSession === 'deepseek-v4-pro[1m]', `未配置的 opu
 // 4) global default：回到存储主模型，并清掉遗留 activeTier/tierModels
 switchTierBound(null, { syncToDisk: () => { failures.push('custom 用户 default 不应调 syncToDisk') }, setAppState, sessionScoped: false })
 check(state.mainLoopModel === 'deepseek-v4-pro[1m]' && state.mainLoopModelForSession === null, 'global default 应回到存储主模型并清 session')
-const stored = readStored().customApiEndpoint
-check(stored.activeTier === undefined, `遗留 activeTier 应被清除，实际: ${stored.activeTier}`)
-check(stored.tierModels === undefined, `遗留 tierModels 应被清除，实际: ${JSON.stringify(stored.tierModels)}`)
-check(stored.model === 'deepseek-v4-pro[1m]', '主模型槽位不应变化')
+check(readStored().customApiEndpoint === undefined, '迁移应清除整个旧模型配置')
+const catalog = readModelCatalog()
+check(defaultCatalogSelection(catalog).model?.upstreamModel === 'deepseek-v4-pro[1m]', '目录默认主模型不应变化')
+check(catalog?.connections[0]?.roles?.haiku !== undefined, '旧配置中显式 Haiku 角色应迁移到目录')
 
 // 5) 用户回归场景：磁盘基线=deepseek，会话已切到 kimi（env 描述激活 provider，
 //    kimi 未配 sonnet 档 → applyModelProfile 已删 tier env）。/model 选 Default

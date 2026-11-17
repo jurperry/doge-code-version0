@@ -4,7 +4,7 @@ import { getInitialSettings } from './settings/settings.js'
 import { isProSubscriber, isMaxSubscriber, isTeamSubscriber } from './auth.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
 import type { EffortLevel } from 'src/entrypoints/sdk/runtimeTypes.js'
-import { getScopedEffort } from './effortContext.js'
+import { getScopedEffort, suppressEffort } from './effortContext.js'
 import {
   EFFORT_LEVELS,
   getEffortCapability,
@@ -12,6 +12,8 @@ import {
 import { planEffortWire } from './model/effortGateway.js'
 import { getHostReasoningPolicy } from './model/reasoningPolicy.js'
 import { resolveAntModel } from './model/antModels.js'
+import { getModelEnvironment } from './model/runtimeModelContext.js'
+import { isEnvTruthy } from './envUtils.js'
 
 export type { EffortLevel }
 export { EFFORT_LEVELS }
@@ -96,9 +98,9 @@ export function resolvePickerEffortPersistence(
 }
 
 export function getEffortEnvOverride(): EffortValue | null | undefined {
-  const envOverride = process.env.CLAUDE_CODE_EFFORT_LEVEL
-  return envOverride?.toLowerCase() === 'unset' ||
-    envOverride?.toLowerCase() === 'auto'
+  const envOverride = getModelEnvironment().CLAUDE_CODE_EFFORT_LEVEL
+  const level = envOverride?.toLowerCase()
+  return level === 'unset' || level === 'auto'
     ? null
     : parseEffortValue(envOverride)
 }
@@ -110,6 +112,7 @@ export function getEffortEnvOverride(): EffortValue | null | undefined {
 function applyEffortForValue(
   model: string,
   value: EffortValue,
+  thinkingEnabled?: boolean,
 ): { applied: EffortValue | undefined; reason?: string } {
   const capability = getEffortCapability(model)
   if (!capability.supportsEffort) {
@@ -122,7 +125,8 @@ function applyEffortForValue(
     (value === 'max' || value === 'xhigh') && !capability.supportsMax
       ? 'high'
       : value
-  const plan = planEffortWire({ model, requested: clamped })
+  const plan = planEffortWire({ model, requested: clamped, thinkingEnabled })
+  if (plan.gateway === 'catalog') return { applied: plan.applied, reason: plan.detail }
   if (!plan.wireEffort && !plan.extraBody) {
     return { applied: undefined, reason: plan.detail ?? '该端点不支持 effort' }
   }
@@ -177,14 +181,15 @@ export function resolveAppliedEffort(
   model: string,
   appStateEffortValue: EffortValue | undefined,
 ): EffortValue | undefined {
+  if (suppressEffort()) return undefined
   const scoped = getScopedEffort()
   const envOverride = scoped ? undefined : getEffortEnvOverride()
   if (envOverride === null) {
     return undefined
   }
   const resolved =
-    scoped ? (scoped.value ?? getDefaultEffortForModel(model))
-      : (envOverride ?? appStateEffortValue ?? getDefaultEffortForModel(model))
+    (scoped ? scoped.value : envOverride ?? appStateEffortValue) ??
+    (getHostReasoningPolicy(model) ? undefined : getDefaultEffortForModel(model))
   // max/xhigh are only valid for models whose capability matrix declares them;
   // otherwise fall back to high (the API's usual default).
   if (
@@ -204,17 +209,17 @@ export function resolveAppliedEffort(
 export function getAppliedEffortValue(
   model: string,
   appStateEffort: EffortValue | undefined,
+  thinkingEnabled = !isEnvTruthy(getModelEnvironment().CLAUDE_CODE_DISABLE_THINKING),
 ): EffortValue | undefined {
+  if (suppressEffort()) return undefined
   const resolved = resolveAppliedEffort(model, appStateEffort)
   if (resolved === undefined) {
-    // Host policy 可以声明 defaultLevel：即使 App 送的是 unset/auto，
-    // 实际请求也会按默认档发送，状态栏/applied 必须如实显示。
     if (getHostReasoningPolicy(model)) {
-      return planEffortWire({ model, requested: undefined }).applied
+      return planEffortWire({ model, requested: undefined, thinkingEnabled }).applied
     }
     return undefined
   }
-  return applyEffortForValue(model, resolved).applied
+  return applyEffortForValue(model, resolved, thinkingEnabled).applied
 }
 
 /**
@@ -247,11 +252,6 @@ export function getEffortSuffix(
   model: string,
   effortValue: EffortValue | undefined,
 ): string {
-  const resolved = resolveAppliedEffort(model, effortValue)
-  // Explicitly unset (env=unset) → no effort param sent → no suffix
-  if (resolved === undefined && process.env.CLAUDE_CODE_EFFORT_LEVEL?.toLowerCase() === 'unset') {
-    return ''
-  }
   const applied = getAppliedEffortValue(model, effortValue)
   if (applied !== undefined) {
     // Display the gateway-mapped level (what the API actually receives).

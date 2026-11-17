@@ -31,7 +31,7 @@ test('settings selecting same-model endpoint B survive both startup phases with 
   const { saveGlobalConfig } = await import('../src/utils/config.js')
   saveGlobalConfig(current => ({ ...current, customApiEndpoint: endpoint as any }))
   const { updateSettingsForSource } = await import('../src/utils/settings/settings.js')
-  updateSettingsForSource('userSettings', { env: { ANTHROPIC_MODEL: 'shared', ANTHROPIC_BASE_URL: 'https://b.invalid', DOGE_API_KEY: 'fake-b' } })
+  updateSettingsForSource('userSettings', { env: { ANTHROPIC_MODEL: 'shared', ANTHROPIC_BASE_URL: 'https://b.invalid', ANTHROPIC_AUTH_TOKEN: 'explicit-settings-token' } })
   for (const key of ['ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'DOGE_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'DOGE_ACTIVE_MODEL_PROFILE', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'CLAUDE_CODE_COMPATIBLE_API_PROVIDER']) delete process.env[key]
   const { applySafeConfigEnvironmentVariables, applyConfigEnvironmentVariables } = await import('../src/utils/managedEnv.js')
   applySafeConfigEnvironmentVariables()
@@ -41,6 +41,8 @@ test('settings selecting same-model endpoint B survive both startup phases with 
   expect(process.env.DOGE_ACTIVE_MODEL_PROFILE).toBe(expectedProfileId)
   expect(process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER).toBe('responses')
   expect(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('b-fast')
+  expect(process.env.DOGE_API_KEY).toBeUndefined()
+  expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe('explicit-settings-token')
   applyConfigEnvironmentVariables()
   expect(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('b-fast')
 })

@@ -25,7 +25,8 @@ import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
-import { getHostReasoningPolicy, hostResponseFields } from 'src/utils/model/reasoningPolicy.js'
+import { getCatalogReasoningPolicy, getHostReasoningPolicy, hostResponseFields, removeEffortFields } from 'src/utils/model/reasoningPolicy.js'
+import { suppressEffort } from 'src/utils/effortContext.js'
 import { recordNetworkRetryUsage } from 'src/utils/sessionStorage.js'
 import {
   convertAnthropicRequestToOpenAI,
@@ -77,6 +78,7 @@ import {
 import { getOrCreateUserID } from '../../utils/config.js'
 import {
   CAPPED_DEFAULT_MAX_TOKENS,
+  catalogOutputLimit,
   getModelMaxOutputTokens,
   getSonnet1mExpTreatmentEnabled,
 } from '../../utils/context.js'
@@ -1514,14 +1516,11 @@ async function* queryModel(
   }
 
   const effortConnection = getModelConnection()
-  const effortMaxOutputTokens =
-    options.maxOutputTokensOverride ??
-    getModelMaxOutputTokens(options.model).default
   /** Plan for the most recent paramsFromContext() call (used by compat dispatch). */
   let currentEffortPlan: ReturnType<typeof planEffortWire> | undefined
 
   /** Recompute per attempt so a runtime 400 rejection is honored on retry. */
-  function resolveEffortWireForRequest(): EffortValue | undefined {
+  function resolveEffortWireForRequest(maxOutputTokens: number): EffortValue | undefined {
     const effort = resolveAppliedEffort(options.model, options.effortValue)
     const effortAllowed =
       typeof effort === 'number' ||
@@ -1537,7 +1536,7 @@ async function* queryModel(
             thinkingEnabled:
               thinkingConfig.type !== 'disabled' &&
               !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_THINKING),
-            maxOutputTokens: effortMaxOutputTokens,
+            maxOutputTokens,
           })
         : undefined
     currentEffortPlan = plan
@@ -1646,19 +1645,24 @@ async function* queryModel(
           ]
         : []
     const extraBodyParams = getExtraBodyParams(bedrockBetas)
+    const hostPolicy = getHostReasoningPolicy(options.model)
+    if (suppressEffort()) removeEffortFields(extraBodyParams, hostPolicy)
 
-    const outputConfig: BetaOutputConfig = {
-      ...((extraBodyParams.output_config as BetaOutputConfig) ?? {}),
-    }
-
-    configureEffortParams(
-      resolveEffortWireForRequest(),
-      outputConfig,
-      extraBodyParams,
+    // Retry overrides may reduce the budget but cannot exceed a catalog ceiling.
+    const catalogLimit = catalogOutputLimit(options.model)
+    const maxOutputTokens = Math.min(
+      retryContext?.maxTokensOverride || options.maxOutputTokensOverride || getMaxOutputTokensForModel(options.model),
+      catalogLimit ?? Infinity,
     )
+    const wireEffort = resolveEffortWireForRequest(maxOutputTokens)
     // Host policy：thinking/reasoning/enable_thinking 等字段随 compat extra_body
     // 原样进入请求体（Anthropic 路径也会被 ...extraBodyParams 覆盖 thinking）。
+    const outputConfig: BetaOutputConfig = {
+      ...((extraBodyParams.output_config as BetaOutputConfig) ?? {}),
+      ...((currentEffortPlan?.extraBody?.output_config as BetaOutputConfig) ?? {}),
+    }
     if (currentEffortPlan?.extraBody) Object.assign(extraBodyParams, currentEffortPlan.extraBody)
+    configureEffortParams(wireEffort, outputConfig, extraBodyParams)
 
     configureTaskBudgetParams(
       options.taskBudget,
@@ -1679,12 +1683,6 @@ async function* queryModel(
       }
     }
 
-    // Retry context gets preference because it tries to course correct if we exceed the context window limit
-    const maxOutputTokens =
-      retryContext?.maxTokensOverride ||
-      options.maxOutputTokensOverride ||
-      getMaxOutputTokensForModel(options.model)
-
     const hasThinking =
       thinkingConfig.type !== 'disabled' &&
       !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_THINKING)
@@ -1693,7 +1691,7 @@ async function* queryModel(
     // IMPORTANT: Do not change the adaptive-vs-budget thinking selection below
     // without notifying the model launch DRI and research. This is a sensitive
     // setting that can greatly affect model quality and bashing.
-    if (hasThinking && modelSupportsThinking(options.model)) {
+    if (hasThinking && !hostPolicy && modelSupportsThinking(options.model)) {
       if (
         !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING) &&
         modelSupportsAdaptiveThinking(options.model)
@@ -1819,6 +1817,7 @@ async function* queryModel(
           context_management: contextManagement,
         }),
       ...extraBodyParams,
+      ...(catalogLimit !== undefined && { max_tokens: maxOutputTokens }),
       ...(Object.keys(outputConfig).length > 0 && {
         output_config: outputConfig,
       }),
@@ -1957,6 +1956,7 @@ async function* queryModel(
               tool_choice: params.tool_choice,
               temperature: options.temperatureOverride,
               max_tokens: params.max_tokens,
+              baseURL,
               output_config: params.output_config,
               extra_body: currentEffortPlan?.extraBody,
             })
@@ -1981,7 +1981,7 @@ async function* queryModel(
             return createAnthropicStreamFromOpenAI({
               reader,
               model: params.model,
-              reasoningFields: hostResponseFields(getHostReasoningPolicy(options.model)),
+              reasoningFields: hostResponseFields(getCatalogReasoningPolicy(options.model)),
             }) as unknown as Stream<BetaRawMessageStreamEvent>
           }
 
@@ -2014,9 +2014,12 @@ async function* queryModel(
             signal,
           )
           queryCheckpoint('query_response_headers_received')
+          const display = getCatalogReasoningPolicy(options.model)?.response
           return createAnthropicStreamFromResponses({
             reader,
             model: params.model,
+            reasoningDisplay: display?.display,
+            allowRawReasoningFallback: display?.openaiFields?.includes('reasoning_text'),
           }) as unknown as Stream<BetaRawMessageStreamEvent>
         }
 
@@ -3589,7 +3592,7 @@ export function getMaxOutputTokensForModel(model: string): number {
   // max_output_tokens_escalate). Math.min keeps models with lower native
   // defaults (e.g. claude-3-opus at 4k) at their native value. Applied
   // before the env-var override so CLAUDE_CODE_MAX_OUTPUT_TOKENS still wins.
-  const defaultTokens = isMaxTokensCapEnabled()
+  const defaultTokens = catalogOutputLimit(model) === undefined && isMaxTokensCapEnabled()
     ? Math.min(maxOutputTokens.default, CAPPED_DEFAULT_MAX_TOKENS)
     : maxOutputTokens.default
 

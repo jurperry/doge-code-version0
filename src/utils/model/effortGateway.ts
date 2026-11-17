@@ -1,6 +1,7 @@
 import type { EffortLevel } from './effortCapabilities.js'
 import { getModelEnvironment } from './runtimeModelContext.js'
 import { getHostReasoningPolicy, planHostReasoning } from './reasoningPolicy.js'
+import { suppressEffort } from '../effortContext.js'
 
 /**
  * Gateway-aware effort wire mapping.
@@ -264,12 +265,15 @@ export function planEffortWire(input: {
   /** Output-token ceiling, used to cap Qwen thinking_budget. */
   maxOutputTokens?: number
 }): EffortWirePlan {
+  const suppressed = suppressEffort()
   // Catalog policy 优先：CLI 不再按模型名/网关猜测。
   const catalogPolicy = getHostReasoningPolicy(input.model)
   if (catalogPolicy) {
     const catalogPlan = planHostReasoning({
       policy: catalogPolicy,
       requested: input.requested,
+      suppressEffort: suppressed,
+      thinkingEnabled: input.thinkingEnabled,
       maxOutputTokens: input.maxOutputTokens,
     })
     return {
@@ -291,7 +295,7 @@ export function planEffortWire(input: {
     : protocol === 'anthropic'
       ? 'anthropic'
       : 'openai'
-  if (input.requested === undefined) {
+  if (suppressed || input.requested === undefined) {
     return { gateway, downgraded: false }
   }
   return planForGateway(

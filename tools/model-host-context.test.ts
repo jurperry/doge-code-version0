@@ -39,6 +39,19 @@ test('host-owned connection never adopts disk defaults or settings routing on re
   expect(process.env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER).toBe('openai')
   expect(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('')
   expect(process.env.DOGE_API_KEY).toBe('fake-a')
+
+  const { applyProfileForModelIfMatch, findProfileByModel } = await import('../src/utils/model/switchModelProfile.bindings.js')
+  expect(findProfileByModel('shared')).toBeTruthy()
+  process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'a-fast'
+  const { getAgentModel } = await import('../src/utils/model/agent.js')
+  expect(getAgentModel(undefined, 'previous', 'haiku')).toBe('a-fast')
+  expect(await applyProfileForModelIfMatch('shared')).toBe(false)
+  expect(process.env.ANTHROPIC_BASE_URL).toBe('https://a.invalid')
+  expect(getAgentModel(undefined, 'shared', 'haiku')).toBe('a-fast')
+  expect(getAgentModel(undefined, 'shared', 'inherit')).toBe('shared')
+  process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'a-explicit'
+  expect(getAgentModel(undefined, 'shared', 'haiku')).toBe('a-explicit')
+  delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
 })
 
 test('explicit empty host URL and credentials cannot be filled from disk profiles', async () => {

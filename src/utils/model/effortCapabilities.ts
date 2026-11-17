@@ -1,7 +1,7 @@
 import { getModelEnvironment } from './runtimeModelContext.js'
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl, type APIProvider } from './providers.js'
 import { planEffortWire } from './effortGateway.js'
-import { clearHostReasoningDisables, disableHostReasoningPolicy, getHostReasoningPolicy, hostReasoningLevels, hostReasoningThinking } from './reasoningPolicy.js'
+import { clearHostReasoningDisables, disableHostReasoningPolicy, getHostReasoningPolicy, hostReasoningLevels, hostReasoningThinking, wasEffortRejected } from './reasoningPolicy.js'
 import { getCanonicalName } from './model.js'
 import { resolveAntModel } from './antModels.js'
 import { isEnvTruthy } from '../envUtils.js'
@@ -25,17 +25,11 @@ export const EFFORT_LEVELS = [
 
 export type { EffortLevel }
 
-/** Models that rejected an effort parameter at runtime (400). Kept session-wide
- * so we do not keep sending a parameter the endpoint refuses. */
-const rejectedEffortModels = new Set<string>()
-
 export function recordEffortRejection(model: string): void {
-  rejectedEffortModels.add(model.trim().toLowerCase().replace(/\[.*?\]$/, ''))
   disableHostReasoningPolicy(model)
 }
 
 export function clearEffortRejections(): void {
-  rejectedEffortModels.clear()
   clearHostReasoningDisables()
 }
 
@@ -137,7 +131,7 @@ export function getEffortCapability(model: string): EffortCapability {
   // [1m]/[2m] are local context-window suffixes; @date is the Vertex ID form.
   // Neither reaches the API, so strip them before anchored family regexes.
   const name = rawName.replace(/\[(?:1|2)m\]$/i, '').replace(/@\d+$/, '')
-  const rejectedAtRuntime = rejectedEffortModels.has(name)
+  const rejectedAtRuntime = wasEffortRejected(model)
   const canonical = getCanonicalName(name).toLowerCase()
 
   const disabled = isEnvTruthy(env.CLAUDE_CODE_DISABLE_EFFORT)

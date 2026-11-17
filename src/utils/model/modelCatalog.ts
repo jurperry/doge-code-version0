@@ -12,6 +12,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, w
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { getDogeConfigDir } from '../dogeConfigDir.js'
+import { isEnvTruthy } from '../envUtils.js'
 
 export type ModelProtocol = 'anthropic' | 'openai' | 'responses'
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -182,7 +183,7 @@ function normalizeCatalog(raw: unknown): ModelCatalog | undefined {
             ? rawModel.displayName.trim()
             : upstreamModel,
           ...(typeof rawModel.contextWindow === 'number' ? { contextWindow: rawModel.contextWindow } : {}),
-          ...(typeof rawModel.maxOutputTokens === 'number' ? { maxOutputTokens: rawModel.maxOutputTokens } : {}),
+          ...(typeof rawModel.maxOutputTokens === 'number' && Number.isSafeInteger(rawModel.maxOutputTokens) && rawModel.maxOutputTokens > 0 ? { maxOutputTokens: rawModel.maxOutputTokens } : {}),
           ...(isRecord(rawModel.reasoning) ? { reasoning: rawModel.reasoning as unknown as ReasoningPolicy } : {}),
         })
       }
@@ -240,7 +241,10 @@ let catalogCache: { path: string; mtimeMs: number; size: number; catalog: ModelC
 
 export function readModelCatalog(): ModelCatalog | undefined {
   const path = catalogFilePath()
-  if (!existsSync(path)) return undefined
+  return readCatalogFile(path) ?? readCatalogFile(`${path}.bak`)
+}
+
+function readCatalogFile(path: string): ModelCatalog | undefined {
   try {
     const stats = statSync(path)
     if (catalogCache && catalogCache.path === path
@@ -322,32 +326,50 @@ export function resolveCatalogSelection(catalog: ModelCatalog | undefined): {
 export function catalogPolicyForModel(
   model: string,
   connectionId?: string,
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): ReasoningPolicy | undefined {
+  return catalogModelForRequest(model, env, connectionId)?.reasoning
+}
+
+export function catalogModelForRequest(
+  model: string,
+  env: Readonly<NodeJS.ProcessEnv>,
+  connectionId?: string,
+): CatalogModel | undefined {
   const catalog = readModelCatalog()
   if (!catalog) return undefined
-  const selection = resolveCatalogSelection(catalog)
-  const connection = connectionId
-    ? catalog.connections.find(c => c.id === connectionId)
-    : selection.connection
-  const candidates = connection
-    ? [connection, ...catalog.connections.filter(c => c.id !== connection.id)]
-    : catalog.connections
+  const id = connectionId || env.DOGE_ACTIVE_CONNECTION_ID || env.DOGE_ACTIVE_MODEL_PROFILE?.split(':')[0]
+  const hosted = isEnvTruthy(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST)
+  const baseURL = env.ANTHROPIC_BASE_URL || (hosted ? 'https://api.anthropic.com' : undefined)
+  const endpoint = baseURL?.trim().replace(/\/+$/, '')
+  const protocol = env.CLAUDE_CODE_COMPATIBLE_API_PROVIDER || (hosted ? 'anthropic' : undefined)
+  const selected = defaultCatalogSelection(catalog)
+  const matches = (connection: CatalogConnection): boolean =>
+    (!endpoint || endpoint === (connection.baseURL || 'https://api.anthropic.com').trim().replace(/\/+$/, '')) &&
+    (!protocol || protocol === connection.protocol)
+  let connection: CatalogConnection | undefined
+  if (id) {
+    connection = catalog.connections.find(c => c.id === id && matches(c))
+  } else if (!hosted && (endpoint || protocol)) {
+    const candidates = catalog.connections.filter(matches)
+    if (candidates.length === 1) connection = candidates[0]
+  } else if (!hosted) {
+    connection = selected.connection
+  }
+  if (!connection) return undefined
+  const active = connection.models.find(m => m.id === env.DOGE_ACTIVE_MODEL_ID)
+    ?? (connection === selected.connection ? selected.model : undefined)
+    ?? connection.models.find(m => m.id === connection.defaultModelId)
   const normalized = model === 'default'
-    ? normalizeModelName(selection.model?.upstreamModel ?? '')
+    ? normalizeModelName(env.ANTHROPIC_MODEL || active?.upstreamModel || '')
     : normalizeModelName(model)
   const aliases: Record<string, 'opus' | 'sonnet' | 'haiku'> = {
     opus: 'opus', sonnet: 'sonnet', haiku: 'haiku',
   }
-  for (const candidate of candidates) {
-    const role = aliases[normalized]
-    const aliasModel = role
-      ? candidate.models.find(m => m.id === candidate.roles?.[role])?.upstreamModel
-      : undefined
-    const wanted = aliasModel ? normalizeModelName(aliasModel) : normalized
-    const match = candidate.models.find(m => normalizeModelName(m.upstreamModel) === wanted)
-    if (match?.reasoning) return match.reasoning
-  }
-  return undefined
+  const role = aliases[normalized]
+  const aliasModel = role ? env[`ANTHROPIC_DEFAULT_${role.toUpperCase()}_MODEL`] || roleUpstream(connection, role) : undefined
+  const wanted = aliasModel ? normalizeModelName(aliasModel) : normalized
+  return connection.models.find(m => normalizeModelName(m.upstreamModel) === wanted)
 }
 
 function roleUpstream(connection: CatalogConnection, role: 'opus' | 'sonnet' | 'haiku' | 'subagent'): string | undefined {

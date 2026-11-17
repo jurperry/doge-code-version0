@@ -89,6 +89,7 @@ import {
 } from './utils/tokens.js'
 import {
   ESCALATED_MAX_TOKENS,
+  catalogOutputLimit,
   getContextWindowForModel,
 } from './utils/context.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from './services/analytics/growthbook.js'
@@ -1287,6 +1288,7 @@ async function* queryLoop(
         if (
           capEnabled &&
           maxOutputTokensOverride === undefined &&
+          catalogOutputLimit(toolUseContext.options.mainLoopModel) === undefined &&
           !process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
         ) {
           logEvent('tengu_max_tokens_escalate', {
