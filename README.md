@@ -1,267 +1,96 @@
 # Doge Code
 
-> Claude Code 的一个 Fork。不是官方正史，而是平行世界番外篇；不是萌豚整活仓库，而是“认真修、顺手发癫一点点”的工程分支。
+> Claude Code 的第三方 Fork：以 source map 还原的源码树为基底继续二开，聚焦多协议模型接入、自托管端点与桌面自动化（Computer Use / Playwright）。
 
-[![Fork](https://img.shields.io/badge/Fork-Claude%20Code-f59e0b)](README.md)
-[![Status](https://img.shields.io/badge/status-restored%20%2B%20modded-10b981)](README.md)
-[![Runtime](https://img.shields.io/badge/runtime-Bun%20%2B%20Node-3b82f6)](README.md)
-[![Config](https://img.shields.io/badge/config-~%2F.doge-8b5cf6)](README.md)
-[![License](https://img.shields.io/badge/license-see%20upstream%20notice-lightgrey)](README.md)
-[![Issues](https://img.shields.io/badge/issues-welcome-ef4444)](README.md)
+本仓库是独立 CLI（`@doge-code/cli`，全局命令 `doge`）。桌面壳在邻仓 `doge-code-app`，以 headless `doge -p --output-format stream-json` 驱动本 CLI；CLI 也保留完整 TUI。
 
-![Preview](preview.png)
+## 是什么
 
-## 这是什么
+- **基底**：从 source map 逆向还原并补齐缺失模块的 Claude Code 源码树，含恢复期 shim / fallback，**不是**官方上游镜像。
+- **本 Fork**：三协议（`anthropic`/`openai`/`responses`）模型接入、统一模型目录、内置 CU 与 Playwright MCP、IM 远程控制、Auto 计划、agent-teams、声明式 workflows。
+- **数据隔离（创始原则）**：全局 `~/.doge`、项目级 `<项目>/.doge/`，不与官方 `.claude` 混用（三处官方互操作例外见 [docs/DESIGN.md](docs/DESIGN.md) §8）。
 
-[`Doge Code`](README.md) 基于一份还原后的 [`Claude Code`](README.md) 源码树继续修改而来。
+## 与官方 Claude Code 的主要差异
 
-可以把它理解为：
+| 方面 | 本仓库 |
+|---|---|
+| API 协议 | 内部统一 Anthropic Messages，只在 API 边界转换：`CLAUDE_CODE_COMPATIBLE_API_PROVIDER` 选 `anthropic`/`openai`/`responses` |
+| 密钥 | `DOGE_API_KEY`（`x-api-key`）与 `ANTHROPIC_AUTH_TOKEN`（Bearer）严格互斥，启动由 `enforceApiKeyExclusivity` 裁决 |
+| 模型 | `~/.doge/model-catalog.json` 为连接/模型/角色/档位单一事实源；reasoning/effort 由目录策略驱动 |
+| 内置 MCP | `computer-use`（Windows/macOS）；`playwright`（无头）/`playwright-headed`（可见）两个 Node stdio 服务 |
+| 分发 | 无打包构建，Bun 直接跑 TS 源码；`bun link` 注册全局 `doge` |
+| 文案 | 命令/提示统一 `doge`；`--version` 仍输出 `2.1.345 (Claude Code)`（上游宏保留） |
 
-- 基底仍然是“通过 source map 逆向还原 + 缺失模块补齐”得到的可运行代码树
-- 但在此之上，加入了这个 Fork 自己的目标和行为调整
-- 目标不是“100% 忠于上游”，而是“让它更适合折腾、适合代理转接、适合自定义模型接入”
+## 架构总览
 
-如果用 ACG 比喻，大概属于：
+```text
+src/bootstrap-entry.ts     注入 MACRO 后载入
+└─ src/entrypoints/cli.tsx 快速路径（--version / --computer-use-mcp / remote-control / daemon / tmux worktree）
+   └─ src/main.tsx         Commander 参数 + 初始化 + 形态分发
+      ├─ replLauncher → src/screens/REPL.tsx   TUI（Ink/React）
+      ├─ src/cli/print.ts runHeadless()        -p / SDK / 桌面壳 headless（stream-json）
+      ├─ src/entrypoints/mcp.ts                `doge mcp serve`
+      └─ server / ssh / im                 设计保留，部分为恢复缺口（DESIGN §2）
+```
 
-- 原作：[`Claude Code`](README.md)
-- 本作：[`Doge Code`](README.md)
-- 定位：不是官方 BD 修正集，而是高强度民间魔改但努力保持剧情逻辑自洽的外传 OVA
+- **运行时**：Bun 直接执行 TS；`feature('...')`（`bun:bundle`）与 `"external" === 'ant'` 是构建期能力门。
+- **协议网关**：`src/services/api/claude.ts` 与 `openaiCompat.ts`/`responsesCompat.ts`（双向转换 + 流式回转）。
+- **数据根**：`src/utils/dogeConfigDir.ts` → `CLAUDE_CONFIG_DIR ?? ~/.doge`。
 
-## 当前定位
+## 运行时要求
 
-这个仓库当前强调的是以下方向：
+| 依赖 | 版本 / 说明 |
+|---|---|
+| Bun | `>=1.3.5`（`package.json` engines/packageManager；依赖以 `bun.lock` 为准） |
+| Node.js | `>=24`（Playwright MCP 以 Node 子进程运行） |
+| 平台 | 主目标 Windows；macOS 可运行（CU 原生层为恢复期 shim）；Linux 不注册 Computer Use |
 
-- 支持自定义 Anthropic 兼容接口地址
-- 正在加入 OpenAI Chat Completions ↔ Anthropic Messages 转接能力
-- 支持自定义 API Key
-- 支持自定义模型与模型列表管理
-- 尽量把自定义接入数据收口到 [`~/.doge`](README.md) 路径体系
-- 在保留 CLI/TUI 主体结构的前提下，降低对官方登录流的绑定
+无 `lint`/`test`/`build` npm 脚本；单测与源码同目录（`*.test.ts`），实机脚本在 `tools/`。
 
-换句话说，它现在更像一个“可自托管 / 可代理 / 可转接”的 [`Claude Code`](README.md) 变体。
-
-## 与原版 Claude Code 的数据隔离
-
-[`Doge Code`](README.md) 默认**不应**与原版 [`Claude Code`](README.md) 共用配置和缓存目录。
-
-当前 Fork 已明确把默认用户目录收口到：
-
-- 配置目录：[`~/.doge`](README.md)
-- 全局配置文件：[`~/.doge/.claude.json`](README.md)
-
-这样做的目的，是避免以下问题：
-
-- 原版 [`Claude Code`](README.md) 的登录态污染 [`Doge Code`](README.md)
-- 原版保存的 endpoint / token / model 配置影响 Doge 的代理转接逻辑
-- 两边共用 [`.claude.json`](README.md) 或 [`.claude/`](README.md) 导致奇怪的网络、认证、模型或 UI 异常
-
-如果用户以前装过原版 [`Claude Code`](README.md)，再运行 [`Doge Code`](README.md) 时出现“明明没这么配却读到了旧配置”的现象，通常就是历史数据混用导致的。
-
-建议：
-
-- 原版继续使用它自己的 [`.claude`](README.md) / [`.claude.json`](README.md)
-- [`Doge Code`](README.md) 使用 [`.doge`](README.md) 目录
-- 如需手动指定，也可以通过 [`CLAUDE_CONFIG_DIR`](README.md) 为 [`Doge Code`](README.md) 指向独立目录
-
-一句话总结：
-
-> 原版走原版的窝，狗子住狗子的窝，别把缓存、认证和配置炖成一锅。
-
-## OpenAI 兼容接口说明
-
-[`Doge Code`](README.md) 正在加入一个“中间转接层”模式，用来让内部仍按 Anthropic Messages 结构工作的主逻辑，转发到 OpenAI Chat Completions 接口。
-
-目标行为是：
-
-- 内部程序仍按 Anthropic Messages 模式组织请求
-- 当选择 OpenAI API 格式时，由中间层把 Messages 请求改写成 Chat Completions 请求
-- 远端返回 Chat Completions 流后，再由中间层回转成内部可消费的 Messages 风格流事件
-
-这意味着它不是简单改一个 Base URL，而是协议级别的输入输出流转接。
-
-当前状态：
-
-- API 格式选择界面与配置持久化已加入
-- OpenAI 兼容转接模块正在迭代中
-- 目前仍属于开发中功能，可能出现流式事件不完整、消息映射异常、部分工具调用兼容不足等情况
-
-如果你只是想稳定使用，建议优先走 Anthropic 兼容接口模式；如果你在测试 OpenAI 格式，请把它视为实验功能。
-
-## 和原始还原仓库的关系
-
-这个仓库**不是**上游官方源码仓库，也**不是** pristine 状态的 Claude Code。
-
-它有两层历史：
-
-1. 第一层：还原后的源码树
-2. 第二层：基于该源码树继续进行的 Fork 改造
-
-因此你会看到两类差异同时存在：
-
-- 来自恢复过程的 shim、fallback、兼容层
-- 来自 Doge Code 的主动魔改
-
-这两类改动都是真实存在的，不建议把当前代码误判成“官方上游源码镜像”。
-
-## 当前状态
-
-- 该源码树已经可以在本地开发流程中恢复并运行
-- [`bun install`](README.md) 可用于安装依赖
-- [`bun run dev`](README.md) 可用于启动恢复后的 CLI/TUI
-- [`bun run version`](README.md) 可用于输出当前版本信息
-- 项目已被继续改造成 [`Doge Code`](README.md) 分支，部分行为和 UI 已不再与原始 Claude Code 一致
-- 部分区域仍保留恢复期 fallback，因此行为可能与上游实现不同
-- OpenAI API 格式转接功能仍在开发中，当前并非完全稳定
-
-## 为什么会有这个仓库
-
-因为 source map 并不能召唤完整原仓库，最多只能说“把灵魂碎片召回来一部分”。
-
-常见缺口包括：
-
-- 类型专用文件缺失
-- 构建产物和中间文件缺失
-- 私有包包装层无法恢复
-- 原生绑定无法恢复
-- 动态导入资源不完整
-
-因此这个仓库的目标从一开始就不是考古式供奉，而是：
-
-- 先恢复到可运行
-- 再恢复到可维护
-- 最后在能跑的基础上，按需求继续 Fork
-
-简而言之：
-
-> 先让它活，再让它能打，再让它变成狗。
-
-## 运行方式
-
-环境要求：
-
-- Bun 1.3.5 或更高版本
-- Node.js 24 或更高版本
-
-安装依赖：
+## 安装与更新（源码级）
 
 ```bash
-bun install
+git clone <repo-url> doge-code && cd doge-code
+bun install          # 本地 file: 包（packages/@ant/*、shims/*）由此写入 node_modules
+bun link             # 注册全局 doge（package.json bin → src/bootstrap-entry.ts）
+doge                 # 或 bun run dev
 ```
 
-## 快速安装（推荐开发者直接源码使用）
+更新：`git pull && bun install && bun link`。**改 `packages/@ant/*` 后必须 `bun install`**，否则单测过而 CLI 仍跑 node_modules 旧副本。
 
-如果你是直接拉这个仓库源码来用，最快的方式是用 [`bun link`](README.md) 把它注册成全局命令。
-
-### 方式一：源码目录内直接注册
-
-在仓库根目录执行：
+## 常用命令
 
 ```bash
-bun install
-bun link
+bun run dev                 # TUI
+bun run version             # 版号 + CLI 可启动冒烟
+bun test <路径>             # 定向 bun:test
+bun test                    # 全量裸测（src/ 与 tools/，进程内共享状态）
+bun tools/run-isolated-tests.ts   # 每测试文件独立进程 + CLAUDE_CONFIG_DIR 隔离
+bun tools/e2e-model-routing.ts    # e2e 直接运行（自建沙箱并自清理）
 ```
 
-注册成功后：
+## 配置与密钥
 
-- 全局包名是 [`@doge-code/cli`](package.json:2)
-- 命令名是 [`doge`](package.json:24)
+- 配置根 `~/.doge`：`settings.json`（用户设置）、`.claude.json`（全局配置历史命名）、`.credentials.json`、`model-catalog.json`；`settings.local.json` 只存在于项目级 `<项目>/.doge/`。
+- 自定义端点：`ANTHROPIC_BASE_URL` + 双密钥二选一；`ANTHROPIC_CUSTOM_HEADERS` 每行 `Name: Value`。
+- 项目资源 `<项目>/.doge/`：`settings.json`/`settings.local.json`、`agents/`、`skills/`、`commands/`、`rules/`、`workflows/`（已 gitignore）。
+- 完整环境变量与目录布局见 [docs/DESIGN.md](docs/DESIGN.md) §3/§4/§7；`settings.json` 样例见 `needs/settings.json`。
 
-此后可直接运行：
+## 测试与验证
 
-```bash
-doge
-```
+门禁、隔离与常见假红见 [docs/DESIGN.md](docs/DESIGN.md) §9；Computer Use 实机验证见 [docs/COMPUTER_USE.md](docs/COMPUTER_USE.md) §6。本仓库约定 `test/` 只放一次性产物（结束清空），`tools/` 放可复用脚本（git 跟踪）。
 
-### 方式二：在其他项目中引用 link 包
+## 文档索引
 
-如果你要在别的工程里依赖它，可以使用：
+| 文档 | 内容 |
+|---|---|
+| [AGENTS.md](AGENTS.md) | 开发纪律、仓库地图、常用命令与门禁 |
+| [docs/DESIGN.md](docs/DESIGN.md) | 架构、API 协议、模型目录与路由、工具任务、MCP、存储、安全、测试、已知限制 |
+| [docs/COMPUTER_USE.md](docs/COMPUTER_USE.md) | CU 工具矩阵、授权、坐标、输入、验证 |
+| [development_logs.md](development_logs.md) | 可复用经验与坑、版本里程碑、已知欠账 |
 
-```bash
-bun link @doge-code/cli
-```
+## 上游与许可
 
-或者在 [`package.json`](package.json) 中写：
-
-```json
-{
-  "dependencies": {
-    "@doge-code/cli": "link:@doge-code/cli"
-  }
-}
-```
-
-## 使用 Git 直接源码级更新
-
-这个 Fork 很适合直接通过 Git 拉取更新，而不是走传统已发布包升级。
-
-典型更新流程：
-
-```bash
-git pull
-bun install
-bun link
-```
-
-含义分别是：
-
-- [`git pull`](README.md)：拉取最新源码改动
-- [`bun install`](README.md)：同步依赖变化
-- [`bun link`](README.md)：刷新全局 link 注册，确保命令入口与当前源码一致
-
-如果你本地就是长期用源码目录跑 [`Doge Code`](README.md)，这基本就是“源码级更新”的标准姿势。
-
-### 一个推荐工作流
-
-首次安装：
-
-```bash
-git clone <your-fork-or-repo-url>
-cd claude-code-rev
-bun install
-bun link
-doge
-```
-
-后续更新：
-
-```bash
-git pull
-bun install
-bun link
-doge
-```
-
-## 命令与包名
-
-运行 [`Doge Code`](README.md) CLI：
-
-```bash
-bun run dev
-```
-
-安装为全局命令后，默认命令名为：
-
-```bash
-doge
-```
-
-也就是说，这个 Fork 现在的目标入口名是 [`doge`](README.md)，而不是 [`claude`](README.md)。
-
-如果你使用 [`bun link`](README.md) 进行全局注册链接，那么现在注册出来的包名也不再是原版名，而是：
-
-```bash
-@doge-code/cli
-```
-
-输出版本号：
-
-```bash
-bun run version
-```
-
-## 说明与免责声明
-
-- 本仓库是 [`Claude Code`](README.md) 的 Fork：[`Doge Code`](README.md)
-- 它包含恢复期代码与后续 Fork 改动，不代表官方立场
-- 如果某些行为看起来“很像官方，但又不完全像”，那通常不是你看错了，而是这确实是恢复版 + 魔改版的叠加态
-- 如果某些文案偶尔带一点 ACG 味，那是彩蛋，不是类型系统坏掉了（至少不全是）
+- 上游 Anthropic Claude Code（还原源码树 + 本 Fork 改动），行为与官方存在差异，不代表官方立场。
+- `package.json` 声明 `"license": "SEE LICENSE IN LICENSE.md"`；本仓库未跟踪 `LICENSE.md`，许可沿用上游条款，分发/商用前自行核对上游许可与还原代码的合规边界。
+- 恢复期 shim 与还原代码可能与上游不同，见 [docs/DESIGN.md](docs/DESIGN.md) §10。

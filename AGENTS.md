@@ -1,6 +1,6 @@
 # AGENTS.md — Doge Code 仓库指南
 
-面向 AI 编码代理（Claude Code / Doge Code 等），假设读者对项目一无所知；内容基于当前仓库实际核实，不要凭空假设。**任何任务开始前先读第一节开发纪律。**修复历史（每条三行：问题/解决/位置）见 [development_logs.md](development_logs.md)。
+面向 AI 编码代理（Claude Code / Doge Code 等），假设读者对项目一无所知；内容基于当前仓库实际核实。**任何任务开始前先读第一节开发纪律。** 架构与机制见 [docs/DESIGN.md](docs/DESIGN.md)，可复用经验/版本索引/欠账见 [development_logs.md](development_logs.md)，定位与安装见 [README.md](README.md)。
 
 ## 一、开发纪律（硬性规定，违反即测试无效）
 
@@ -17,83 +17,62 @@
 6. **收尾必过 code-review 与全量测试回归**：每次完成开发，必须发起子代理对本轮改动做 code-review，并做好全量的功能测试与回归验证（单测 + 相关 e2e + `bun run version` 冒烟），review 与全量功能测试回归通过才算完成。
 7. **代码各司其职**：编码全程遵循高内聚低耦合、代码规范清晰，调试文字要少（能删则删，不留临时 console/debug 输出）。
 
-## 二、项目概述
+## 二、项目简述
 
-**Doge Code**（`@doge-code/cli`，全局命令 `doge`）是 Claude Code 的第三方 Fork：基底是从 source map 逆向还原的 Claude Code 源码树，其上做了自主魔改，聚焦多提供商 API 兼容与自托管接入。它不是官方上游镜像，行为与官方 Claude Code 存在差异。
+`@doge-code/cli`（命令 `doge`）是 Claude Code 的第三方 Fork：还原源码 + 自主二开，聚焦多提供商 API 兼容与自托管接入。
 
-- **核心设计**：内部代码始终使用 Anthropic Messages 格式，协议转换只发生在 API 边界，由 `CLAUDE_CODE_COMPATIBLE_API_PROVIDER` 选择提供商：`anthropic`（`/v1/messages`，SDK 直连）、`openai`（`src/services/api/openaiCompat.ts`）、`responses`（`src/services/api/responsesCompat.ts`；两者均为双向转换含流式回转，"实验性"是本仓库对稳定性的定性，代码内无对应标注）
-- **双密钥严格互斥**：`DOGE_API_KEY` → `x-api-key` header；`ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer`；并存时启动卫兵 `enforceApiKeyExclusivity`（`src/utils/apiKeyExclusivity.ts`）按激活 profile 裁决：删除落败一方的 env 并告警，不拒绝启动
-- **与官方 Claude Code 数据完全隔离（创始原则）**：全局配置目录 `~/.doge`（`CLAUDE_CONFIG_DIR` 可覆盖；注意全局配置文件名为 `~/.doge/.claude.json`，是隔离原则下保留的历史命名）。项目级一切资源（agents/skills/commands/settings 等）一律在 `<项目>/.doge/` 下，代码不读也不写任何 `.claude/` 路径。接触 `.claude/` 的例外共三处：`src/utils/ide.ts` 读官方 VSCode 扩展 lockfile、`src/utils/doctorDiagnostic.ts` 检测官方安装（均为有意的官方互操作）；`src/utils/sandbox/sandbox-adapter.ts` 对 `<cwd>/.claude/settings*.json` 与 `.claude/skills` 加 deny-write 沙箱保护（防写，非读写）
-- 技术栈：TypeScript（ESM）+ React JSX/Ink TUI；CLI 解析用 Commander（`src/main.tsx`）；运行时 Bun ≥ 1.3.5、Node ≥ 24，依赖以 `bun.lock` 为准；**无打包构建产物**，直接以 Bun 运行 TS 源码（分发 = git 源码 + `bun link`，无 CI）；`tsconfig.json` `strict: false`、别名 `src/*`；代码风格：多数文件无分号、单引号
-- **模型配置优先级**：启动时显式 env / settings.env 优先；`applyPersistedCustomApiEndpointEnv` 按显式 Profile 身份、主模型与连接定位 Profile，仅补齐缺失值，避免磁盘 A 档位混入启动 B。未指定启动主模型/连接时恢复持久化 activeProfileId；`/model` 默认会话级，`--save` 才固化。运行中 worker 保留创建时模型/连接快照，排障同时检查启动配置、活跃 Profile 与 worker 创建时间（详见 development_logs.md）
-- **高风险面**：`src/utils/computerUse/` 涉及真实键鼠注入与截图，改动需充分手动验证；API Key 持久化在 `~/.doge`（`.credentials.json`，另有 `~/.doge/.claude.json` 镜像与 `~/.doge/backups/` 备份），不得写入仓库、提交 git 或打进日志
+- **核心设计**：内部统一 Anthropic Messages，协议转换只在 API 边界（`src/services/api/{openaiCompat,responsesCompat}.ts` 双向转换 + 流式回转）；自定义接入由 `~/.doge/` 持久化数据驱动，不依赖官方登录态。
+- **数据隔离**：全局 `~/.doge`（`CLAUDE_CONFIG_DIR` 可覆盖）、项目级 `<项目>/.doge/`；不读写 `.claude/`，例外仅 IDE lockfile、doctor 检测、沙箱 deny-write 三处（DESIGN §8）。
+- **模型目录**：`~/.doge/model-catalog.json` 为单一事实源；旧 `customApiEndpoint` 只在启动迁移时读，之后不回退；`/model` 默认会话级，worker 保留创建时快照（DESIGN §4）。
+- **技术栈**：TypeScript（ESM）+ React/Ink；Commander（`src/main.tsx`）；Bun ≥1.3.5、Node ≥24；`bun.lock` 为准；无打包产物，Bun 直跑 TS；`tsconfig.json` `strict:false`、别名 `src/*`。
+- **高风险面**：`src/utils/computerUse/` 与 `packages/@ant/computer-use-mcp` 涉及真实键鼠/截图，改动必须实机验证；API Key 在 `~/.doge/.credentials.json`，不得入库、提交或打进日志。
 
-### 关键环境变量（完整语义见源码与 development_logs.md）
+### 关键环境变量（关键子集，完整语义见 DESIGN §3/§4 与源码）
 
 | 变量 | 用途 |
 |------|------|
-| `CLAUDE_CODE_COMPATIBLE_API_PROVIDER` | API 格式：`anthropic` / `openai` / `responses`（非法值回落 `anthropic`） |
-| `ANTHROPIC_BASE_URL` + `DOGE_API_KEY`（或 `ANTHROPIC_AUTH_TOKEN`） | 自定义端点 + 密钥（双密钥互斥） |
-| `ANTHROPIC_CUSTOM_HEADERS` | 每行 `Name: Value`，为每个 API 请求追加自定义头 |
-| `ANTHROPIC_MODEL` | 默认模型；`[1m]`/`[2m]` 后缀仅本地剥离用于上下文窗口计算，不发给 API |
-| `ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_MODEL` | 各层级 Agent 模型（未设时 fallback 到主模型） |
-| `CLAUDE_CODE_SUBAGENT_MODEL` | Task/subagent 层模型覆盖。留空或 `inherit` 时按工具参数、Agent 定义和父模型解析 |
-| `ANTHROPIC_SMALL_FAST_MODEL` | 轻量后台任务（haiku 层）模型 |
-| `CLAUDE_CODE_MODEL_CONTEXT_WINDOW` | 覆盖上下文窗口大小（token 数，如 `200000`） |
-| `CLAUDE_CODE_EFFORT_LEVEL` | `low` / `medium` / `high` / `xhigh` / `max`。独立 CLI 中 `unset`/`auto` 省略档位，工作流仍可显式指定请求级档位。桌面宿主的自动档采用模型目录默认值（xhigh/max 仅会话级） |
-| `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | 无视模型名单，强制启用 effort 参数（不放开 max/xhigh 门禁） |
-| `CLAUDE_CODE_DISABLE_EFFORT` | 禁用显式档位和目录默认档。自定义端点的档位与思考能力由 `~/.doge/model-catalog.json` 声明 |
-| `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` | 子进程密钥清理三态：未设=默认清除 doge 凭证；truthy=全量清单；falsy=关闭 |
-| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | 设 truthy（如 `1`）启用 teammate 群聊（亦可 `--agent-teams` 或 `/agent-teams`） |
+| `CLAUDE_CODE_COMPATIBLE_API_PROVIDER` | `anthropic` / `openai` / `responses`（非法值→持久化 provider→anthropic） |
+| `ANTHROPIC_BASE_URL` + `DOGE_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN` | 自定义端点 + 密钥（双密钥互斥） |
+| `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL` | 主模型与各层级模型；`[1m]`/`[2m]` 后缀仅本地剥离 |
+| `CLAUDE_CODE_EFFORT_LEVEL` / `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` / `CLAUDE_CODE_DISABLE_EFFORT` | effort 档位与门禁（自定义端点由 model catalog 声明） |
 | `DOGE_MODEL_SCOPE` | 模型切换作用域：`session`（默认）/ `global` |
 | `CLAUDE_CONFIG_DIR` | 覆盖配置目录（默认 `~/.doge`） |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | 关闭遥测/tips 等非必要网络流量 |
-| `CLAUDE_CODE_DISABLE_COMMAND_INJECTION_CHECK` | 关闭 Bash 命令注入检测（安全相关，慎用） |
-| `DOGE_RIPGREP_PATH` | 覆盖内置 ripgrep 二进制路径 |
-| `DOGE_HEADLESS_BUILTIN_MCP` | headless 模式下启用内置 MCP（含 Playwright） |
-| `DOGE_HEADLESS_AUTO_MEMORY` | App 长驻 headless 会话显式启用回合末自动记忆提取；普通一次性 `-p` 仍走上游灰度门 |
-| `DOGE_COMPUTER_USE_MCP` | 内置 Computer Use MCP 开关（`=0` 关闭，默认开启） |
-| `DOGE_PLAYWRIGHT_MCP` / `DOGE_PLAYWRIGHT_*` | 内置 Playwright MCP 开关与浏览器配置（`DOGE_PLAYWRIGHT_MCP=0` 同时关闭无头 `playwright` 与可见窗口 `playwright-headed` 两个服务） |
+| `DOGE_HEADLESS_BUILTIN_MCP` | headless 模式注册内置 MCP（CU/Playwright） |
+| `DOGE_COMPUTER_USE_MCP` / `DOGE_PLAYWRIGHT_MCP` | 内置 CU / Playwright MCP 开关（`=0` 关闭） |
+| `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` | 子进程密钥清理三态（未设=清 doge 凭证；truthy=全量；falsy=关） |
+| `CLAUDE_CODE_MODEL_CONTEXT_WINDOW` / `DOGE_HEADLESS_AUTO_MEMORY` | 壳注入的上下文窗口覆盖 / headless 自动记忆开关（App↔CLI 集成契约，勿删读侧） |
 
-- **Auto 自动计划（2.1.314）**：`autoPlan` 只标记模型从 bypassPermissions 进入的 Plan，手动 Plan（含旗标启动会话）保留交互；只读工具和当前计划文件可执行，配置/hook allow 不可越过边界。ExitPlan 自动回 Auto，不询问权限模式；切到其他模式统一清 prePlanMode/autoPlan。远程接入/新 prompt 保留自动 Plan；`plan_mode` attachment（含 compact）记录来源，历史按 snapshot 渲染。Auto 执行/收尾阶段禁止 AskUserQuestion，动态提示同时约束普通文本提问，不伪造提交/合并同意；需要实际规划时模型自行 EnterPlanMode。只有自动 Plan 内保留 CLI 单一300000ms人工询问期限，未提交按label末尾推荐标记自动选择（无推荐首项、多选全部推荐），结果诚实标自动来源；TUI与mailbox队首展示才起钟，stdio/MCP/无宿主/队友共用一次性决胜，切回 Auto 撤销活动/排队问题并忽略迟到回复，取消不终止模型回合。MCP elicitation 表单/URL retry 仍走共享自动应答并过 ElicitationResult hooks 与 SDK schema 校验，不挂询问队列；显式 deny 与 killswitch 保留。测试：tools/auto-{plan,question,question-channels,question-lifecycle,elicitation}.test.ts，App tools/verify-auto-{plan,question}.mjs 与 verify-im-remote R18。
+## 三、仓库地图（src 之外）
 
-## 三、仓库地图（src 之外的关键目录，勿误解/误删）
+- `needs/` — 面向 `~/.doge/` 的默认资源暂存（settings 模板、hooks、skills）；不被 src 直接引用。
+- `shims/` — 缺失原生/私有包的 `file:` 替身（`ant-computer-use-swift`、`ant-claude-for-chrome-mcp`、`*-napi`）；`package.json` 依赖实际指向这里。
+- `packages/@ant/` — 本地实体包：`computer-use-mcp`（工具/权限/批次/坐标）、`computer-use-input`（macOS 键鼠后端）、`computer-use-swift`（macOS 原生层，依赖实际指向 `shims/`）、`claude-for-chrome-mcp`。
+- `vendor/` — 原生模块源码；根级 `image-processor.node`。
+- `tools/` 可复用测试脚本（git）；`test/` 临时产物（不跟踪）；根文档见 §六。
 
-- `needs/` — 随仓库维护的默认资源暂存：hooks 脚本、`settings.json` 模板、skills 副本，面向 `~/.doge/`（其中 hook 命令指向 `~/.doge/hooks/`）；不被 src 直接引用，改动后需自行同步到目标位置
-- `shims/` — 缺失原生/私有包的本地 `file:` 替身（`ant-claude-for-chrome-mcp`、`ant-computer-use-swift`、`color-diff-napi`、`modifiers-napi`、`url-handler-napi`）
-- `packages/@ant/` — 本地实体包：`computer-use-input`（键鼠注入）、`computer-use-mcp`、`computer-use-swift`、`claude-for-chrome-mcp`
-- `vendor/` — 原生模块源码（`audio-capture-src`、`image-processor-src`、`modifiers-napi-src`、`url-handler-src`）
-- 根级 `image-processor.node`、`build/bin/` — 原生二进制与脚本
-- `tools/` — 可复用测试脚本（e2e、repro、probe、mock，git-tracked）；`test/` — 临时测试产物（用完即删，不跟踪）
-- `development_logs.md`、`README.md`、`computer_use.md`
+## 四、CLI 使用面
 
-### src 内 fork 特有子系统（无上游可对照，改动前先读对应模块）
+- **关键 flags**（`src/main.tsx`）：`-p/--print`、`--output-format text|json|stream-json`（stream-json 需 `--verbose`）、`--input-format`、`--settings`、`--mcp-config`、`--agents`、`--permission-mode`、`--dangerously-skip-permissions`、`--bare`（跳过 hooks/LSP/插件同步/auto-memory/CLAUDE.md 自动发现，认证仅 `DOGE_API_KEY`/apiKeyHelper）、`-w/--worktree`（配 `--tmux`）、`--agent-teams`、`--model`、`--effort`、`-c/--continue`、`-r/--resume`、`--debug[=<pattern>]`。
+- **子命令**：`mcp`（serve/add/add-json/remove/list/get/add-from-claude-desktop/reset-project-choices）、`auth login/status/logout`、`plugin`（含 `marketplace`）、`agents`、`doctor`、`update`/`install`、`auto-mode`、`im`、`completion`、`setup-token`；`server`/`ssh`/`open`/`remote-control`/`assistant` 在 `feature()` 门后且部分为恢复缺口（DESIGN §2/§10，勿当可用现状）；`up`/`rollback`/`task`/`log`/`error`/`export` 为 ANT-ONLY（本树不注册）。
+- **Hooks**：settings.json 可配，事件含 `PreToolUse`/`PostToolUse`/`Setup`/`SubagentStart`/`WorktreeCreate`/`FileChanged` 等（`src/utils/hooks/hooksConfigManager.ts`，样例 `needs/settings.json`）。
 
-`src/coordinator`（coordinator/worker 编排）、`src/buddy`（BUDDY 桌宠）、`src/voice`、`src/proactive`、`src/services/autoDream`、`src/memdir`（记忆目录）、`src/tasks`（`doge task`）、`src/remote` + `src/upstreamproxy`（远程/上游代理）、`src/bridge`（REPL 桥接）、`src/skills/bundled`（内置 skills，如 `/debug`）、`src/services/mcp/`（内置 MCP 体系：连接管理/OAuth/registry；computer-use 走 `packages/@ant/computer-use-mcp` + `src/utils/computerUse/hostAdapter.ts`）
-
-## 四、CLI 使用面（产品形态）
-
-- **关键 flags**（定义于 `src/main.tsx`）：`-p/--print`（headless）、`--output-format text|json|stream-json`、`--input-format`、`--settings <file-or-json>`、`--mcp-config`、`--agents <json>`、`--permission-mode`、`--dangerously-skip-permissions`、`--bare`（最小模式：跳过 hooks/LSP/插件同步/auto-memory/CLAUDE.md 自动发现等，认证仅走 `DOGE_API_KEY`/apiKeyHelper）、`-w/--worktree [name]`（配 `--tmux`）、`--agent-teams`、`--debug[=<pattern>]`
-- **子命令**：`mcp`（serve/add/add-json/remove/list/get/reset-project-choices）、`server`（HTTP 会话服务器）、`ssh <host> [dir]`（远程部署 + auth 隧道回连本地）、`open <cc-url>`（连接远端 server）、`auth login/status/logout`、`plugin`（含 `marketplace`）、`agents`、`doctor`、`update`/`install`、`rollback`、`auto-mode`、`remote-control`、`im`（IM 远程控制守护进程：多频道并存——自定义 bot 读 ~/.doge/im-remote.json（Telegram/飞书/企业微信智能机器人长连接），扫码网页频道读 ~/.doge/im-remote-web.json（独立文件：0.0.0.0 内嵌手机聊天页 + 令牌门 WS，QR=`http://<局域网IP>:<port>/#t=<token>`，主地址经 nicPriority 过滤排序——虚拟网卡〔中英文网卡名都要盖：vEthernet/VMware/vgate/蓝牙/Bluetooth/本地连接\*/Local Area Connection\*/Wi-Fi Direct〕与 169.254 排除、192.168 网段优先，勿回退 networkInterfaces 原序）；**localhost Bun.serve 必须 try/catch（端口被占同步抛，不接住=适配器在跑+状态文件停更的僵尸）；ImAdapterHandlers.onStopped 是终态回传通道（disconnected_event 类事件勿只在适配器内部置 stopped——daemon running 会谎报）；wecom 出站 ack 的 req_id 是透传的（无 aibot_ 前缀勿按前缀识别）；Auto 强切判定单点 utils/imRemote/autoMode.ts；daemon 日志记扫码 URL 必须 redactWebUrl（状态文件/monitor 帧保留完整）**；127.0.0.1 WS 会话自动接入（im/web 任一 token 均可）；无会话时暂存 prompt 并发 no_session 帧给壳唤起；飞书接收走官方长连接〔pbbp2 protobuf 帧，开发者后台需选「使用长连接接收事件」〕+ 历史轮询保底、双路 message_id 去重；每条入站消息前重读磁盘配对态，未捕获异常一律先落 im-remote-daemon.log；**配对按平台隔离（2.1.274）：`pairs`/`allowedUsersByPlatform`/`outboundChats` 三键均 daemon 属主、每平台各一份——/pair 按来源平台验码与消耗（跨平台码互斥）、broadcastIm 只发有配对用户的 bot 平台（web 恒放行）、出站会话绑定走 ImAdapter.bindChat 门后绑定（配对 force 接管、变更持久化 outboundChats、启动恢复——勿回退任何平台在门内自绑，勿把绑定改回内存态）**；模块 src/utils/imRemote/，详见 development_logs.md 第十二/十三节）、`assistant`、`completion`、`setup-token`；`up`/`task`/`log`/`error`/`export` 为 [ANT-ONLY]
-- **多形态入口**：`src/entrypoints/`（`sdk/`、`cli.tsx`、`init.ts`、`mcp.ts`）——TUI 之外还有 SDK、MCP server、HTTP server、SSH 远程等形态
-- **Hooks 系统**：settings.json 可配 hooks；doge 扩展了 `WorktreeCreate`/`WorktreeRemove` 等事件与 Setup/maintenance/init 触发（`src/utils/hooks/hooksConfigManager.ts`，样例见 `needs/settings.json`）
-
-## 五、常用命令与测试
+## 五、常用命令与门禁
 
 ```bash
-bun install / bun link      # 安装依赖并注册全局 doge 命令
-bun run dev                 # 启动 CLI/TUI（入口 src/bootstrap-entry.ts）
-bun run version             # 输出版本号，冒烟验证 CLI 可启动
-bun test <路径>             # bun:test 单测；裸跑会执行 src/ 与 tools/ 下全部测试文件（bun 自动跳过 node_modules），较慢，建议按路径过滤
-bun tools/e2e-xxx.ts        # e2e 为独立脚本直接运行（非 bun:test），自建 CLAUDE_CONFIG_DIR 临时沙箱并自清理
+bun install / bun link      # 安装并注册全局 doge（改 packages/@ant/* 后必须重跑 install）
+bun run dev                 # TUI（入口 src/bootstrap-entry.ts）
+bun run version             # 版号 + 冒烟
+bun test <路径>             # 定向 bun:test
+bun test                    # 全量裸测（src/ 与 tools/，较慢）
+bun tools/run-isolated-tests.ts   # 每文件独立进程 + CLAUDE_CONFIG_DIR 隔离
+bun tools/e2e-model-routing.ts    # e2e 直接运行（自建沙箱并自清理；其余脚本见 tools/）
 ```
 
-- package.json **没有** `lint`/`test`/`build` 脚本；单测与代码同目录（`*.test.ts`）；实机 e2e/repro/probe 脚本在 `tools/` 下（git-tracked、自带沙箱清理、可重复运行）
-- 改动后除单测外，`bun run version` 冒烟 + `bun run dev` 手动验证受影响路径
-- 调试：`--debug`（`--debug=<pattern>` 白名单、`!` 前缀黑名单，另有 `--debug-to-stderr`/`--debug-file`）、`/debug` 命令；日志在 `~/.doge/debug/<sessionId>.txt`
-- `~/.doge/` 布局：`settings.json`/`settings.local.json`、`.claude.json`（全局配置）、`projects`/`sessions`/`tasks`/`teams`/`plans`/`plugins`/`cache`/`file-history`/`shell-snapshots`/`backups`/`debug`
+**收尾门禁**：定向 `bun test` → 全量裸 `bun test`（改 afterAll reset 的连跑两次）→ `bun tools/run-isolated-tests.ts` → 相关 e2e/实机 → `bun run version` → `git -c core.whitespace=cr-at-eol diff --check` → 独立 review（Critical/Important 闭环）→ 清理 `test/`/后台任务/沙箱。调试用 `--debug`（pattern 白名单、`!` 前缀黑名单）、`/debug`，日志 `~/.doge/debug/<sessionId>.txt`。门禁细节与常见假红见 DESIGN §9。
 
-## 六、参考文档
+## 六、文档索引
 
-- [development_logs.md](development_logs.md) — 修复历史（每条三行：问题/解决/位置）
-- `README.md` — 项目定位、安装、更新流程（中文）；`computer_use.md` — Computer Use 专项说明
+- [docs/DESIGN.md](docs/DESIGN.md) — 架构、API 协议、模型目录与路由、工具任务、MCP、存储、安全、测试、已知限制
+- [docs/COMPUTER_USE.md](docs/COMPUTER_USE.md) — CU 工具矩阵、授权与坐标、输入与批次、实机验证
+- [development_logs.md](development_logs.md) — 可复用经验与坑、版本里程碑、已知欠账
+- [README.md](README.md) — 定位、安装、更新、常用命令

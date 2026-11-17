@@ -1,69 +1,98 @@
-# development_logs.md — Doge Code 开发日志
+# development_logs.md — Doge Code 开发经验与版本索引
 
-仅保留最近 10 条，每条三行：问题 / 解决 / 位置与验证。历史实现以 git 记录为准，测试统一遵守 [test_specification.md](test_specification.md)。
+只保留「不看代码就会再踩」的经验、版本里程碑索引与已知欠账；完整逐轮历史以 `git log` 为准，架构现状见 [docs/DESIGN.md](docs/DESIGN.md)，Computer Use 见 [docs/COMPUTER_USE.md](docs/COMPUTER_USE.md)。**文件名保持 `development_logs.md`**：`src/hooks/useMainLoopModel.ts` 注释引用了「development_logs.md §25 模型切换统一入口」；旧 §25 已并入本文 §1.3（模型目录/协议转换），勿改名。
 
-## 2026-11-17 模型目录路由及思考参数回归（2.1.345）
+## §1 可复用经验与坑
 
-1. 问题：宿主切模重放磁盘配置，目录默认档绕过档位禁用，输出上限未接线，Responses 流未展示思考。
-2. 解决：宿主管理会话只接受宿主路由。按当前连接读取目录配置及输出上限，统一档位停用与思考预算，转换 Responses 思考事件并保留重试时的显示规则。
-3. 位置：`src/utils/model/`、`src/utils/managedEnv.ts`、`src/services/api/`。独立复审、202 项定向单测、三协议模型路由与档位切换端到端、`bun run version` 通过。
+### 1.1 headless / SDK 协议
 
-## 2026-11-15 Windows 27 工具、窗口诊断与点击时效（2.1.339）
+- `initialize` 必须是第一条 stdin 消息，应答与命令清单是双层 `response.response.*`；权限询问走 `can_use_tool`，同一 `tool_use_id` 的重复 `control_response` 必须去重；`--output-format=stream-json` 必须配 `--verbose`（print.ts:825）。
+- **事件顺序有语义**：先 drain `task_started/task_progress`，再 `task_notification`，最后 `session_state_changed(idle)`；`idle` 是回合真正结束的权威信号（后台 agent 会延迟 result），宿主别用 assistant/result 猜终态。
+- 默认 `-p` 不注册内置 MCP；桌面壳长驻 headless 用 `DOGE_HEADLESS_BUILTIN_MCP=1` 显式开。没有 `onPermissionRequest` 的会话调 `request_access` 返回 `feature_unavailable`，不是空授权成功。
 
-1. 问题：独立窗口发现、前台激活、诊断和桌面状态缺失。已绑定窗口内容变化仍可按旧图点击，UAC 真拒绝丢失 Win32 1223，性能和工具契约缺基线。
-2. 解决：三个 Win32 独立入口与合并桌面诊断组成 27 工具。授权按实际 exe 完整路径过滤，拒绝同名外部窗口。仅激活保留绑定和坐标空间。绑定点击比较截图几何和 9×9 邻域。错误返回类别、阶段及恢复指引，管理员启动通过原生错误码识别真正拒绝。
-3. 位置：`@ant/computer-use-mcp`、`src/utils/computerUse/{executor,hostAdapter,platforms/win32,win32/,wrapper.tsx}`、实机夹具与性能脚本。独立复审通过。176/176、27 项 MCP 注册、窗口隔离和截图变化、普通与管理员真实输入、UAC 拒绝、原生 EDIT、Chromium、Qt Android 事件和 CLI 版本冒烟均已核验。管理员输入断言通过后，旧夹具清理出现 Windows 目录占用，进程随后退出，夹具改为发送退出文件并等待两实例退出。单独的无管理员账户与受限令牌实机测试仍待验证。
+### 1.2 Task / Agent / Workflow
 
-## 2026-11-15 Windows Computer Use 窗口身份、输入与清理（2.1.338）
+- 终态事件由各 task 实现自己发，`src/tasks/stopTask.ts` 只查活+kill+返回身份；shell 停止要 join `pendingShellKill`，等 OS 回收后再 ACK。
+- `task_started` 在 resume 的终态任务重跑时会再次发出，不要把 task_id 当一次性 key；该事件带 `command`/`output_file`。后台输出在系统临时目录（`src/utils/task/diskOutput.ts`），5GB 上限、默认 8MB tail。
+- 回合末 closeout（`src/utils/task/backgroundTaskCloseout.ts`）只**提示**主模型处理仍在跑的后台 shell，不自动杀；子任务完成≠临时服务该继续跑。
+- Agent 创建时 `captureModelEnvironment()` 快照连接/认证/模型（`src/utils/model/runtimeModelContext.ts`），父会话之后切模不改写已有 worker；profile 被删要显式报错。
+- Workflow 是 `local_workflow` 伞任务，跨 API 子步骤子进程要带 `--verbose`/独立 effort，中断续跑走 `checkpoint.ts`；teammate 用 `onStopped` 回传终态，`in_process_teammate` 的 `task_progress.is_idle` 供宿主判占用锁。
 
-1. 问题：完整 exe 路径仍可能误绑同名进程，WinForms 子控件不响应顶层合成点击和换行，分解拖拽在宿主调用中提前释放。批次权限预检与管理员助手取消有缺口。
-2. 解决：窗口发现仅返回确切授权 exe 的窗口，显式选择和打开时重验窗口身份。WinForms 点击与键盘使用真实焦点控件，保持按住状态至显式释放或回合清理。批次预检静态权限、键名和截图保存能力。统一令牌 SID 完整性读取，助手动作经 stdin 转发，通过客户进程句柄取消，助手失联后可恢复本地释放。
-3. 位置：`@ant/computer-use-mcp`、`src/utils/computerUse/{executor,wrapper,platforms/win32,win32/}`、`computer_use.md` 及 Windows 夹具。独立 review 复审通过，172/172 单测及 `bun run version` 通过。普通和管理员输入、原生 EDIT、Chromium、Qt Android 真实触摸事件、同名 exe 发现与绑定、可信嵌入正反例和只读截图通过。App 安装版 0.2.240 覆盖真实拖拽事件、截图、Esc、窗口发现和批次预检。
+### 1.3 模型目录 / 协议转换
 
-## 2026-11-14 Windows 新进程接管与坐标代际修复（2.1.337）
+- `~/.doge/model-catalog.json` 是唯一事实源；旧 `customApiEndpoint` 只在启动迁移时读一次，之后旧存储里的 model 配置物理删除，**不要再加回退**。
+- `/model` 三条路径不可合并：匹配 profile → 原子切连接+模型；档位别名 → 当前连接内解析；裸模型名 → 只写 AppState。默认会话级，`--save`/`DOGE_MODEL_SCOPE=global` 才持久化；档位别名始终只作用会话。
+- 主模型解析单入口 `resolveMainLoopModel`：`mainLoopModelForSession > mainLoopModel > 默认设置`；**不要把 `customApiStorage.model` 加回链**（写延迟导致状态栏/请求错位，原 §25 根因）。`[1m]`/`[2m]` 只本地剥离，密钥不得进入模型身份/日志。
+- 双密钥在 settings env 落地后裁决（`src/utils/apiKeyExclusivity.ts`），只认激活 profile 的 `authTokenType`；不要按「key 更新/更长」猜。
+- effort 由 catalog `ReasoningPolicy` 决定 wire 字段，网关不支持必须 `downgraded` 且 UI 标 `applied`；400 后按「连接+provider+baseURL+模型」路由键进程内禁用该 policy。三协议图片/tool-result 配对是高频回归点（2.1.307），只 keep-alive 的空 SSE 流要设上限。
 
-1. 问题：绑定 Explorer 启动游戏后仍长期截图/点击旧 Explorer，模型转 Bash 并混用逻辑/物理坐标；自动解绑若不清坐标，还会在并发下让新目标收到旧绑定输入。
-2. 解决：绑定后新启动且不同的前台进程自动解除旧绑定，旧进程后台操作不受影响。使用单调 binding revision：输入/zoom 比较调用 revision，截图记录捕获前 revision 并在返回前复核；同一变化只清一次锚点，延迟旧图不得覆盖新图。模型不得用 shell 绕过目标/权限或混用自定义截图坐标。
-3. 位置：`src/utils/computerUse/{platforms/win32.ts,executor.ts,setup.ts}`、`packages/@ant/computer-use-mcp/src/` 与原生夹具。相关测试 92/92；普通/管理员原生全套及双进程正反例通过，真实新进程前台接管会解除旧绑定。多轮独立审查最终 Approve，无剩余 Critical/Important。
+### 1.4 Computer Use / Windows
 
-## 2026-11-14 Windows 高 DPI 命中修复与 Computer Use 调用收敛（2.1.336）
+- 坐标三条铁律：Windows 命中前必须启用并验证 **Per-Monitor-V2** 再调 `WindowFromPoint`（否则空命中让模型重试到 64+ 次，2.1.336 根因不是 UIPI）；绑定窗口 origin=(0,0) 与全屏两空间，真实输入只加一次 `GetWindowRect` 偏移，`switch_display` 显式解绑并清锚点；输入/zoom 前比较 `boundRevision`、截图返回前复核，迟到旧图不得覆盖新锚点。
+- UAC 永远由用户处理：检测到即起 30 秒期限（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报，提示后必须重新截图；只有高完整性目标才请求管理员 PowerShell 助手（命名管道+属主校验），普通目标切回本地。
+- SendMessage 不是通用协议（Chromium/自绘忽略）；bound HWND 的直接文本必须走真实 Unicode `SendInput + KEYEVENTF_UNICODE`（stdin base64 传文本），不要回后台 `WM_CHAR`；双/三击同一脚本完成，系统 click count 会出现 `1,2,1`。
+- 身份 fail-closed：完整 exe 路径、可信宿主（真实父/根关系+祖先链）、deny 优先、未知前台拒绝；窗口 owner 不是安全边界；便携 exe 用自身目录为 cwd。
+- 验证只看 UI/像素/独立 `GetCursorPos`，不看「已派发」文案。
 
-1. 问题：一次启动器任务出现 64+ 次工具调用，含 26 次截图和多次重复点击。原始记录证明主要根因不是 UIPI，而是共享目标解析未启用 Per-monitor-V2，却把物理像素传给 WindowFromPoint，导致空命中/误命中和反复重试。
-2. 解决：前台与指针 HWND 求值前统一启用并验证 Per-monitor-V2，与截图和输入坐标一致；不增加启动器特例或 UIA 产品回退。双进程夹具移到主屏右下高物理坐标，保留可信/不可信宿主反例。
-3. 位置：`src/utils/computerUse/platforms/win32.ts`、`tools/computer-use-host-target-e2e.ts`。定向 104/104、普通/管理员原生全套及真实双进程测试通过；真实启动器全局最小化用 switch_display+screenshot+left_click 共 3 次调用成功，独立审查 Approve。
+### 1.5 浏览器 / Playwright / MCP
 
-## 2026-11-14 Windows 通用宿主目标解析与授权（2.1.335）
+- Playwright 在 Bun 下无法驱动浏览器（pipe/WS 传输均超时），内置浏览器 MCP 必须是 **Node stdio 子进程**；没有 Node 时不注册假服务。
+- `playwright`（无头）/`playwright-headed`（可见）会话独立；桌面镜像链路是 App 注入 `DOGE_APP_PLAYWRIGHT_BRIDGE`、CLI 只把脚本前置到**无头** argv，bridge 在 App 侧拉起无头浏览器并以 `--cdp-endpoint` 接管，headed 不挂桥。
+- 内置 Playwright 用服务级 `mcp__<server>__*` allow 规则，不硬编码上游工具名；浏览器类请求优先 Playwright，显式桌面窗口/原生对话框才用 CU。
 
-1. 问题：全局命中只看实际子进程，内嵌渲染器与启动器主程序身份不同会反复阻塞；前台和指针校验曾分叉，简单 owner 继承又会被伪造。
-2. 解决：前台与 WindowFromPoint 共用实际/根宿主 PID、exe 与信任解析；仅 GA_ROOT 父/根关系加真实进程祖先链可让宿主覆盖内嵌技术身份，owner 不参与授权。实际与宿主的显式拒绝和安装别名 policy deny 均优先，未知目标拒绝输入。共享 resolveTargetAccess 统一 read/click/full 判断。
-3. 位置：`src/utils/computerUse/{platforms/win32.ts,executor.ts}`、`packages/@ant/computer-use-mcp/src/{executor.ts,toolCalls.ts}`、`tools/computer-use-host-target-e2e.ts`。定向 104/104，普通/管理员原生全套通过；真实双进程正向可信点击与反向外部进程嵌入拒绝均通过，独立审查 Approve。
+### 1.6 构建 / 发布
 
-## 2026-11-14 Windows 高完整性应用管理员助手（2.1.334）
+- 本仓库无构建产物，Bun 直跑 TS；改 `packages/@ant/*` 或 `shims/*` 后必须 `bun install`，否则单测过而 CLI/e2e 跑旧副本；桌面壳重编内置 CLI 前同样先刷新 CLI file: 依赖并记录对应 CLI commit。
+- 版本号只在产品/安装包轮递增（纯文档轮不递增、不复用）；提交用简短祈使句；`ANT-ONLY import markers must not be reordered` 的 import 禁止重排。
 
-1. 问题：UAC 消失后，仍以高完整性级别运行的启动器受 UIPI 限制，普通 Computer Use 无法输入，绑定 PrintWindow 实测 Access denied；并非所有 UAC 应用都如此。新增助手还需避免取消后输入、授权切换、并发助手和孤儿进程。
-2. 解决：仅对已授权的高完整性目标请求一次常驻管理员 PowerShell，经同用户随机命名管道执行输入/窗口截图；普通目标保持本地执行。保留 30 秒人工 UAC 决策，补齐真实命中/准备后授权复核、事务串行化、取消传播、延迟键鼠释放。助手以父 PID+启动时间识别属主，并用异步管道等待确保强杀属主后退出。
-3. 位置：`src/utils/computerUse/{platforms/win32.ts,executor.ts,wrapper.tsx,win32/}`、`packages/@ant/computer-use-mcp/src/` 及原生夹具。最终定向 102/102；普通与真实管理员 WinForms 全套（截图、点击、拖拽、Unicode、滚轮、holdKey、computer_batch）均通过；强制结束属主后 broker 退出。多轮独立审查最终 Approve，无剩余 Critical/Important。
+### 1.7 测试 / 隔离
 
-## 2026-11-14 Windows UAC 等待与输入权限提示（2.1.331）
+- 裸 `bun test` 暴露共享进程交互，`bun tools/run-isolated-tests.ts` 每文件独立进程+独立 `CLAUDE_CONFIG_DIR`；二者互补，隔离器通过不能替代裸测。
+- 环境变量是最大污染源（CONFIG_DIR/BASE_URL/PROVIDER/双密钥/OAuth/RETRY/TERM_PROGRAM/模型 env），测试显式隔离；模型测试要同时 reset `runtimeModelContext`/`managedEnv`/config cache/`getAutoMemPath.cache`，`beforeEach` 与 `afterAll` 都做。
+- 全局 `mock.module()` 会污染后续文件（withRetry 分类、sdkEventQueue 导出、OAuth FD token 泄漏都发生过），优先真实模块+局部 fixture；`saveGlobalConfig` 是合并更新，清字段用 `= undefined`。
+- `file:` 依赖是静态副本；Bun `spawnSync.timeoutMs` 无效（用 Node `spawnSync.timeout`）；真实 UI 验证要等 boot 首标签、真实键入通道；产物只进 `test/` 并清空。
 
-1. 问题：Windows 提权提示会阻塞启动，旧流程没有回合级人工等待，也会在部分输入路径上把 UIPI 拒绝视作已发送。本机鸣潮快捷方式的入口是 `asInvoker`，真正的启动器和游戏主程序声明 `requireAdministrator`。
-2. 解决：按 Windows 登录会话检测 UAC，在 Computer Use 持锁期间跟踪 30 秒期限。由用户操作系统提示，超时中止回合并上报原因。提示结束后重新截图才可输入。检查绑定 HWND、全屏键盘前台和鼠标命中窗口的完整性级别。取消会中止启动子进程和重复键盘操作，鼠标清理等用户桌面恢复后再执行。
-3. 位置：`src/utils/computerUse/{wrapper.tsx,cleanup.ts,platforms/win32.ts,win32/}`、回合流与 MCP 调度。定向单测 152 项、CLI 版本冒烟和独立复审通过。WinForms 夹具首次通过，后续运行和基线均复现最小化后无法抢回前台。真实 UAC 验证允许后撤下提示、约 30.094 秒终止回合、无后续模型请求、可见停止原因和锁释放。真实提权窗口的绑定输入返回 UIPI，全屏键盘未在提权窗口位于前台时验证。
+### 1.8 数据 / 密钥
 
-## 2026-11-13 Playwright 双浏览器与 Computer Use 开关（2.1.330）
+- 全局 `~/.doge`、项目 `<项目>/.doge/`；唯一读写 `.claude/` 的三处例外是 IDE lockfile、doctor 检测、沙箱 deny-write，不要新增。凭证/目录 `0600`/`0700`，配置备份剥离明文 key。
+- `cleanupPeriodDays` 只清旧 `.jsonl/.cast`、tool-results、plans、file-history 等目标；`projects/**/memory/` 与会话转录是用户数据，**不可当垃圾全删**。
+- `computer-use.lock`、`im-remote*.json`、team inbox、task 输出可能含敏感内容；调试脱敏（IM 扫码 URL 记日志必须 `redactWebUrl`）。
 
-1. 问题：内置 Playwright 只有固定无头模式，模型和用户不能选择可见浏览器；Computer Use 没有关闭出口。审查发现模式选择提示词未从 `setup.ts` 导出，新增双服务还必须保留 `DOGE_PLAYWRIGHT_HEADLESS=0` 的旧可见行为。
-2. 解决：注册 `playwright`（无头）与 `playwright-headed`（可见）两个真实 Node stdio MCP 服务，共享工具集和 server-wide 权限，保留名与诊断覆盖两者；实际消费模块重新导出模式选择提示，legacy 环境变量保留原服务可见行为并在提示中明确。`DOGE_COMPUTER_USE_MCP` 显式 falsy 时跳过 Computer Use 注册，桌面壳的两个总开关均经真实 `system/init` 验证。
-3. 位置：`src/{main.tsx,utils/playwrightMcp/,utils/computerUse/gates.ts,services/mcp/config.ts,services/analytics/metadata.ts}`、对应单测与 `tools/e2e-playwright-mcp.ts`。按要求仅做相关回归：定向单测 26/26，提示词实际导出探针通过，两种服务各 24 个工具的握手、权限与真实浏览器导航/快照通过；App 安装版四种开关场景与双服务进程均通过，独立初审问题全部修复后复审 Approve。`bun run version`=2.1.330，未跑全量回归。
+### 1.9 勿回退清单（历史事故）
 
-## 2026-11-13 Windows 全屏与绑定窗口双坐标空间修复（2.1.329）
+- IM：`localhost Bun.serve` 必须 try/catch；`onStopped` 是终态通道；wecom 出站 ack `req_id` 是透传值；配对按平台隔离（`pairs`/`allowedUsersByPlatform`/`outboundChats` 每平台一份）；`bindChat` 门后绑定并持久化；主地址排序经 `nicPriority`，勿回退 `networkInterfaces` 原序。
+- Auto：只标记从 bypassPermissions 进入的 Plan；手动 Plan 保留交互；ExitPlan 自动回 Auto；切其他模式清 `prePlanMode/autoPlan`；自动执行/收尾禁止 AskUserQuestion。零询问语义不可回退**只隐藏卡片不够**（CLI 会继续等）：必须由 CLI 权限层真拒绝并注入动态提示词；`AUTO_QUESTION_TIMEOUT_MS=300000` 内单次人工询问期，无「(推荐)」取首项、多选全取推荐，答案带 `_autoQuestionAnswerSource`；禁止伪造用户同意（提交/合并/危险操作不下发）；切回 Auto 要撤销仍在活跃/排队的过期问题；Elicitation 走同一自动应答并经过 hooks/schema。
+- CU：以 `computer-use.lock` 为 UI 真值，不用 assistant/result 猜；子代理不启动 CU 会话；不全局广播 Esc。
+- 模型/测试：不给 tmux 队友命令行加认证密钥；不把 `customApiStorage.model` 加回主模型链；不改 `tools/` 脚本求绿；不用新 key 绕过本应 storage 自愈的测试。
 
-1. 问题：`open_application` 后 HWND 永久接管截图与坐标，`switch_display` 不能回到全局；无绑定时键盘、文本、拖拽和按下/释放直接报错，全屏截图前同步枚举显示器还会间歇性 PowerShell 超时，导致全屏 Computer Use 与批处理不可用。
-2. 解决：`switch_display` 显式解绑并选择全屏，补齐全局真实输入；切换与活动调用互斥、目标代际阻止迟到截图、部分失败也清坐标锚点，换绑前释放按钮。捕获后统一缩放并携带显示器数量，像素输入复用截图几何；授权身份统一路径规范化与 shell/exe 别名证据，deny 双向优先且未知前台仍 fail-closed。安装版补丁用 `QueryFullProcessImageName` 恢复 MainModule 不可读进程的真实 exe，完整路径精确匹配优先于显示名宽松匹配；本地 exe 文件存在即可授权且保留原应用 tier，静态应用项缓存与每次实时窗口枚举分离，避免授权被注册表 GUID 抢占。
-3. 位置：`packages/@ant/computer-use-mcp/src/`、`src/utils/computerUse/{executor,wrapper.tsx,setup.ts,platforms/,win32/processImage.ts}`、相关单测与 `tools/computer-use-{e2e,input-fixture-e2e}.ts`、专项文档。按要求仅做相关回归：定向单测 109/109、真实 WinForms 绑定及全局输入和批次全通过、连续 10 次全屏截图通过；独立多轮 review 最终 Approve，无剩余问题。开发版黑盒与安装版结果见邻仓 App 日志，未跑全量回归。
+## §2 版本里程碑索引
 
-## 2026-11-13 Windows 便携应用与 Computer Use 稳定性修复（2.1.326）
+### 2.1 2.1.34x 近期
 
-1. 问题：未注册便携应用经 `open_application` 冷启动反复失败，中文路径已授权仍被判未授权，截图与 `computer_batch` 偶发 PowerShell 超时并诱导模型绕圈。实测分别发现 PowerShell 非 UTF-8 输出破坏中文路径、exe 继承 CLI 工作目录导致 PvZ `FATAL ERROR`、Unicode 进程名被过滤、装饰性 DWM 边框可否决打开、授权别名重复、`shell:AppsFolder` 覆盖真实 exe，以及 Windows 授权路径斜杠/大小写不一致。
-2. 解决：PowerShell 同步/异步输出统一 UTF-8；所有已解析 exe 以自身目录为工作目录并用 `-LiteralPath`；进程名保留 Unicode；边框改为 best-effort；授权按 bundleId 去重并同步等级提示/计数；StartApps 的真实 exe 直接保留原路径，合并按真实 exe > shell 别名 > 普通项；`open_application` 仅在 Windows 规范化路径斜杠和大小写且始终使用原授权身份。批次协议、权限 tier、坐标与取消语义不变。
-3. 位置：`src/utils/computerUse/{platforms/win32,win32/{appLaunch,installedApps,powerShell,windowBorder,windowGuard}}.ts`、`packages/@ant/computer-use-mcp/src/toolCalls.ts` 及对应测试、`tools/computer-use-win32-unicode-e2e.ts`、`computer_use.md`、`test_specification.md`。按用户要求仅做相关回归：单测 80/80、真实 `computer_batch` 中文输入+批次截图连续 3 轮、WinForms 25/25、PvZ 正常主窗口连续 10 次截图、关闭状态枚举真实 exe 全通过；独立多轮 review 最终 Approve，无剩余 Critical/Important/Minor。安装版冷启动与批次结果见邻仓 App 日志，未跑全量回归。
+| 版本 | 里程碑 |
+|---|---|
+| 2.1.340 | 中断的 headless 回合显式上报 |
+| 2.1.343 | Browser Use 路由到指定浏览器并保留 shell 工具 |
+| 2.1.345 | 模型目录/思考策略回归修复（目录默认档、输出上限、Responses 思考、重试显示）；桌面壳 headless Playwright bridge + `task_started` command/output_file |
+
+### 2.2 更早区间（每行一个主题群，细节 `git log`）
+
+- **2.1.261（2026-09）**：设定真实版本；完成 `.doge` 项目资源隔离、双密钥互斥、session 级模型切换、Auto 模式、内置 CU 常开与内置 Playwright MCP。
+- **2.1.264–2.1.274**：IM 远程控制（多频道、配对按平台隔离、bindChat 持久化、飞书长连接）。
+- **2.1.276–2.1.287**：`/shell` 解释器切换；声明式 Workflow（MD 即命令、跨 API 子进程步骤）；Auto 零询问/自动规划；Workflow 使用量与 session 历史修复。
+- **2.1.292–2.1.298**：MCP/工作流边界、keep-alive SSE 上限、图片容器校验、gateway usage 防通胀、三协议 4xx 恢复、SF 工具块清洗。
+- **2.1.299–2.1.306**：图片路径粘贴修复；workflow 中断/可恢复；主会话自主 closeout；模型 profile 路由与 worker 上下文隔离。
+- **2.1.307–2.1.313**：OpenAI tool-result 图片顺序修复；effort 能力矩阵；模型会话保护/agent 解析统一；`/clear` 保留配置；中断消息事务化编辑。
+- **2.1.314–2.1.317**：Auto 提问限 Plan、TUI 布局与历史滚动、Windows 剪贴板编码、移除旧 `.doge` 路径兼容；headless 自动记忆恢复；OpenAI web search/fetch 兼容；Windows CU Esc 生命周期。
+- **2.1.319–2.1.330**：CU 可靠性/Unicode/DPI/应用激活/便携应用/双坐标空间/全屏解绑；Playwright 双服务 + CU 开关。
+- **2.1.331–2.1.339**：Windows CU UAC 30s 等待、管理员助手、通用宿主解析、Per-monitor-V2 命中、新进程接管/坐标代际、窗口身份与清理、27 工具与点击时效。
+
+## §3 已知欠账 / 待验证
+
+1. **macOS CU 实机**：`@ant/computer-use-swift` 为 shim（空白截图、TCC 恒 false），macOS CU 不可用且未实测。
+2. **Windows 受限场景**：无管理员账户、受限令牌/低完整性、混合 DPI 多屏、UAC 后仍提权窗口的绑定输入未覆盖。
+3. **旧 catalog 迁移遗留**：只覆盖 `customApiEndpoint` 的 `modelProfiles`/`model`；同名 provider 重复由 `dedupeModelProfiles` 兜底，手工异常 catalog/`settings.model` 残留未逐一实测。
+4. **恢复缺口**：`src/server/`（server/sessionManager/backends）与 `src/ssh/` 端到端未通；`server`/`ssh`/`open` 属设计保留面。
+5. **Playwright 镜像**：依赖 App 侧 `bridge.cjs` 与 `DOGE_APP_PLAYWRIGHT_BRIDGE`，CLI 只透传；无 App 不能验证镜像链路。
+6. **IM**：Telegram/飞书/企业微信真实账号长连接、扫码网页频道的防火墙/多网卡排序仍需安装版实测。
+7. **其他**：Linux CU 未注册；本树 ANT-ONLY 面（`up/rollback/task/log/error/export` 等）不注册；SDK 运行时在外部包。
