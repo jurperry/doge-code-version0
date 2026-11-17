@@ -1,8 +1,15 @@
 import { test, expect } from 'bun:test'
 import { evictTerminalTask, PANEL_GRACE_MS, registerTask } from './framework.js'
-import { setSdkEventTap } from '../sdkEventQueue.js'
+import { getTaskOutputPath } from './diskOutput.js'
+import { setSdkEventTap, type SdkEvent } from '../sdkEventQueue.js'
 import type { TaskState } from '../../tasks/types.js'
 import type { AppState } from '../../state/AppState.js'
+
+type TaskStartedEvent = Extract<SdkEvent, { subtype: 'task_started' }>
+
+function findTaskStarted(events: SdkEvent[]): TaskStartedEvent | undefined {
+  return events.find((event): event is TaskStartedEvent => event.subtype === 'task_started')
+}
 
 type AnyTask = Record<string, unknown>
 
@@ -92,4 +99,55 @@ test('an old completion cannot consume the resumed invocation notification', asy
   } finally {
     setSdkEventTap(undefined)
   }
+})
+
+test('registerTask reports the output file and command for a background shell task', () => {
+  let state = { tasks: {} } as unknown as AppState
+  const events: SdkEvent[] = []
+  setSdkEventTap(event => { events.push(event) })
+  const setState = (updater: (previous: AppState) => AppState) => { state = updater(state) }
+  try {
+    const task = {
+      id: 'bash-1',
+      type: 'local_bash',
+      status: 'running',
+      description: 'background shell',
+      command: 'echo hello',
+      notified: false,
+      isBackgrounded: true,
+    } as unknown as TaskState
+    registerTask(task, setState)
+  } finally {
+    setSdkEventTap(undefined)
+  }
+
+  const started = findTaskStarted(events)
+  expect(started).toBeDefined()
+  // The path is knowable at registration even though the task writes the file lazily.
+  expect(started?.output_file).toBe(getTaskOutputPath('bash-1'))
+  expect(started?.command).toBe('echo hello')
+})
+
+test('registerTask reports the output file but no command for a non-shell task', () => {
+  let state = { tasks: {} } as unknown as AppState
+  const events: SdkEvent[] = []
+  setSdkEventTap(event => { events.push(event) })
+  const setState = (updater: (previous: AppState) => AppState) => { state = updater(state) }
+  try {
+    const task = {
+      id: 'agent-1',
+      type: 'local_agent',
+      status: 'running',
+      description: 'worker',
+      toolUseId: 'spawn',
+    } as unknown as TaskState
+    registerTask(task, setState)
+  } finally {
+    setSdkEventTap(undefined)
+  }
+
+  const started = findTaskStarted(events)
+  expect(started).toBeDefined()
+  expect(started?.output_file).toBe(getTaskOutputPath('agent-1'))
+  expect(started?.command).toBeUndefined()
 })

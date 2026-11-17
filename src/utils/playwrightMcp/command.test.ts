@@ -87,6 +87,31 @@ test('headless option controls the CLI flag for the two browser modes', () => {
   expect(buildPlaywrightMcpCommand({ headless: true })!.headless).toBe(true)
 })
 
+test('a bridge script is prepended before the CLI entrypoint', () => {
+  // The desktop shell runs its own browser bridge (which starts a local
+  // headless Chrome/Edge and adds --cdp-endpoint) in front of the CLI, so Node
+  // executes the bridge with the CLI path as its first argument.
+  const bridge = join(tmpdir(), 'doge-playwright-bridge.js')
+  const plain = buildPlaywrightMcpCommand()!
+  const bridged = buildPlaywrightMcpCommand({ bridge })!
+
+  expect(bridged.args[0]).toBe(bridge)
+  expect(bridged.args[1]).toBe(resolvePlaywrightCliPath())
+  expect(bridged.args.slice(2)).toEqual(plain.args.slice(1))
+  expect(bridged.command).toBe(plain.command)
+  expect(bridged.browser).toBe(plain.browser)
+  expect(bridged.headless).toBe(plain.headless)
+  expect(bridged.executablePath).toBe(plain.executablePath)
+})
+
+test('without a bridge the CLI entrypoint stays first', () => {
+  for (const options of [undefined, {}, { bridge: '' }]) {
+    const cmd = buildPlaywrightMcpCommand(options)!
+    expect(cmd.args[0]).toBe(resolvePlaywrightCliPath())
+    expect(cmd.args[1]).toBe('--browser')
+  }
+})
+
 test('an explicit executable path wins over auto-detection', () => {
   process.env.DOGE_PLAYWRIGHT_EXECUTABLE_PATH = 'C:\\custom\\chrome.exe'
   const cmd = buildPlaywrightMcpCommand()!

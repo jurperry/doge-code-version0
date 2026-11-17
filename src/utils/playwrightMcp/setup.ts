@@ -33,6 +33,16 @@ export function isPlaywrightMCPEnabled(): boolean {
 }
 
 /**
+ * Absolute path of the desktop shell's browser bridge script, if it injected
+ * one. Only meaningful for headless servers: headed windows are already visible
+ * to the user, so they keep launching the browser themselves.
+ */
+function headlessBridgePath(): string | undefined {
+  const raw = process.env.DOGE_APP_PLAYWRIGHT_BRIDGE?.trim()
+  return raw && existsSync(raw) ? raw : undefined
+}
+
+/**
  * Build the dynamic MCP config + allowed tool names for the built-in
  * Playwright servers. Mirrors `setupComputerUseMCP`.
  *
@@ -60,6 +70,7 @@ export function setupPlaywrightMCP(): {
       mcpConfig[name] = { type: 'stdio', command: command.command, args: command.args, scope: 'dynamic' }
     }
   }
+  const bridge = headlessBridgePath()
   if (desktopBrowserPreference()) {
     // Keep installed browser servers available for preference changes in a running App session.
     // The query route controls which of them can be advertised or called.
@@ -68,11 +79,11 @@ export function setupPlaywrightMCP(): {
       const executablePath = process.env[spec.pathEnv]
       if (!executablePath || !existsSync(executablePath)) continue
       const desktop = { browser, executablePath }
-      register(spec.headless, buildPlaywrightMcpCommand({ desktop, headless: true }))
+      register(spec.headless, buildPlaywrightMcpCommand({ desktop, headless: true, bridge }))
       register(spec.visible, buildPlaywrightMcpCommand({ desktop, headless: false }))
     }
   } else {
-    register(PLAYWRIGHT_MCP_SERVER_NAME, buildPlaywrightMcpCommand())
+    register(PLAYWRIGHT_MCP_SERVER_NAME, buildPlaywrightMcpCommand({ bridge }))
     register(PLAYWRIGHT_HEADED_MCP_SERVER_NAME, buildPlaywrightMcpCommand({ headless: false }))
   }
   const names = Object.keys(mcpConfig)

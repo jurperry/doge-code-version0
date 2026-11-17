@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 
 import {
   isMcpServerDisabled,
@@ -11,6 +14,7 @@ import {
   PLAYWRIGHT_MCP_SERVER_NAME,
   isPlaywrightMCPServer,
 } from './common.js'
+import { resolvePlaywrightCliPath } from './command.js'
 import { isPlaywrightMCPEnabled, PLAYWRIGHT_MCP_PROMPT_HINT, setupPlaywrightMCP } from './setup.js'
 
 // NODE_ENV=test (bun:test default) keeps getCurrentProjectConfig /
@@ -18,8 +22,19 @@ import { isPlaywrightMCPEnabled, PLAYWRIGHT_MCP_PROMPT_HINT, setupPlaywrightMCP 
 // so no disk writes. Reset both toggles to avoid leaking state between cases.
 const originalOptOut = process.env.DOGE_PLAYWRIGHT_MCP
 const originalHeadless = process.env.DOGE_PLAYWRIGHT_HEADLESS
-const desktopEnv = ['DOGE_APP_PLAYWRIGHT_PREFERENCE', 'DOGE_APP_PLAYWRIGHT_CHROME_PATH', 'DOGE_APP_PLAYWRIGHT_EDGE_PATH', 'DOGE_APP_PLAYWRIGHT_DISABLED'] as const
+const desktopEnv = ['DOGE_APP_PLAYWRIGHT_PREFERENCE', 'DOGE_APP_PLAYWRIGHT_CHROME_PATH', 'DOGE_APP_PLAYWRIGHT_EDGE_PATH', 'DOGE_APP_PLAYWRIGHT_DISABLED', 'DOGE_APP_PLAYWRIGHT_BRIDGE'] as const
 const originalDesktopEnv = desktopEnv.map(key => process.env[key])
+
+// Real files the bridge lookup must existsSync before using it.
+const bridgeDirs: string[] = []
+
+function makeBridgeFile(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'doge-pw-bridge-'))
+  bridgeDirs.push(dir)
+  const path = join(dir, 'browser-bridge.cjs')
+  writeFileSync(path, '// test bridge\n')
+  return path
+}
 
 beforeEach(() => {
   delete process.env.DOGE_PLAYWRIGHT_MCP
@@ -33,6 +48,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  for (const dir of bridgeDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
   for (const [index, key] of desktopEnv.entries()) {
     const value = originalDesktopEnv[index]
     if (value === undefined) delete process.env[key]
@@ -84,6 +100,62 @@ test('setupPlaywrightMCP registers real stdio servers for headless and visible m
   }
   expect(headless?.args).toContain('--headless')
   expect(headed?.args).not.toContain('--headless')
+})
+
+test('the injected bridge wraps the CLI for the headless server only', () => {
+  // The desktop shell points this at its own bridge script, which starts a
+  // local headless browser and hands its CDP endpoint to the MCP CLI.
+  const bridge = makeBridgeFile()
+  process.env.DOGE_APP_PLAYWRIGHT_BRIDGE = bridge
+  const { mcpConfig } = setupPlaywrightMCP()
+  const headless = mcpConfig[PLAYWRIGHT_MCP_SERVER_NAME] as { args?: string[] }
+  const headed = mcpConfig[PLAYWRIGHT_HEADED_MCP_SERVER_NAME] as { args?: string[] }
+
+  expect(headless.args?.[0]).toBe(bridge)
+  expect(headless.args?.[1]).toBe(resolvePlaywrightCliPath())
+  expect(headless.args).toContain('--headless')
+
+  expect(headed.args?.[0]).toBe(resolvePlaywrightCliPath())
+  expect(headed.args).not.toContain(bridge)
+  expect(headed.args).not.toContain('--headless')
+})
+
+test('desktop headless servers use the bridge while visible servers keep the CLI', () => {
+  const bridge = makeBridgeFile()
+  process.env.DOGE_APP_PLAYWRIGHT_BRIDGE = bridge
+  process.env.DOGE_APP_PLAYWRIGHT_PREFERENCE = 'auto'
+  process.env.DOGE_APP_PLAYWRIGHT_CHROME_PATH = process.execPath
+  process.env.DOGE_APP_PLAYWRIGHT_EDGE_PATH = process.execPath
+  const { mcpConfig } = setupPlaywrightMCP()
+  const cli = resolvePlaywrightCliPath()
+
+  expect(Object.keys(mcpConfig)).toHaveLength(4)
+  for (const [name, config] of Object.entries(mcpConfig)) {
+    if (config.type !== 'stdio') throw new Error('Expected stdio server')
+    const args = config.args as string[]
+    if (name.endsWith('-headed')) {
+      expect(args[0]).toBe(cli)
+      expect(args).not.toContain(bridge)
+    } else {
+      expect(args[0]).toBe(bridge)
+      expect(args[1]).toBe(cli)
+    }
+  }
+})
+
+test('an unset or missing bridge file leaves the CLI first', () => {
+  const cli = resolvePlaywrightCliPath()
+
+  // Unset.
+  const plain = setupPlaywrightMCP().mcpConfig[PLAYWRIGHT_MCP_SERVER_NAME] as { args?: string[] }
+  expect(plain.args?.[0]).toBe(cli)
+
+  // Set, but pointing at a file that does not exist.
+  const missingDir = mkdtempSync(join(tmpdir(), 'doge-pw-bridge-'))
+  bridgeDirs.push(missingDir)
+  process.env.DOGE_APP_PLAYWRIGHT_BRIDGE = join(missingDir, 'missing.cjs')
+  const missing = setupPlaywrightMCP().mcpConfig[PLAYWRIGHT_MCP_SERVER_NAME] as { args?: string[] }
+  expect(missing.args?.[0]).toBe(cli)
 })
 
 test('legacy DOGE_PLAYWRIGHT_HEADLESS=0 keeps the original server visible', () => {

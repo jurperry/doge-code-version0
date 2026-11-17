@@ -12,6 +12,11 @@ type TaskStartedEvent = {
   task_type?: string
   workflow_name?: string
   prompt?: string
+  /** Absolute path of this task's output file. Known at registration, so it
+   *  may not exist yet when the event is emitted. */
+  output_file?: string
+  /** Original command line, for background shell tasks. */
+  command?: string
   /** Resolved API model captured when this worker was created. */
   model?: string
   model_selection?: import('./model/agentModelIdentity.js').AgentModelSelection

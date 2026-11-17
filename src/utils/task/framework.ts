@@ -117,6 +117,10 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
         ? (task.workflowName as string | undefined)
         : undefined,
     prompt: 'prompt' in task ? (task.prompt as string) : undefined,
+    // Known at registration even though the file is created lazily by the
+    // task's own output writer; SDK consumers use the path to tail it.
+    output_file: getTaskOutputPath(task.id),
+    command: 'command' in task ? (task.command as string | undefined) : undefined,
     // LocalAgentTask/InProcessTeammate states carry the (possibly alias)
     // model string; other task types simply omit the field.
     model: 'model' in task ? (task.model as string | undefined) : undefined,

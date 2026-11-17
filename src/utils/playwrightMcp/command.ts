@@ -145,6 +145,13 @@ export interface PlaywrightMcpCommand {
 export function buildPlaywrightMcpCommand(options: {
   headless?: boolean
   desktop?: { browser: DesktopBrowser; executablePath: string }
+  /**
+   * Absolute path to a script that starts the browser and forwards the CLI
+   * arguments to it. The desktop shell sets this for its headless server so the
+   * App can mirror the browser it controls (see setup.ts). Prefixed to the args
+   * because Node runs the first script it is given.
+   */
+  bridge?: string
 } = {}): PlaywrightMcpCommand | undefined {
   const command = findNodeExecutable()
   const cliPath = resolvePlaywrightCliPath()
@@ -160,6 +167,7 @@ export function buildPlaywrightMcpCommand(options: {
       : undefined))
 
   const args = [
+    ...(options.bridge ? [options.bridge] : []),
     cliPath,
     '--browser',
     browser,
