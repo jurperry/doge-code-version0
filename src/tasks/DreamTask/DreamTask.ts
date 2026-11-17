@@ -3,9 +3,9 @@
 // Shift+Down dialog. The dream agent itself is unchanged — this is pure UI
 // surfacing via the existing task registry.
 
-import { rollbackConsolidationLock } from '../../services/autoDream/consolidationLock.js'
 import type { SetAppState, Task, TaskStateBase } from '../../Task.js'
 import { createTaskStateBase, generateTaskId } from '../../Task.js'
+import { emitTaskTerminatedSdk } from '../../utils/sdkEventQueue.js'
 import { registerTask, updateTaskState } from '../../utils/task/framework.js'
 
 // Keep only the N most recent turns for live display.
@@ -35,9 +35,7 @@ export type DreamTaskState = TaskStateBase & {
   filesTouched: string[]
   /** Assistant text responses, tool uses collapsed. Prompt is NOT included. */
   turns: DreamTurn[]
-  abortController?: AbortController
-  /** Stashed so kill can rewind the lock mtime (same path as fork-failure). */
-  priorMtime: number
+  stop?: () => Promise<void>
 }
 
 export function isDreamTask(task: unknown): task is DreamTaskState {
@@ -53,8 +51,7 @@ export function registerDreamTask(
   setAppState: SetAppState,
   opts: {
     sessionsReviewing: number
-    priorMtime: number
-    abortController: AbortController
+    stop: () => Promise<void>
   },
 ): string {
   const id = generateTaskId('dream')
@@ -66,8 +63,7 @@ export function registerDreamTask(
     sessionsReviewing: opts.sessionsReviewing,
     filesTouched: [],
     turns: [],
-    abortController: opts.abortController,
-    priorMtime: opts.priorMtime,
+    stop: opts.stop,
   }
   registerTask(task, setAppState)
   return id
@@ -103,30 +99,20 @@ export function addDreamTurn(
   })
 }
 
-export function completeDreamTask(
+export function finishDreamTask(
   taskId: string,
+  status: 'completed' | 'failed' | 'stopped',
   setAppState: SetAppState,
 ): void {
-  // notified: true immediately — dream has no model-facing notification path
-  // (it's UI-only), and eviction requires terminal + notified. The inline
-  // appendSystemMessage completion note IS the user surface.
+  // Dream completion is user-facing. It doesn't wake the main model.
   updateTaskState<DreamTaskState>(taskId, setAppState, task => ({
     ...task,
-    status: 'completed',
+    status: status === 'stopped' ? 'killed' : status,
     endTime: Date.now(),
     notified: true,
-    abortController: undefined,
+    stop: undefined,
   }))
-}
-
-export function failDreamTask(taskId: string, setAppState: SetAppState): void {
-  updateTaskState<DreamTaskState>(taskId, setAppState, task => ({
-    ...task,
-    status: 'failed',
-    endTime: Date.now(),
-    notified: true,
-    abortController: undefined,
-  }))
+  emitTaskTerminatedSdk(taskId, status)
 }
 
 export const DreamTask: Task = {
@@ -134,24 +120,11 @@ export const DreamTask: Task = {
   type: 'dream',
 
   async kill(taskId, setAppState) {
-    let priorMtime: number | undefined
+    let stop: DreamTaskState['stop']
     updateTaskState<DreamTaskState>(taskId, setAppState, task => {
-      if (task.status !== 'running') return task
-      task.abortController?.abort()
-      priorMtime = task.priorMtime
-      return {
-        ...task,
-        status: 'killed',
-        endTime: Date.now(),
-        notified: true,
-        abortController: undefined,
-      }
+      if (task.status === 'running') stop = task.stop
+      return task
     })
-    // Rewind the lock mtime so the next session can retry. Same path as the
-    // fork-failure catch in autoDream.ts. If updateTaskState was a no-op
-    // (already terminal), priorMtime stays undefined and we skip.
-    if (priorMtime !== undefined) {
-      await rollbackConsolidationLock(priorMtime)
-    }
+    await stop?.()
   },
 }

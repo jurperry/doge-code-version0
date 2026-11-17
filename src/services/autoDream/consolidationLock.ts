@@ -1,25 +1,22 @@
-// Lock file whose mtime IS lastConsolidatedAt. Body is the holder's PID.
+// The marker's mtime is lastConsolidatedAt. A separate, expiring lease
+// prevents simultaneous dreams and lets a crashed process be retried.
 //
 // Lives inside the memory dir (getAutoMemPath) so it keys on git-root
 // like memory does, and so it's writable even when the memory path comes
 // from an env/settings override whose parent may not be.
 
-import { mkdir, readFile, stat, unlink, utimes, writeFile } from 'fs/promises'
+import { mkdir, open, stat } from 'fs/promises'
 import { join } from 'path'
 import { getOriginalCwd } from '../../bootstrap/state.js'
 import { getAutoMemPath } from '../../memdir/paths.js'
-import { logForDebugging } from '../../utils/debug.js'
-import { isProcessRunning } from '../../utils/genericProcessUtils.js'
 import { listCandidates } from '../../utils/listSessionsImpl.js'
+import { lock } from '../../utils/lockfile.js'
 import { getProjectDir } from '../../utils/sessionStorage.js'
 import { findProjectDir } from '../../utils/sessionStoragePortable.js'
 
 const LOCK_FILE = '.consolidate-lock'
 
-// Stale past this even if the PID is live (PID reuse guard).
-const HOLDER_STALE_MS = 60 * 60 * 1000
-
-function lockPath(): string {
+function markerPath(): string {
   return join(getAutoMemPath(), LOCK_FILE)
 }
 
@@ -29,7 +26,7 @@ function lockPath(): string {
  */
 export async function readLastConsolidatedAt(): Promise<number> {
   try {
-    const s = await stat(lockPath())
+    const s = await stat(markerPath())
     return s.mtimeMs
   } catch {
     return 0
@@ -37,75 +34,28 @@ export async function readLastConsolidatedAt(): Promise<number> {
 }
 
 /**
- * Acquire: write PID → mtime = now. Returns the pre-acquire mtime
- * (for rollback), or null if blocked / lost a race.
- *
- *   Success → do nothing. mtime stays at now.
- *   Failure → rollbackConsolidationLock(priorMtime) rewinds mtime.
- *   Crash   → mtime stuck, dead PID → next process reclaims.
+ * Acquire a lease for this project's memory directory. Recheck the marker
+ * under the lease in case another process finished during the session scan.
  */
-export async function tryAcquireConsolidationLock(): Promise<number | null> {
-  const path = lockPath()
-
-  let mtimeMs: number | undefined
-  let holderPid: number | undefined
-  try {
-    const [s, raw] = await Promise.all([stat(path), readFile(path, 'utf8')])
-    mtimeMs = s.mtimeMs
-    const parsed = parseInt(raw.trim(), 10)
-    holderPid = Number.isFinite(parsed) ? parsed : undefined
-  } catch {
-    // ENOENT — no prior lock.
-  }
-
-  if (mtimeMs !== undefined && Date.now() - mtimeMs < HOLDER_STALE_MS) {
-    if (holderPid !== undefined && isProcessRunning(holderPid)) {
-      logForDebugging(
-        `[autoDream] lock held by live PID ${holderPid} (mtime ${Math.round((Date.now() - mtimeMs) / 1000)}s ago)`,
-      )
-      return null
-    }
-    // Dead PID or unparseable body — reclaim.
-  }
-
-  // Memory dir may not exist yet.
+export async function tryAcquireConsolidationLock(
+  observedMtime: number,
+  abortController: AbortController,
+): Promise<(() => Promise<void>) | null> {
   await mkdir(getAutoMemPath(), { recursive: true })
-  await writeFile(path, String(process.pid))
-
-  // Two reclaimers both write → last wins the PID. Loser bails on re-read.
-  let verify: string
+  let release: () => Promise<void>
   try {
-    verify = await readFile(path, 'utf8')
-  } catch {
-    return null
+    release = await lock(markerPath(), {
+      realpath: false,
+      onCompromised: error => abortController.abort(error),
+    })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOCKED') return null
+    throw error
   }
-  if (parseInt(verify.trim(), 10) !== process.pid) return null
 
-  return mtimeMs ?? 0
-}
-
-/**
- * Rewind mtime to pre-acquire after a failed fork. Clears the PID body —
- * otherwise our still-running process would look like it's holding.
- * priorMtime 0 → unlink (restore no-file).
- */
-export async function rollbackConsolidationLock(
-  priorMtime: number,
-): Promise<void> {
-  const path = lockPath()
-  try {
-    if (priorMtime === 0) {
-      await unlink(path)
-      return
-    }
-    await writeFile(path, '')
-    const t = priorMtime / 1000 // utimes wants seconds
-    await utimes(path, t, t)
-  } catch (e: unknown) {
-    logForDebugging(
-      `[autoDream] rollback failed: ${(e as Error).message} — next trigger delayed to minHours`,
-    )
-  }
+  if (await readLastConsolidatedAt() === observedMtime) return release
+  await release()
+  return null
 }
 
 /**
@@ -127,17 +77,14 @@ export async function listSessionsTouchedSince(
 }
 
 /**
- * Stamp from manual /dream. Optimistic — fires at prompt-build time,
- * no post-skill completion hook. Best-effort.
+ * Commit the transcript scan watermark after a successful background dream.
  */
-export async function recordConsolidation(): Promise<void> {
+export async function recordConsolidation(scannedAt: number): Promise<void> {
+  const marker = await open(markerPath(), 'a')
   try {
-    // Memory dir may not exist yet (manual /dream before any auto-trigger).
-    await mkdir(getAutoMemPath(), { recursive: true })
-    await writeFile(lockPath(), String(process.pid))
-  } catch (e: unknown) {
-    logForDebugging(
-      `[autoDream] recordConsolidation write failed: ${(e as Error).message}`,
-    )
+    const timestamp = new Date(scannedAt)
+    await marker.utimes(timestamp, timestamp)
+  } finally {
+    await marker.close()
   }
 }

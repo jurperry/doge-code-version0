@@ -3217,6 +3217,9 @@ function runHeadlessStreaming(
           }
         } else if (message.request.subtype === 'end_session') {
           await interruptSession()
+          await Promise.all(getRunningTasks(getAppState())
+            .filter(task => task.type === 'dream')
+            .map(task => stopTask(task.id, { getAppState, setAppState })))
           preserveWorktreeOnShutdown = message.request.reason === 'app_replace'
           logForDebugging(
             `[print.ts] end_session received, reason=${message.request.reason ?? 'unspecified'}`,

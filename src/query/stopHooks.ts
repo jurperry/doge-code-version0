@@ -47,7 +47,7 @@ const jobClassifierModule = feature('TEMPLATES')
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 import type { QuerySource } from '../constants/querySource.js'
-import { executeAutoDream } from '../services/autoDream/autoDream.js'
+import { scheduleAutoDream } from '../services/autoDream/autoDream.js'
 import { executePromptSuggestion } from '../services/PromptSuggestion/promptSuggestion.js'
 import { isBareMode, isEnvDefinedFalsy } from '../utils/envUtils.js'
 import {
@@ -136,17 +136,18 @@ export async function* handleStopHooks(
     if (!isEnvDefinedFalsy(process.env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION)) {
       void executePromptSuggestion(stopHookContext)
     }
-    if (!toolUseContext.agentId && isExtractModeActive()) {
+    if (!toolUseContext.agentId) {
       // Fire-and-forget in both interactive and non-interactive. For -p/SDK,
       // print.ts drains the in-flight promise after flushing the response
       // but before gracefulShutdownSync (see drainPendingExtraction).
-      void extractMemoriesModule.executeExtractMemories(
-        stopHookContext,
-        toolUseContext.appendSystemMessage,
-      )
-    }
-    if (!toolUseContext.agentId) {
-      void executeAutoDream(stopHookContext, toolUseContext.appendSystemMessage)
+      const extraction = isExtractModeActive()
+        ? extractMemoriesModule.executeExtractMemories(stopHookContext, toolUseContext.appendSystemMessage)
+        : undefined
+      const scheduled = scheduleAutoDream(stopHookContext, toolUseContext.appendSystemMessage, extraction)
+      // Headless output must see the task before it decides whether it can
+      // stop draining SDK events. The model work runs after registration.
+      if (querySource === 'sdk') await scheduled
+      else void scheduled
     }
   }
 

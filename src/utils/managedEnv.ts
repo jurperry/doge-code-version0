@@ -92,9 +92,13 @@ function filterSettingsEnv(
     withoutHostManagedProviderVars(withoutSSHTunnelVars(env)),
   )
   if (process.env.DOGE_APP_WORKSPACE_MARKER !== '1') return filtered
+  const dreamSetting = process.env.DOGE_HEADLESS_AUTO_DREAM
+  const hostOwnsMemory = dreamSetting === '0' || dreamSetting === '1'
   return Object.fromEntries(Object.entries(filtered).filter(([key]) => {
     const name = key.toUpperCase()
-    return name !== 'DOGE_APP_WORKSPACE_MARKER' && !name.startsWith('DOGE_APP_PLAYWRIGHT_')
+    if (name === 'DOGE_APP_WORKSPACE_MARKER' || name.startsWith('DOGE_APP_PLAYWRIGHT_')) return false
+    return !hostOwnsMemory || (name !== 'DOGE_HEADLESS_AUTO_DREAM' &&
+      name !== 'DOGE_HEADLESS_AUTO_MEMORY' && name !== 'CLAUDE_CODE_DISABLE_AUTO_MEMORY')
   }))
 }
 
