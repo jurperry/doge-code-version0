@@ -111,6 +111,7 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
     tool_use_id: task.toolUseId,
     description: task.description,
     task_type: task.type,
+    is_background: 'isBackgrounded' in task && task.isBackgrounded === true ? true : undefined,
     agent_id: 'agentId' in task && (task.type === 'local_agent' || task.type === 'in_process_teammate') ? task.agentId as string : undefined,
     workflow_name:
       'workflowName' in task

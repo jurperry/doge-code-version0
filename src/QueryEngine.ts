@@ -644,6 +644,7 @@ export class QueryEngine {
         duration_api_ms: getTotalAPIDuration(),
         num_turns: messages.length - 1,
         result: resultText ?? '',
+        local_command: true,
         stop_reason: null,
         session_id: getSessionId(),
         total_cost_usd: getTotalCost(),

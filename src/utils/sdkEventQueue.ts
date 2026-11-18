@@ -10,6 +10,7 @@ type TaskStartedEvent = {
   tool_use_id?: string
   description: string
   task_type?: string
+  is_background?: boolean
   workflow_name?: string
   prompt?: string
   /** Absolute path of this task's output file. Known at registration, so it

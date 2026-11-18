@@ -1425,6 +1425,7 @@ export const SDKResultSuccessSchema = lazySchema(() =>
     is_error: z.boolean(),
     num_turns: z.number(),
     result: z.string(),
+    local_command: z.literal(true).optional(),
     stop_reason: z.string().nullable(),
     total_cost_usd: z.number(),
     usage: NonNullableUsagePlaceholder(),
@@ -1735,6 +1736,7 @@ export const SDKTaskStartedMessageSchema = lazySchema(() =>
   z.object({
     type: z.literal('system'),
     subtype: z.literal('task_started'),
+    is_background: z.boolean().optional(),
     task_id: z.string(),
     tool_use_id: z.string().optional(),
     description: z.string(),
@@ -1775,6 +1777,7 @@ export const SDKTaskProgressMessageSchema = lazySchema(() =>
   z.object({
     type: z.literal('system'),
     subtype: z.literal('task_progress'),
+    is_background: z.boolean().optional(),
     task_id: z.string(),
     agent_id: z.string().optional(),
     tool_use_id: z.string().optional(),
