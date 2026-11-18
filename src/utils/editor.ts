@@ -36,6 +36,11 @@ const PLUS_N_EDITORS = /\b(vi|vim|nvim|nano|emacs|pico|micro|helix|hx)\b/
 // VS Code and forks use -g file:line. subl uses bare file:line (no -g).
 const VSCODE_FAMILY = new Set(['code', 'cursor', 'windsurf', 'codium'])
 
+export function editorArgv(command: string): string[] {
+  return Array.from(command.matchAll(/(?:"[^"]*"|'[^']*'|[^\s"'])+/g),
+    ([arg]) => arg.replace(/"([^"]*)"|'([^']*)'/g, (_quoted, double, single) => double ?? single ?? ''))
+}
+
 /**
  * Classify the editor as GUI or not. Returns the matched GUI family name
  * for goto-line argv selection, or undefined for terminal editors.
@@ -47,7 +52,8 @@ const VSCODE_FAMILY = new Set(['code', 'cursor', 'windsurf', 'codium'])
  * 'code' → matches.
  */
 export function classifyGuiEditor(editor: string): string | undefined {
-  const base = basename(editor.split(' ')[0] ?? '')
+  const [file = ''] = editorArgv(editor)
+  const base = basename(file).toLowerCase()
   return GUI_EDITORS.find(g => base.includes(g))
 }
 
@@ -88,7 +94,7 @@ export function openFileInExternalEditor(
   // Spawn the user's actual binary (preserves code-insiders, abs paths, etc.).
   // Split into binary + extra args so multi-word values like 'start /wait
   // notepad' or 'code --wait' propagate all tokens to spawn.
-  const parts = editor.split(' ')
+  const parts = editorArgv(editor)
   const base = parts[0] ?? editor
   const editorArgs = parts.slice(1)
   const guiFamily = classifyGuiEditor(editor)

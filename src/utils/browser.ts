@@ -1,4 +1,5 @@
 import { execFileNoThrow } from './execFileNoThrow.js'
+import { resolve } from 'node:path'
 
 function validateUrl(url: string): void {
   let parsedUrl: URL
@@ -19,17 +20,24 @@ function validateUrl(url: string): void {
 
 /**
  * Open a file or folder path using the system's default handler.
- * Uses `open` on macOS, `explorer` on Windows, `xdg-open` on Linux.
+ * Uses the platform's registered handler for the literal path.
  */
 export async function openPath(path: string): Promise<boolean> {
   try {
     const platform = process.platform
     if (platform === 'win32') {
-      const { code } = await execFileNoThrow('explorer', [path])
+      const { code } = await execFileNoThrow('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        '$ErrorActionPreference = "Stop"; Invoke-Item -LiteralPath $env:DOGE_OPEN_PATH',
+      ], {
+        timeout: 10_000,
+        stdin: 'ignore',
+        env: { ...process.env, DOGE_OPEN_PATH: resolve(path) },
+      })
       return code === 0
     }
     const command = platform === 'darwin' ? 'open' : 'xdg-open'
-    const { code } = await execFileNoThrow(command, [path])
+    const { code } = await execFileNoThrow(command, [resolve(path)], { timeout: 10_000, stdin: 'ignore' })
     return code === 0
   } catch (_) {
     return false

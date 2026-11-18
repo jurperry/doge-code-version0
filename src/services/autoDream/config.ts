@@ -5,12 +5,10 @@
 import { getIsNonInteractiveSession } from '../../bootstrap/state.js'
 import { isWorkflowStepChild } from '../../tools/WorkflowTool/stepChildEnv.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
-import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
 
 /**
- * Whether background memory consolidation should run. User setting
- * (autoDreamEnabled in settings.json) overrides the GrowthBook default
- * when explicitly set; otherwise falls through to tengu_onyx_plover.
+ * Whether background memory consolidation should run. Desktop and CLI
+ * share settings.json and the same off default.
  */
 export function isAutoDreamEnabled(): boolean {
   if (getIsNonInteractiveSession()) {
@@ -19,11 +17,5 @@ export function isAutoDreamEnabled(): boolean {
     const hostSetting = process.env.DOGE_HEADLESS_AUTO_DREAM
     if (hostSetting === '0' || hostSetting === '1') return hostSetting === '1'
   }
-  const setting = getInitialSettings().autoDreamEnabled
-  if (setting !== undefined) return setting
-  const gb = getFeatureValue_CACHED_MAY_BE_STALE<{ enabled?: unknown } | null>(
-    'tengu_onyx_plover',
-    null,
-  )
-  return gb?.enabled === true
+  return getInitialSettings().autoDreamEnabled === true
 }
