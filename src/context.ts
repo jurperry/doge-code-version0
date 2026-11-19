@@ -5,7 +5,9 @@ import {
   setCachedClaudeMdContent,
 } from './bootstrap/state.js'
 import { getLocalISODate } from './constants/common.js'
+import { omitMissingMemoryTopics } from './memdir/memoryIndex.js'
 import {
+  clearMemoryFileCaches,
   filterInjectedMemoryFiles,
   getClaudeMds,
   getMemoryFiles,
@@ -167,9 +169,15 @@ export const getUserContext = memoize(
       (isBareMode() && getAdditionalDirectoriesForClaudeMd().length === 0)
     // Await the async I/O (readFile/readdir directory walk) so the event
     // loop yields naturally at the first fs.readFile.
-    const claudeMd = shouldDisableClaudeMd
-      ? null
-      : getClaudeMds(filterInjectedMemoryFiles(await getMemoryFiles()))
+    let claudeMd: string | null = null
+    if (!shouldDisableClaudeMd) {
+      const files = filterInjectedMemoryFiles(await getMemoryFiles())
+      const liveFiles = await Promise.all(files.map(async file => {
+        if (file.type !== 'AutoMem' && file.type !== 'TeamMem') return file
+        return { ...file, content: await omitMissingMemoryTopics(file.path, file.content) }
+      }))
+      claudeMd = getClaudeMds(liveFiles)
+    }
     // Cache for the auto-mode classifier (yoloClassifier.ts reads this
     // instead of importing claudemd.ts directly, which would create a
     // cycle through permissions/filesystem → permissions → yoloClassifier).
@@ -187,3 +195,11 @@ export const getUserContext = memoize(
     }
   },
 )
+
+export async function invalidateUserMemoryContext(): Promise<void> {
+  // Let an in-flight startup prefetch finish publishing its classifier context.
+  // getUserContext takes no arguments, so its memoized result is keyed by undefined.
+  await getUserContext.cache.get?.(undefined)?.catch(() => {})
+  clearMemoryFileCaches()
+  getUserContext.cache.clear?.()
+}

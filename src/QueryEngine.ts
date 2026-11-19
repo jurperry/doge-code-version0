@@ -24,6 +24,7 @@ import {
   LOCAL_COMMAND_STDERR_TAG,
   LOCAL_COMMAND_STDOUT_TAG,
 } from './constants/xml.js'
+import { invalidateUserMemoryContext } from './context.js'
 import {
   getModelUsage,
   getTotalAPIDuration,
@@ -290,6 +291,11 @@ export class QueryEngine {
         : { type: 'disabled' }
 
     headlessProfilerCheckpoint('before_getSystemPrompt')
+    // The desktop keeps an initialized CLI for its blank draft. Read memory
+    // for the submitted turn so changes made while the draft waited are visible.
+    if (process.env.DOGE_APP_WORKSPACE_MARKER === '1') {
+      await invalidateUserMemoryContext()
+    }
     // Narrow once so TS tracks the type through the conditionals below.
     const customPrompt =
       typeof customSystemPrompt === 'string' ? customSystemPrompt : undefined
