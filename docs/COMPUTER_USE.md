@@ -41,6 +41,8 @@ Computer Use（CU）是内置 MCP 工具组：在用户授权范围内截图、�
 
 **Windows 两条通道**：① HWND 后台 SendMessage（普通 Win32 控件：单击/普通单键/窗口滚动/拖拽，不要求前台，用 `GetWindowRect + ClientToScreen` 修边框并检查传输结果与 expected PID；Chromium/自绘程序会忽略）；② 真实前台输入（`SetCursorPos + mouse_event/keybd_event`：bound HWND 直接文本、自绘窗口、WinForms 点击与组合键、需要焦点控件的 Return/Tab、双击/三击、修饰键与滚轮）。失败不盲目换通道；组合键顺序为修饰键 down → 主键 down/up → 修饰键逆序 up。
 
+**框架分类**：绑定后按顶层+子窗口类名一次分类，决定鼠标/键盘通道。Chromium（Electron/CEF/WebView2）、WPF（`HwndWrapper[...]`，AnyCast 等）、WinUI 3/UWP（`WinUIDesktopWin32WindowClass` / `ApplicationFrameWindow` / `Windows.UI.Core.CoreWindow`）、WinForms、JavaFX（`GlassWndClass-*`）、Flutter（`FLUTTERVIEW`）、Unreal（`UnrealWindow`）、Tk 与 Qt/SDL/GLFW/Unity/AWT 走真实输入；未知框架保持 SendMessage，不凭猜测抢前台。WinForms 的单击/拖拽/滚动/键盘统一走真实输入，避免同一窗口内通道不一致。
+
 **Unicode 与点击**：`SendInput + KEYEVENTF_UNICODE`（40 字节 INPUT、UTF-16 code unit、覆盖代理对），文本先 UTF-8 base64 经 stdin 传入；事件数必须完整，部分成功报错并反向释放；`type` 非剪贴板路径把 LF/CRLF/CR 各派发一次 Return、Tab 派发真实键。双/三击同一脚本内完成；分解 mouse-down/up 记录实际通道。
 
 **computer_batch**：最多 100 动作、最多 4 张截图、图片 ≤20MiB、单次 `type` ≤100,000 UTF-16 code unit；首个副作用前统一校验参数/键名/组合键授权/截图能力；顺序执行、首错停止、每动作前复核身份/tier/命中。返回 `completed[]`/`failed{action,code,output}`/`remaining`/`recovery` 与图片；**顶层 `isError=true` 时仍保留结构化 JSON，图片作为顶层 sibling（不要塞进纯文本错误 tool_result）**；门禁取消返回 `aborted`（未派发），执行中途 `AbortError` 按结果未知 `failed`；批次内截图仅供检查、不重定坐标锚点。
@@ -50,6 +52,8 @@ Computer Use（CU）是内置 MCP 工具组：在用户授权范围内截图、�
 `request_access` → `open_application` 绑定或 `switch_display("auto")` 全屏 → `screenshot` 建立坐标基准 → 操作后**再次截图验证**（绑定窗口独立点击复查几何与 9×9 邻域，内容变化返回 `state_conflict`）→ 失败先读错误：权限不足调 grant，坐标陈旧重截图/zoom，窗口死亡重开，部分执行只补缺失步骤，超时不重放整个批次。`Click dispatched` 只代表已派发。
 
 超时/取消：默认 idle 120s、total 600s，`MCP_TOOL_TIMEOUT`/`MCP_TOOL_IDLE_TIMEOUT` 可覆盖；超时明确「结果未知，不要盲目重试副作用」。ESC hook 触发宿主 AbortController（失败提示 Ctrl+C），取消传播到权限对话框、批次动作之间、文本 run、最终输入前与截图写回前；同步原生调用不一定立即中断，统一超时是最后防线。
+
+**Windows ESC 生命周期**：hook 位于 PowerShell helper（`WH_KEYBOARD_LL`），回调只入队，独立 sender 线程连接命名管道并重试；不在 hook 线程做阻塞 I/O，避免 `LowLevelHooksTimeout` 与 CLI 主线程同步 PowerShell 动作期间丢 Esc。不再用 `LLKHF_INJECTED` 全量过滤：IME/键盘映射/远程桌面合成的用户 Esc 也应生效；只有 CLI 模型自身的 `key("escape")` 由真实输入注入脚本在 `keybd_event` 前写入期望时间戳，sender 在 3s 内一次性消费并抑制（含 `shift+escape` 等 Escape 组合键）。握手在消息泵开始后才发出，避免 hook 已装但未泵消息的窗口。每次 CU 动作前 `ensureEscHotkey` 复查 helper 存活，死亡则重注册；PowerShell 使用绝对路径，握手 10s，helper 失败有 15s 退避。
 
 ## 6. 测试与实机验证
 

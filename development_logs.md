@@ -2,6 +2,12 @@
 
 只保留「不看代码就会再踩」的经验、版本里程碑索引与已知欠账；完整逐轮历史以 `git log` 为准，架构现状见 [docs/DESIGN.md](docs/DESIGN.md)，Computer Use 见 [docs/COMPUTER_USE.md](docs/COMPUTER_USE.md)。**文件名保持 `development_logs.md`**：`src/hooks/useMainLoopModel.ts` 注释引用了「development_logs.md §25 模型切换统一入口」；旧 §25 已并入本文 §1.3（模型目录/协议转换），勿改名。
 
+## 2026-11-20 Windows CU 框架分类与 Esc 物理链路修复（2.1.347）
+
+1. 遇到问题：绑定模式下 WPF 窗口（AnyCast，`HwndWrapper[Anycast.exe;;…]`）被当成普通 Win32 窗口走 SendMessage，点击全部 `dispatched` 但像素零变化；分类器只覆盖 Chromium/自绘/WinForms。Windows Esc 的旧实现把 `LLKHF_INJECTED` 当作「模型合成」全量过滤，且 hook 回调在键盘 hook 线程里同步 `NamedPipeClientStream.Connect(100)`——IME/键盘映射/远程桌面合成的用户 Esc 会被吞，CLI 主线程执行同步 PowerShell 动作时也可能错过信号；旧测试只验证了 named pipe，未验证真实键盘回调。
+2. 解决方法：分类器改为框架能力模型，新增 WPF、WinUI 3/UWP、JavaFX、Flutter、Unreal、Tk，并统一 WinForms 的鼠标/键盘通道；未知框架继续 SendMessage（不抢前台）。Esc helper 的 hook 回调只入队，独立 sender 线程重试命名管道；删除全量 injected 过滤，模型 Esc 由真实输入注入脚本在 `keybd_event` 前写入 3s 期望时间戳（sender 一次性消费；任意 Escape 组合键同样标记），用户注入 Esc 恢复中止；PowerShell 走绝对路径、握手 10s、失败 15s 退避，每次 CU 动作前 `ensureEscHotkey` 复查/重注册；HOOK_INSTALLED 改到消息泵启动后发出。真实键盘注入回归 21/21，WPF 夹具真实点击/按键/生产 Esc 期望 8/8，源码/重编 exe/安装版 CLI 的注入 Esc 均释放锁并中止回合。
+3. 位置：`src/utils/computerUse/win32/{windowClassify,escHook}.ts`、`platforms/win32.ts`、`escHotkey.ts`、`wrapper.tsx`、`win32/windowClassify.test.ts`、`tools/computer-use-wpf-fixture-e2e.ts`；邻仓 `tools/check-computer-use-esc-hook.mjs`；`docs/COMPUTER_USE.md`。App 侧仅重编内置 CLI 并升 0.2.265，见 App `development_log.md`。
+
 ## §1 可复用经验与坑
 
 ### 1.1 headless / SDK 协议
@@ -74,6 +80,7 @@
 | 2.1.340 | 中断的 headless 回合显式上报 |
 | 2.1.343 | Browser Use 路由到指定浏览器并保留 shell 工具 |
 | 2.1.345 | 模型目录/思考策略回归修复（目录默认档、输出上限、Responses 思考、重试显示）；桌面壳 headless Playwright bridge + `task_started` command/output_file |
+| 2.1.347 | Windows CU 框架分类（WPF/WinUI/JavaFX/Flutter/Unreal/Tk）与 Esc 物理链路修复 |
 
 ### 2.2 更早区间（每行一个主题群，细节 `git log`）
 

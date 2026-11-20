@@ -40,7 +40,8 @@ import {
 } from '../win32/windowGuard.js'
 import { listInstalledAppsWin32 } from '../win32/installedApps.js'
 import { buildPortableAppLaunchBlock, START_CU_APPLICATION } from '../win32/appLaunch.js'
-import { classifyWindowClasses } from '../win32/windowClassify.js'
+import { classifyWindowClasses, type WindowFramework } from '../win32/windowClassify.js'
+import { getWin32EscExpectFile, isWin32EscHotkeyRegistered } from '../win32/escHook.js'
 import { runPowerShell, runPowerShellSync } from '../win32/powerShell.js'
 import { ensureElevatedPowerShell, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, runComputerUsePowerShellSync, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
 import { PROCESS_IMAGE_PS } from '../win32/processImage.js'
@@ -246,14 +247,12 @@ let bindingRevision = 0
 let explicitlyActivatedPid: number | undefined
 /** Track whether SendMessage is working for the bound window (UIPI check) */
 let sendMessageOk: boolean | null = null
-/** Track whether the bound window is Chromium-based (Electron/CEF/Chrome).
- *  Chromium apps ignore SendMessage mouse events — must use SetCursorPos + mouse_event instead. */
-let isChromium: boolean = false
-/** Bound window belongs to a self-drawn framework (Qt/SDL/GLFW/Unity/AWT —
- *  e.g. the Android emulator). SendMessage mouse AND keyboard are app-layer
- *  no-ops for these; everything must go through real input (foreground guard). */
-let isSelfDrawn: boolean = false
-let isWinForms = false
+/** Bound window framework — diagnostics and channel decision. */
+let boundFramework: WindowFramework = 'standard'
+/** SendMessage mouse is a no-op for this framework; real input is required. */
+let mouseNeedsRealInput = false
+/** SendMessage keyboard is a no-op for this framework; real input is required. */
+let keyboardNeedsRealInput = false
 /** Class that triggered the framework classification — diagnostics. */
 let boundFrameworkClass: string | null = null
 /** Channel used by the current decomposed mouse-down, so release pairs correctly. */
@@ -343,11 +342,13 @@ export async function releaseWindowsMouseAfterTurn(): Promise<void> {
 
 /** Mouse channel for the bound window: real input required? */
 function realMouseChannel(): boolean {
-  return isChromium || isSelfDrawn
+  return mouseNeedsRealInput
 }
 
+/** Keyboard channel. Frameworks that ignore synthetic mouse also ignore
+ *  synthetic keyboard at the app layer, so both flags normally move together. */
 function realKeyboardChannel(): boolean {
-  return realMouseChannel() || isWinForms
+  return keyboardNeedsRealInput
 }
 
 /** Get the bound HWND, or null if not bound */
@@ -379,12 +380,12 @@ export function bindWindow(hwnd: number, pid?: number, exeBase?: string, appId: 
   mouseDownUsedRealInput = null
   // Reset SendMessage status — will be checked on first operation
   sendMessageOk = null
-  // Framework classification (Chromium / self-drawn Qt-family) picks the
-  // input channel: SendMessage vs real input.
+  // Framework classification decides the input channel: SendMessage
+  // (background, no cursor/focus theft) vs real input (foreground guard).
   const framework = detectWindowFramework(hwnd)
-  isChromium = framework.chromium
-  isSelfDrawn = framework.selfDrawn
-  isWinForms = framework.winForms === true
+  boundFramework = framework.framework
+  mouseNeedsRealInput = framework.mouseNeedsRealInput
+  keyboardNeedsRealInput = framework.keyboardNeedsRealInput
   boundFrameworkClass = framework.matchedClass
   // Invalidate screenshot cache for new window
   cachedScreenshot = null
@@ -419,24 +420,28 @@ export function unbindWindow(): void {
   explicitlyActivatedPid = undefined
   mouseDownUsedRealInput = null
   sendMessageOk = null
-  isChromium = false
-  isSelfDrawn = false
-  isWinForms = false
+  boundFramework = 'standard'
+  mouseNeedsRealInput = false
+  keyboardNeedsRealInput = false
   boundFrameworkClass = null
 }
 
 /** Diagnostics for tests/debugging: how the bound window's input is routed. */
 export function getBoundInputChannel(): {
+  framework: WindowFramework
   chromium: boolean
   selfDrawn: boolean
   frameworkClass: string | null
   realMouse: boolean
+  realKeyboard: boolean
 } {
   return {
-    chromium: isChromium,
-    selfDrawn: isSelfDrawn,
+    framework: boundFramework,
+    chromium: boundFramework === 'chromium',
+    selfDrawn: boundFramework === 'self-drawn',
     frameworkClass: boundFrameworkClass,
     realMouse: realMouseChannel(),
+    realKeyboard: realKeyboardChannel(),
   }
 }
 
@@ -519,18 +524,16 @@ function ensureSendAccess(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Window-framework detection: Chromium / self-drawn (Qt, SDL, GLFW, …)
+// Window-framework detection: Chromium / WPF / WinUI / WinForms / self-drawn
 // ---------------------------------------------------------------------------
 
 /**
  * Enumerate the top-level + child window class names of an HWND, then
  * classify via windowClassify.ts (pure). One PowerShell invocation.
  *
- *  - chromium  → mouse must go through real input (Electron ignores
- *    SendMessage mouse), keyboard still works via the RenderWidgetHost child.
- *  - selfDrawn → the app renders and consumes input itself (Qt/SDL/GLFW/
- *    Unity/AWT — Android emulator is Qt): BOTH mouse and keyboard SendMessage
- *    paths are no-ops at the app layer even though UIPI lets them through.
+ * The classifier returns per-framework mouse/keyboard capabilities:
+ * SendMessage is preferred, and only frameworks that demonstrably ignore
+ * synthetic messages get the real-input channel (foreground guard).
  */
 function detectWindowFramework(hwnd: number): import('../win32/windowClassify.js').WindowFrameworkInfo {
   const script = `
@@ -564,7 +567,7 @@ public class CuClasses {
 [CuClasses]::classNames | ForEach-Object { $_ }
 `
   const raw = ps(script)
-  if (!raw) return { chromium: false, selfDrawn: false, matchedClass: null }
+  if (!raw) return classifyWindowClasses('', [])
   const classes = raw.split('\n').map(s => s.trim()).filter(Boolean)
   const [top, ...children] = classes
   return classifyWindowClasses(top ?? '', children)
@@ -581,14 +584,13 @@ function getWm() {
 }
 
 // ---------------------------------------------------------------------------
-// Input — When HWND is bound, operations go through SendMessage (background,
-// no focus steal, no physical cursor move).
-// Real input (SetCursorPos + mouse_event / keybd_event) is used when
-// SendMessage cannot work at the app layer:
-//   - Chromium windows (Electron/CEF) ignore SendMessage mouse events
-//   - Self-drawn frameworks (Qt/SDL/GLFW/Unity/AWT — e.g. Android emulator)
-//     consume raw input themselves; parent-window SendMessage mouse AND
-//     keyboard are app-layer no-ops even when UIPI lets them through
+// Input — When HWND is bound, prefer SendMessage (background, no focus steal,
+// no physical cursor movement). Real input (SetCursorPos + mouse_event /
+// keybd_event) is used only when the classified framework ignores synthetic
+// messages at the app layer:
+//   - Chromium (Electron/CEF/WebView2)
+//   - WPF (HwndWrapper, e.g. AnyCast), WinUI 3 / UWP, WinForms
+//   - JavaFX, Flutter, Unreal, Tk, and self-drawn Qt/SDL/GLFW/Unity/AWT
 // Real input goes to the FOREGROUND window — guardBoundWindow(true) activates
 // and verifies the bound window first, or the action fails with an error.
 // ---------------------------------------------------------------------------
@@ -944,8 +946,26 @@ function sendInputChord(parts: string[], hwnd?: number): void {
   const keyArgs = `@(${keys.join(',')})`
   ps(`${KEYBOARD_TYPES}
 ${hwnd === undefined ? `${INPUT_INTEGRITY_TYPES}\n[CuInputIntegrity]::RequireForeground()` : requireForegroundScript(hwnd)}
-[CuKeyboard]::Chord([int[]]${modifierArgs}, [int[]]${keyArgs})
+${expectedEscapeScript(parts)}[CuKeyboard]::Chord([int[]]${modifierArgs}, [int[]]${keyArgs})
 `)
+}
+
+/**
+ * Suppress the Escape the model is about to inject, without ignoring a user's
+ * injected Escape. The timestamp is written by the same PowerShell process
+ * immediately before keybd_event — not when the tool call starts — so the
+ * foreground guard/Add-Type startup cannot consume the 3s expectation
+ * window. Any chord containing Escape is covered (shift+escape, alt+escape…).
+ */
+function expectedEscapeScript(parts: readonly string[]): string {
+  if (!isWin32EscHotkeyRegistered()) return ''
+  if (!parts.some(part => {
+    const lower = part.toLowerCase()
+    return lower === 'escape' || lower === 'esc'
+  })) return ''
+  const path = getWin32EscExpectFile().replace(/'/g, "''")
+  const tmp = `${path}.tmp`
+  return `try { $tmp = '${tmp}'; [IO.File]::WriteAllText($tmp, [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString()); if ([IO.File]::Exists('${path}')) { [IO.File]::Delete('${path}') }; [IO.File]::Move($tmp, '${path}') } catch {};\n`
 }
 
 function unicodePowerShellScript(_text: string, hwnd?: number): string {
@@ -1025,7 +1045,7 @@ const input: InputPlatform = {
     if (boundHwnd) {
       // Multi-click needs the real system click counter; background messages
       // remain limited to single-click delivery.
-      const realInput = count > 1 || realMouseChannel() || isWinForms
+      const realInput = count > 1 || realMouseChannel()
       guardBoundWindow(realInput)
       if (realInput) {
         sendInputClick(boundHwnd, x, y, button, count)
@@ -1168,13 +1188,13 @@ for ($i = 0; $i -lt ${count}; $i++) {
       guardBoundWindow(true)
       ps(`${WIN32_TYPES}
 ${requireForegroundScript(boundHwnd)}
-[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPtr]::Zero)`)
+${expectedEscapeScript([name])}[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPtr]::Zero)`)
       return
     }
     ps(`${WIN32_TYPES}
 ${INPUT_INTEGRITY_TYPES}
 [CuInputIntegrity]::RequireForeground()
-[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPtr]::Zero)`)
+${expectedEscapeScript([name])}[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPtr]::Zero)`)
   },
 
   async keys(parts) {

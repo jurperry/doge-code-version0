@@ -132,14 +132,16 @@ async function writeClipboardViaPbcopy(text: string): Promise<void> {
 type Input = ReturnType<typeof requireComputerUseInput>
 
 /**
- * Single-element key sequence matching "escape" or "esc" (case-insensitive).
- * Used to hole-punch the CGEventTap abort for model-synthesized Escape — enigo
- * accepts both spellings, so the tap must too.
+ * True when any element of the sequence is "escape" or "esc" (case-insensitive).
+ * Used to hole-punch the CGEventTap abort for model-synthesized Escape — an
+ * Escape chord (shift+escape, alt+escape…) also injects VK_ESCAPE and would
+ * otherwise abort the turn. enigo accepts both spellings, so the tap must too.
  */
-function isBareEscape(parts: readonly string[]): boolean {
-  if (parts.length !== 1) return false
-  const lower = parts[0]!.toLowerCase()
-  return lower === 'escape' || lower === 'esc'
+function hasEscapePart(parts: readonly string[]): boolean {
+  return parts.some(part => {
+    const lower = part.toLowerCase()
+    return lower === 'escape' || lower === 'esc'
+  })
 }
 
 /**
@@ -663,14 +665,14 @@ export function createCliExecutor(opts: {
         for (let i = 0; i < n; i++) {
           if (i > 0) await sleep(8, signal)
           signal?.throwIfAborted()
-          if (isBareEscape(parts)) notifyExpectedEscape()
+          if (hasEscapePart(parts)) notifyExpectedEscape()
           await platform.input.keys(parts)
         }
         return
       }
       const input = getInput()
       const parts = keySequence.split('+').map(part => part.trim()).filter(Boolean)
-      const isEsc = isBareEscape(parts)
+      const isEsc = hasEscapePart(parts)
       const n = repeat ?? 1
       await drainRunLoop(async () => {
         for (let i = 0; i < n; i++) {
@@ -700,9 +702,9 @@ export function createCliExecutor(opts: {
         await drainRunLoop(async () => {
           for (const k of keyNames) {
             if (orphaned || signal?.aborted) return
-            // Bare Escape: notify the CGEventTap so it doesn't fire the
-            // abort callback for a model-synthesized press. Same as key().
-            if (isBareEscape([k])) {
+            // Escape (including a chord component): notify the CGEventTap so
+            // it doesn't fire the abort callback for a model-synthesized press.
+            if (hasEscapePart([k])) {
               notifyExpectedEscape()
             }
             pressed.push(k)

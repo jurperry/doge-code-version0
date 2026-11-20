@@ -28,9 +28,9 @@ import { logForDebugging } from '../debug.js';
 import { createSystemMessage } from '../messages.js';
 import { isAutoBypassActive } from '../permissions/autoBypass.js';
 import { buildAutoGrantResponse } from './autoGrant.js';
-import { checkComputerUseLock, tryAcquireComputerUseLock } from './computerUseLock.js';
+import { checkComputerUseLock, isLockHeldLocally, tryAcquireComputerUseLock } from './computerUseLock.js';
 import { COMPUTER_USE_MCP_SERVER_NAME } from './common.js';
-import { registerEscHotkey } from './escHotkey.js';
+import { ensureEscHotkey } from './escHotkey.js';
 import { getChicagoCoordinateMode } from './gates.js';
 import { getComputerUseHostAdapter } from './hostAdapter.js';
 import { getComputerUseMCPRenderingOverrides } from './toolRendering.js';
@@ -69,6 +69,14 @@ function tuc(): ToolUseContext {
   // Safe: `binding` is only populated when `currentToolUseContext` is set.
   // Called only from within `ctx` callbacks, which only fire during dispatch.
   return currentToolUseContext!;
+}
+/** Shared by the acquire-time registration and the per-action re-check. */
+function handleUserEscape(): void {
+  // A stale helper can outlive its lock by a few milliseconds during cleanup;
+  // never abort a later non-CU turn from that signal.
+  if (!isLockHeldLocally()) return;
+  logForDebugging('[cu-esc] user escape, aborting turn');
+  tuc().abortController.abort();
 }
 function formatLockHeld(holder: string): string {
   return `Computer use is in use by another Claude session (${holder.slice(0, 8)}…). Wait for that session to finish or run /exit there.`;
@@ -246,14 +254,11 @@ export function buildSessionContext(): ComputerUseSessionContext {
         throw new Error(formatLockHeld(r.by));
       }
       if (r.fresh) {
-        // Global Escape → abort. Consumes the event (PI defense — prompt
-        // injection can't dismiss dialogs with Escape). The CGEventTap's
-        // CFRunLoopSource is processed by the drainRunLoop pump, so this
-        // holds a pump retain until unregisterEscHotkey() in cleanup.ts.
-        const escRegistered = await registerEscHotkey(() => {
-          logForDebugging('[cu-esc] user escape, aborting turn');
-          tuc().abortController.abort();
-        });
+        // Global Escape → abort. The CGEventTap's CFRunLoopSource is
+        // processed by the drainRunLoop pump on macOS; the Windows hook lives
+        // in a PowerShell helper. Either way the registration is held until
+        // unregisterEscHotkey() in cleanup.ts.
+        const escRegistered = await ensureEscHotkey(handleUserEscape);
         tuc().sendOSNotification?.({
           message: escRegistered ? 'Claude is using your computer · press Esc to stop' : 'Claude is using your computer · press Ctrl+C to stop',
           notificationType: 'computer_use_enter'
@@ -309,6 +314,15 @@ async function callComputerUseTool({
   uacGuard,
 }: CallComputerUseToolOptions) {
   currentToolUseContext = context;
+  // The lock is process-wide and the hook is registered once at acquire time.
+  // Re-check before each action so a helper that died (PowerShell crash,
+  // antivirus kill, secure-desktop switch) is re-registered instead of
+  // silently leaving the user without Esc for the rest of the session.
+  if (isLockHeldLocally()) {
+    void ensureEscHotkey(handleUserEscape).catch(error => {
+      logForDebugging(`[cu-esc] re-register failed: ${error}`, { level: 'warn' });
+    });
+  }
   const toolUseID = extractToolUseId(parentMessage);
   const emit = (data: Record<string, unknown>): void => {
     if (toolUseID) onProgress?.({ toolUseID, data });

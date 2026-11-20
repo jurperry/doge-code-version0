@@ -19,7 +19,7 @@
 | 模型 | `~/.doge/model-catalog.json` 为连接/模型/角色/档位单一事实源；reasoning/effort 由目录策略驱动 |
 | 内置 MCP | `computer-use`（Windows/macOS）；`playwright`（无头）/`playwright-headed`（可见）两个 Node stdio 服务 |
 | 分发 | 无打包构建，Bun 直接跑 TS 源码；`bun link` 注册全局 `doge` |
-| 文案 | 命令/提示统一 `doge`；`--version` 仍输出 `2.1.345 (Claude Code)`（上游宏保留） |
+| 文案 | 命令/提示统一 `doge`；`--version` 仍输出 `2.1.347 (Claude Code)`（上游宏保留） |
 
 ## 架构总览
 
