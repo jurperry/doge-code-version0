@@ -1290,6 +1290,7 @@ const SDKUserMessageContentSchema = lazySchema(() =>
     isSynthetic: z.boolean().optional(),
     tool_use_result: z.unknown().optional(),
     priority: z.enum(['now', 'next', 'later']).optional(),
+    desktop_supplement: z.literal(true).optional(),
     timestamp: z
       .string()
       .optional()
@@ -1311,6 +1312,8 @@ export const SDKUserMessageReplaySchema = lazySchema(() =>
     uuid: UUIDPlaceholder(),
     session_id: z.string(),
     isReplay: z.literal(true),
+    inline_prompt: z.literal(true).optional(),
+    local_command: z.literal(true).optional(),
   }),
 )
 

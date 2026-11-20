@@ -333,6 +333,7 @@ test('web_search_call + url citations synthesize server_tool_use and web_search_
 
 test('input_tokens_details cache fields map into anthropic usage (cached subset of input_tokens)', async () => {
   const sse = [
+    'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1","usage":{"input_tokens":1500}}}\n\n',
     'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
     'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1500,"output_tokens":5,"input_tokens_details":{"cached_tokens":1200,"cache_write_tokens":100}}}}\n\n',
   ].join('')
@@ -355,6 +356,7 @@ test('input_tokens_details cache fields map into anthropic usage (cached subset 
   const delta = events.find(e => e.type === 'message_delta') as
     | { usage?: Record<string, unknown> }
     | undefined
+  expect((events[0].message as { usage: { input_tokens: number } }).usage.input_tokens).toBe(0)
   expect(delta?.usage?.input_tokens).toBe(200)
   expect(delta?.usage?.cache_read_input_tokens).toBe(1200)
   expect(delta?.usage?.cache_creation_input_tokens).toBe(100)
@@ -386,6 +388,23 @@ async function collectStreamEvents(
   }
   return events
 }
+
+test('Responses placeholder cache fields stay unknown and explicit zeros survive', async () => {
+  const ids = new Set<unknown>()
+  for (const cached of [undefined, 0]) {
+    const usage = { input_tokens: 100, output_tokens: 4, input_tokens_details: { cached_tokens: cached } }
+    const events = await collectStreamEvents([
+      'event: response.created\ndata: {"response":{"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0}}}}\n\n',
+      'event: response.output_text.delta\ndata: {"delta":"answer"}\n\n',
+      `event: response.completed\ndata: ${JSON.stringify({ response: { status: 'completed', usage } })}\n\n`,
+    ].join(''))
+    const start = events[0].message as { id: string }
+    ids.add(start.id)
+    const delta = events.find(event => event.type === 'message_delta')?.usage as { cache_read_input_tokens?: number | null }
+    expect(delta.cache_read_input_tokens).toBe(cached ?? null)
+  }
+  expect(ids.size).toBe(2)
+})
 
 function searchResultBlocks(
   events: Array<Record<string, unknown>>,

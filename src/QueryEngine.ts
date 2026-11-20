@@ -942,6 +942,9 @@ export class QueryEngine {
               uuid: message.attachment.source_uuid || message.uuid,
               timestamp: message.timestamp,
               isReplay: true,
+              ...(message.attachment.commandMode === 'prompt' && !message.attachment.origin && !message.attachment.isMeta
+                ? { inline_prompt: true }
+                : {}),
             } as SDKUserMessageReplay
           }
           break

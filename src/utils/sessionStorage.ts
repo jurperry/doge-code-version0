@@ -1629,7 +1629,25 @@ export async function recordNetworkRetryUsage(
   if (process.env.DOGE_WORKFLOW_TRANSCRIPTS === '1') {
     enqueueSdkEvent({ type: 'system', subtype: 'network_retry_usage', model, usage, source })
   }
+  await appendUsageFact(model, usage, source)
+}
+
+/** Preserve final usage when an assistant block reached the journal before its usage frame. */
+export function recordAssistantUsageCorrection(
+  model: string,
+  usage: Record<string, unknown>,
+  source: { messageId: string; messageUuid: string },
+): Promise<void> {
+  return appendUsageFact(model, usage, source)
+}
+
+async function appendUsageFact(
+  model: string,
+  usage: Record<string, unknown>,
+  source?: { messageId: string; messageUuid: string },
+): Promise<void> {
   const uuid = randomUUID()
+  // Keep the existing journal format for both kinds of retained-message corrections.
   await getProject().appendEntry({
     type: 'network-retry-usage', uuid, sessionId: getSessionId(), timestamp: new Date().toISOString(),
     ...(source ? { sourceUuid: source.messageUuid } : {}),
@@ -4537,6 +4555,11 @@ export function isLoggableMessage(m: Message): boolean {
   // When enabled, we allow hook_additional_context through since it contains
   // user-configured hook output that is useful for session context on resume.
   if (m.type === 'attachment' && getUserType() !== 'ant') {
+    // An inlined human prompt is part of the conversation on resume.
+    if (m.attachment.type === 'queued_command' &&
+        m.attachment.commandMode === 'prompt' && !m.attachment.origin && !m.attachment.isMeta) {
+      return true
+    }
     if (
       m.attachment.type === 'hook_additional_context' &&
       isEnvTruthy(process.env.CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT)

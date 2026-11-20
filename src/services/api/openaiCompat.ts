@@ -1,4 +1,5 @@
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { randomUUID } from 'node:crypto'
 import { joinBaseUrl } from './joinBaseUrl.js'
 import { requestFetch } from './requestLifecycle.js'
 import { streamAPIError } from './streamErrors.js'
@@ -144,13 +145,15 @@ type OpenAIStreamChunk = {
 /** Vendor cache fields → anthropic-shape pair. cached ⊆ prompt_tokens, so
  *  input_tokens must exclude the cached/written parts to keep the input-side
  *  total (= prompt_tokens) unchanged for updateUsage/cost tracking. */
-function openaiUsageCache(usage: OpenAIStreamChunk['usage']): { cacheRead: number; cacheWrite: number } {
-  if (!usage) return { cacheRead: 0, cacheWrite: 0 }
+function openaiUsageCache(usage: OpenAIStreamChunk['usage']): { cacheRead?: number; cacheWrite: number } {
+  if (!usage) return { cacheWrite: 0 }
   const details = usage.prompt_tokens_details
-  const read = details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? usage.cached_tokens
-  const write = details?.cache_write_tokens ?? details?.cache_creation_input_tokens
   const pos = (v: unknown): number => (typeof v === 'number' && v > 0 ? v : 0)
-  return { cacheRead: pos(read), cacheWrite: pos(write) }
+  const reads = [details?.cached_tokens, usage.prompt_cache_hit_tokens, usage.cached_tokens]
+  return {
+    cacheRead: reads.find(value => pos(value) > 0) ?? (reads.includes(0) ? 0 : undefined),
+    cacheWrite: pos(details?.cache_write_tokens) || pos(details?.cache_creation_input_tokens),
+  }
 }
 
 export function contentToText(content: BetaMessageParam['content']): string {
@@ -477,6 +480,7 @@ export async function createOpenAICompatStream(
   config: OpenAICompatConfig,
   request: OpenAIChatRequest,
   signal?: AbortSignal,
+  includeUsage = true,
 ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
   let response: Response
   try {
@@ -490,7 +494,11 @@ export async function createOpenAICompatStream(
           authorization: `Bearer ${config.apiKey}`,
           ...config.headers,
         },
-        body: JSON.stringify({ ...request, stream: true }),
+        body: JSON.stringify({
+          ...request,
+          stream: true,
+          ...(includeUsage ? { stream_options: { include_usage: true } } : {}),
+        }),
       },
     )
   } catch (error) {
@@ -511,6 +519,11 @@ export async function createOpenAICompatStream(
       responseText = await response.text()
     } catch {
       responseText = ''
+    }
+    if (includeUsage && (response.status === 400 || response.status === 422) &&
+        /\b(?:stream_options|include_usage)\b/i.test(responseText) &&
+        !isTransientUpstreamError(response.status, responseText)) {
+      return createOpenAICompatStream(config, request, signal, false)
     }
     // Detect context length overflow from OpenAI-format APIs and throw
     // a standardized error that upstream PTL detection can recognize.
@@ -660,6 +673,8 @@ export async function* createAnthropicStreamFromOpenAI(input: {
   const decoder = new TextDecoder()
   let buffer = ''
   let started = false
+  let messageId = `openai-compat-${randomUUID()}`
+  let finishReason: string | undefined
   let textStarted = false
   let textContentIndex: number | null = null
   let toolIndexByOpenAIIndex = new Map<number, number>()
@@ -668,7 +683,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
   let completionTokens = 0
   // Vendor cache fields (DeepSeek/GLM/Kimi/Qwen) mapped into the anthropic
   // usage shape — zero until a chunk reports them.
-  let cacheReadTokens = 0
+  let cacheReadTokens: number | undefined
   let cacheWriteTokens = 0
   let emittedAnyContent = false
   // DeepSeek reasoning_content tracking
@@ -680,7 +695,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
   let sawSearchResultMetadata = false
 
   try {
-  while (true) {
+  readStream: while (true) {
     const { done, value } = await input.reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
@@ -694,7 +709,8 @@ export async function* createAnthropicStreamFromOpenAI(input: {
         .map(line => line.slice(5).trim())
 
       for (const data of dataLines) {
-        if (!data || data === '[DONE]') continue
+        if (!data) continue
+        if (data === '[DONE]') break readStream
         const chunk = JSON.parse(data) as OpenAIStreamChunk
         if ((chunk as any)?.error) throw streamAPIError(chunk)
         if (!chunk || typeof chunk !== 'object') {
@@ -727,8 +743,10 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           completionTokens = chunk.usage.completion_tokens
         }
         const cache = openaiUsageCache(chunk.usage)
-        if (cache.cacheRead > 0) cacheReadTokens = cache.cacheRead
         if (cache.cacheWrite > 0) cacheWriteTokens = cache.cacheWrite
+        if (cache.cacheRead !== undefined && (
+          cache.cacheRead > 0 || (cacheReadTokens === undefined && (promptTokens > 0 || cacheWriteTokens > 0))
+        )) cacheReadTokens = cache.cacheRead
 
         // Preserve only structured provider search evidence. URLs written in
         // ordinary model text are deliberately not promoted to search results.
@@ -746,10 +764,11 @@ export async function* createAnthropicStreamFromOpenAI(input: {
 
         if (!started) {
           started = true
+          messageId = chunk.id ?? messageId
           yield {
             type: 'message_start',
             message: {
-              id: chunk.id ?? 'openai-compat',
+              id: messageId,
               type: 'message',
               role: 'assistant',
               model: input.model,
@@ -757,7 +776,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
               stop_reason: null,
               stop_sequence: null,
               usage: {
-                input_tokens: promptTokens,
+                input_tokens: 0,
                 output_tokens: 0,
               },
             },
@@ -877,146 +896,140 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           }
         }
 
-        if (choice?.finish_reason) {
-          // Close reasoning block if still open (edge case: no content/tool_calls after reasoning)
-          if (reasoningStarted && !reasoningClosed) {
-            reasoningClosed = true
-            yield {
-              type: 'content_block_stop',
-              index: reasoningContentIndex ?? 0,
-            } as BetaRawMessageStreamEvent
-          }
-          if (!emittedAnyContent) {
-            const emptyTextIndex = nextContentIndex
-            nextContentIndex++
-            yield {
-              type: 'content_block_start',
-              index: emptyTextIndex,
-              content_block: {
-                type: 'text',
-                text: '',
-              },
-            } as BetaRawMessageStreamEvent
-            yield {
-              type: 'content_block_stop',
-              index: emptyTextIndex,
-            } as BetaRawMessageStreamEvent
-          }
-          // completionTokens already updated from chunk.usage above
-          if (textStarted && textContentIndex !== null) {
-            yield {
-              type: 'content_block_stop',
-              index: textContentIndex,
-            } as BetaRawMessageStreamEvent
-          }
-
-          for (const anthropicIndex of toolIndexByOpenAIIndex.values()) {
-            yield {
-              type: 'content_block_stop',
-              index: anthropicIndex,
-            } as BetaRawMessageStreamEvent
-          }
-
-          // Synthesize Anthropic server_tool_use + web_search_tool_result
-          // blocks from structured search metadata so downstream consumers
-          // can reuse the native Anthropic parsing path. The search query is
-          // unknown on this API, so input_json_delta carries an empty query.
-          let webSearchRequests = 0
-          if (urlCitations.size > 0 || sawSearchResultMetadata) {
-            webSearchRequests = 1
-            const searchBlockIndex = nextContentIndex
-            nextContentIndex++
-            const resultBlockIndex = nextContentIndex
-            nextContentIndex++
-            const searchToolUseId = `srvtoolu_${chunk.id ?? 'openai_compat'}`
-            yield {
-              type: 'content_block_start',
-              index: searchBlockIndex,
-              content_block: {
-                type: 'server_tool_use',
-                id: searchToolUseId,
-                name: 'web_search',
-                input: {},
-              },
-            } as BetaRawMessageStreamEvent
-            yield {
-              type: 'content_block_delta',
-              index: searchBlockIndex,
-              delta: {
-                type: 'input_json_delta',
-                partial_json: JSON.stringify({ query: '' }),
-              },
-            } as BetaRawMessageStreamEvent
-            yield {
-              type: 'content_block_stop',
-              index: searchBlockIndex,
-            } as BetaRawMessageStreamEvent
-            yield {
-              type: 'content_block_start',
-              index: resultBlockIndex,
-              content_block: {
-                type: 'web_search_tool_result',
-                tool_use_id: searchToolUseId,
-                content: [...urlCitations].map(([url, title]) => ({
-                  type: 'web_search_result',
-                  title,
-                  url,
-                  encrypted_content: '',
-                  page_age: null,
-                })),
-              },
-            } as BetaRawMessageStreamEvent
-            yield {
-              type: 'content_block_stop',
-              index: resultBlockIndex,
-            } as BetaRawMessageStreamEvent
-          }
-
-          yield {
-            type: 'message_delta',
-            delta: {
-              stop_reason: mapFinishReason(choice.finish_reason),
-              stop_sequence: null,
-            },
-            usage: {
-              // Include input_tokens here so updateUsage() in claude.ts can
-              // correct the initial 0 from message_start. This is critical for
-              // APIs like DeepSeek that only report usage in the final chunk.
-              // Cache-hit mapping (desktop-app 0.2.78): cached ⊆ prompt_tokens,
-              // so input_tokens excludes the cached/written parts while the
-              // input-side total still equals prompt_tokens.
-              input_tokens: Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens),
-              output_tokens: completionTokens,
-              ...(cacheReadTokens > 0 ? { cache_read_input_tokens: cacheReadTokens } : {}),
-              ...(cacheWriteTokens > 0 ? { cache_creation_input_tokens: cacheWriteTokens } : {}),
-              ...(webSearchRequests > 0
-                ? { server_tool_use: { web_search_requests: webSearchRequests } }
-                : {}),
-            },
-          } as BetaRawMessageStreamEvent
-
-          yield {
-            type: 'message_stop',
-          } as BetaRawMessageStreamEvent
-
-          return {
-            id: chunk.id ?? 'openai-compat',
-            type: 'message',
-            role: 'assistant',
-            model: input.model,
-            content: [],
-            stop_reason: mapFinishReason(choice.finish_reason),
-            stop_sequence: null,
-            usage: {
-              input_tokens: Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens),
-              output_tokens: completionTokens,
-              ...(cacheReadTokens > 0 ? { cache_read_input_tokens: cacheReadTokens } : {}),
-              ...(cacheWriteTokens > 0 ? { cache_creation_input_tokens: cacheWriteTokens } : {}),
-            },
-          } as BetaMessage
-        }
+        if (choice?.finish_reason) finishReason = choice.finish_reason
+        // Keep reading through [DONE] or EOF. A finish chunk can be followed
+        // by a separate usage snapshot, even when it already has placeholders.
       }
     }
+  }
+
+  if (finishReason) {
+  // Close reasoning block if still open (edge case: no content/tool_calls after reasoning)
+  if (reasoningStarted && !reasoningClosed) {
+    reasoningClosed = true
+    yield {
+      type: 'content_block_stop',
+      index: reasoningContentIndex ?? 0,
+    } as BetaRawMessageStreamEvent
+  }
+  if (!emittedAnyContent) {
+    const emptyTextIndex = nextContentIndex
+    nextContentIndex++
+    yield {
+      type: 'content_block_start',
+      index: emptyTextIndex,
+      content_block: {
+        type: 'text',
+        text: '',
+      },
+    } as BetaRawMessageStreamEvent
+    yield {
+      type: 'content_block_stop',
+      index: emptyTextIndex,
+    } as BetaRawMessageStreamEvent
+  }
+  // completionTokens already updated from chunk.usage above
+  if (textStarted && textContentIndex !== null) {
+    yield {
+      type: 'content_block_stop',
+      index: textContentIndex,
+    } as BetaRawMessageStreamEvent
+  }
+
+  for (const anthropicIndex of toolIndexByOpenAIIndex.values()) {
+    yield {
+      type: 'content_block_stop',
+      index: anthropicIndex,
+    } as BetaRawMessageStreamEvent
+  }
+
+  // Synthesize Anthropic server_tool_use + web_search_tool_result
+  // blocks from structured search metadata so downstream consumers
+  // can reuse the native Anthropic parsing path. The search query is
+  // unknown on this API, so input_json_delta carries an empty query.
+  let webSearchRequests = 0
+  if (urlCitations.size > 0 || sawSearchResultMetadata) {
+    webSearchRequests = 1
+    const searchBlockIndex = nextContentIndex
+    nextContentIndex++
+    const resultBlockIndex = nextContentIndex
+    nextContentIndex++
+    const searchToolUseId = `srvtoolu_${messageId}`
+    yield {
+      type: 'content_block_start',
+      index: searchBlockIndex,
+      content_block: {
+        type: 'server_tool_use',
+        id: searchToolUseId,
+        name: 'web_search',
+        input: {},
+      },
+    } as BetaRawMessageStreamEvent
+    yield {
+      type: 'content_block_delta',
+      index: searchBlockIndex,
+      delta: {
+        type: 'input_json_delta',
+        partial_json: JSON.stringify({ query: '' }),
+      },
+    } as BetaRawMessageStreamEvent
+    yield {
+      type: 'content_block_stop',
+      index: searchBlockIndex,
+    } as BetaRawMessageStreamEvent
+    yield {
+      type: 'content_block_start',
+      index: resultBlockIndex,
+      content_block: {
+        type: 'web_search_tool_result',
+        tool_use_id: searchToolUseId,
+        content: [...urlCitations].map(([url, title]) => ({
+          type: 'web_search_result',
+          title,
+          url,
+          encrypted_content: '',
+          page_age: null,
+        })),
+      },
+    } as BetaRawMessageStreamEvent
+    yield {
+      type: 'content_block_stop',
+      index: resultBlockIndex,
+    } as BetaRawMessageStreamEvent
+  }
+
+  const stopReason = mapFinishReason(finishReason)
+  // Cache reads and writes are already included in OpenAI's prompt total.
+  const usage = {
+    input_tokens: Math.max(0, promptTokens - (cacheReadTokens ?? 0) - cacheWriteTokens),
+    output_tokens: completionTokens,
+    ...(cacheReadTokens !== undefined ? { cache_read_input_tokens: cacheReadTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cache_creation_input_tokens: cacheWriteTokens } : {}),
+    ...(webSearchRequests > 0 ? { server_tool_use: { web_search_requests: webSearchRequests } } : {}),
+  }
+  yield {
+    type: 'message_delta',
+    delta: {
+      stop_reason: stopReason,
+      stop_sequence: null,
+    },
+    usage,
+  } as BetaRawMessageStreamEvent
+
+  yield {
+    type: 'message_stop',
+  } as BetaRawMessageStreamEvent
+
+  return {
+    id: messageId,
+    type: 'message',
+    role: 'assistant',
+    model: input.model,
+    content: [],
+    stop_reason: stopReason,
+    stop_sequence: null,
+    usage,
+  } as BetaMessage
   }
 
   throw new APIConnectionError({ message:

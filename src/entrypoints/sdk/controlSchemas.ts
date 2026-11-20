@@ -98,6 +98,7 @@ export const SDKControlInterruptRequestSchema = lazySchema(() =>
   z
     .object({
       subtype: z.literal('interrupt'),
+      cancel_message_uuids: z.array(z.string()).optional(),
     })
     .describe('Interrupts the currently running conversation turn.'),
 )

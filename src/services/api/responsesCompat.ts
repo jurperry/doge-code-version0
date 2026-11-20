@@ -1,4 +1,5 @@
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import { randomUUID } from 'node:crypto'
 import { joinBaseUrl } from './joinBaseUrl.js'
 import { requestFetch } from './requestLifecycle.js'
 import { streamAPIError } from './streamErrors.js'
@@ -569,17 +570,16 @@ function getUsage(event: ResponsesStreamEvent): ResponsesUsage | undefined {
 
 function mapUsageToAnthropic(
   usage: ResponsesUsage,
-  cache: { read: number; write: number } = { read: 0, write: 0 },
+  cache: { read?: number; write: number } = { write: 0 },
 ): BetaUsage {
   // cached ⊆ input_tokens (Responses semantics): keep the input-side total
   // equal to input_tokens while splitting the cached/written parts out.
-  const read = cache.read > 0 ? cache.read : 0
   const write = cache.write > 0 ? cache.write : 0
   return {
-    input_tokens: Math.max(0, (usage.input_tokens ?? 0) - read - write),
+    input_tokens: Math.max(0, (usage.input_tokens ?? 0) - (cache.read ?? 0) - write),
     output_tokens: usage.output_tokens ?? 0,
     cache_creation_input_tokens: write,
-    cache_read_input_tokens: read,
+    cache_read_input_tokens: cache.read ?? null,
   } as BetaUsage
 }
 
@@ -589,7 +589,7 @@ function makeBetaMessage(params: {
   inputTokens: number
   outputTokens: number
   stopReason: BetaMessage['stop_reason']
-  cache?: { read: number; write: number }
+  cache?: { read?: number; write: number }
 }): BetaMessage {
   return {
     id: params.id,
@@ -640,10 +640,10 @@ export async function* createAnthropicStreamFromResponses(input: {
   let nextContentIndex = 0
   let promptTokens = 0
   let completionTokens = 0
-  let cacheReadTokens = 0
+  let cacheReadTokens: number | undefined
   let cacheWriteTokens = 0
   let emittedAnyContent = false
-  let responseId = 'responses-compat'
+  let responseId = `responses-compat-${randomUUID()}`
   let finalStopReason: BetaMessage['stop_reason'] = 'end_turn'
   const toolStates = new Map<string, ToolCallState>()
   const toolOrder: string[] = []
@@ -737,14 +737,10 @@ export async function* createAnthropicStreamFromResponses(input: {
 
         const eventType = normalizeEventType(event, rawEvent.event)
         if (eventType === 'error' || eventType === 'response.failed') throw streamAPIError(event)
-        responseId =
-          event.response?.id ?? event.response_id ?? event.item?.id ?? responseId
-
         const usage = getUsage(event)
         if (!started) {
           started = true
-          promptTokens = usage?.input_tokens ?? 0
-          completionTokens = usage?.output_tokens ?? 0
+          responseId = event.response?.id ?? event.response_id ?? responseId
           yield {
             type: 'message_start',
             message: {
@@ -755,10 +751,9 @@ export async function* createAnthropicStreamFromResponses(input: {
               content: [],
               stop_reason: null,
               stop_sequence: null,
-              usage: mapUsageToAnthropic(
-                { input_tokens: promptTokens, output_tokens: 0 },
-                { read: cacheReadTokens, write: cacheWriteTokens },
-              ),
+              // The split between ordinary, read and written tokens is only
+              // reliable once the stream reports its final usage.
+              usage: mapUsageToAnthropic({}),
             },
           } as BetaRawMessageStreamEvent
         }
@@ -766,8 +761,11 @@ export async function* createAnthropicStreamFromResponses(input: {
         if (usage?.input_tokens !== undefined) promptTokens = usage.input_tokens
         if (usage?.output_tokens !== undefined) completionTokens = usage.output_tokens
         const details = usage?.input_tokens_details
-        if (details?.cached_tokens !== undefined && details.cached_tokens > 0) cacheReadTokens = details.cached_tokens
         if (details?.cache_write_tokens !== undefined && details.cache_write_tokens > 0) cacheWriteTokens = details.cache_write_tokens
+        const read = details?.cached_tokens
+        if (typeof read === 'number' && (
+          read > 0 || (read === 0 && cacheReadTokens === undefined && (promptTokens > 0 || cacheWriteTokens > 0))
+        )) cacheReadTokens = read
 
         const summary = eventType.startsWith('response.reasoning_summary_text.')
         const rawReasoning = eventType.startsWith('response.reasoning_text.')

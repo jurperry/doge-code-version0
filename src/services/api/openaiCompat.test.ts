@@ -315,6 +315,45 @@ test('vendor cache fields map into anthropic usage (details / DeepSeek / Kimi fo
   }
 })
 
+test('consumes usage-only frames after the finish reason, including a fully cached prompt', async () => {
+  const events = await collectStreamEvents(
+    sseOf([
+      { id: 'cached', choices: [{ delta: { content: 'answer' } }], usage: { prompt_tokens: 200 } },
+      { choices: [{ delta: {}, finish_reason: 'stop' }], usage: {} },
+      { choices: [], usage: { prompt_tokens: 200, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 0 }, prompt_cache_hit_tokens: 200 } },
+    ]),
+  )
+  const delta = events.find(event => event.type === 'message_delta')
+  expect(delta?.usage).toMatchObject({ input_tokens: 0, cache_read_input_tokens: 200, output_tokens: 4 })
+  expect(events.at(-1)?.type).toBe('message_stop')
+})
+
+test('distinguishes an explicit zero cache count from an omitted count', async () => {
+  for (const cache of [undefined, 0]) {
+    const events = await collectStreamEvents(sseOf([
+      { choices: [{ delta: {} }], usage: { prompt_tokens: 0, prompt_cache_hit_tokens: 0 } },
+      { choices: [{ delta: { content: 'answer' }, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 100, completion_tokens: 4, prompt_cache_hit_tokens: cache } },
+    ]))
+    expect(events.find(event => event.type === 'message_delta')?.usage?.cache_read_input_tokens).toBe(cache)
+  }
+})
+
+test('requests streaming usage and retries once when the gateway rejects the option', async () => {
+  const bodies: Record<string, unknown>[] = []
+  const reader = await createOpenAICompatStream({
+    ...baseConfig,
+    fetch: (async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return bodies.length === 1
+        ? new Response('unsupported stream_options parameter', { status: 400 })
+        : new Response('data: [DONE]\n\n')
+    }) as typeof fetch,
+  }, { model: 'test', messages: [] })
+  await reader.cancel()
+  expect(bodies.map(body => body.stream_options)).toEqual([{ include_usage: true }, undefined])
+})
+
 test('zero-argument tool call survives — no synthetic empty-text block clobbers it', async () => {
   const events = await collectStreamEvents(
     sseOf([

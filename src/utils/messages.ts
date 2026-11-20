@@ -5531,6 +5531,6 @@ export function wrapCommandText(
     case 'human':
     case undefined:
     default:
-      return `The user sent a new message while you were working:\n${raw}\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.`
+      return `The user sent an update while you were working:\n${raw}\n\nUse this update to guide your next actions and adjust the remaining work accordingly.`
   }
 }

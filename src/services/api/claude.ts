@@ -29,7 +29,7 @@ import { getCatalogReasoningPolicy, getHostReasoningPolicy, hostResponseFields, 
 import { desktopBrowserPreference } from 'src/utils/playwrightMcp/common.js'
 import { limitBrowserToolSchemas, previousBrowserServer } from 'src/utils/playwrightMcp/browserIntent.js'
 import { suppressEffort } from 'src/utils/effortContext.js'
-import { recordNetworkRetryUsage } from 'src/utils/sessionStorage.js'
+import { recordAssistantUsageCorrection, recordNetworkRetryUsage } from 'src/utils/sessionStorage.js'
 import {
   convertAnthropicRequestToOpenAI,
   createAnthropicStreamFromOpenAI,
@@ -2423,6 +2423,7 @@ async function* queryModel(
             const m: AssistantMessage = {
               message: {
                 ...partialMessage,
+                usage: withCacheReadReport(partialMessage.usage, usage),
                 content: normalizeContentFromAPI(
                   [contentBlock] as BetaContentBlock[],
                   tools,
@@ -2474,6 +2475,14 @@ async function* queryModel(
 
             const lastMsg = newMessages.at(-1)
             if (lastMsg) {
+              if (options.querySource === 'sdk' && !options.agentId && !retainedToolUsageCorrection &&
+                inputUsageChanged(lastMsg.message.usage, usage)) {
+                // The block may already be on disk. Its UUID is deduplicated,
+                // so the in-memory update alone cannot repair it.
+                void recordAssistantUsageCorrection(options.model, usage, {
+                  messageId: lastMsg.message.id, messageUuid: lastMsg.uuid,
+                }).catch(logError)
+              }
               lastMsg.message.usage = usage
               lastMsg.message.stop_reason = stopReason
             }
@@ -2521,9 +2530,15 @@ async function* queryModel(
           }
         }
 
+        // Carry cache-count provenance to desktop consumers of the raw stream.
+        const event = part.type === 'message_start'
+          ? { ...part, message: { ...part.message, usage: withCacheReadReport(part.message.usage, usage) } }
+          : part.type === 'message_delta'
+            ? { ...part, usage: withCacheReadReport(part.usage, usage) }
+            : part
         yield {
           type: 'stream_event',
-          event: part,
+          event,
           ...(part.type === 'message_start' ? { ttftMs } : undefined),
         }
       }
@@ -2734,6 +2749,7 @@ async function* queryModel(
       const m: AssistantMessage = {
         message: {
           ...result,
+          usage: withCacheReadReport(result.usage, updateUsage(EMPTY_USAGE, result.usage)),
           content: normalizeContentFromAPI(
             result.content,
             tools,
@@ -2832,6 +2848,7 @@ async function* queryModel(
         const m: AssistantMessage = {
           message: {
             ...result,
+            usage: withCacheReadReport(result.usage, updateUsage(EMPTY_USAGE, result.usage)),
             content: normalizeContentFromAPI(
               result.content,
               tools,
@@ -3103,15 +3120,23 @@ export function cleanupStream(
   }
 }
 
+function withCacheReadReport<T extends object>(fields: T, usage: NonNullableUsage): T {
+  return usage.cache_read_reported ? { ...fields, cache_read_reported: true } : fields
+}
+
+function inputUsageChanged(
+  previous: (BetaUsage & { cache_read_reported?: true }) | undefined,
+  current: NonNullableUsage,
+): boolean {
+  return (previous?.input_tokens ?? 0) !== current.input_tokens ||
+    (previous?.cache_creation_input_tokens ?? 0) !== (current.cache_creation_input_tokens ?? 0) ||
+    (previous?.cache_read_input_tokens ?? 0) !== (current.cache_read_input_tokens ?? 0) ||
+    previous?.cache_read_reported !== current.cache_read_reported
+}
+
 /**
- * Updates usage statistics with new values from streaming API events.
- * Note: Anthropic's streaming API provides cumulative usage totals, not incremental deltas.
- * Each event contains the complete usage up to that point in the stream.
- *
- * Input-related tokens (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
- * are typically set in message_start and remain constant. message_delta events may send
- * explicit 0 values for these fields, which should not overwrite the values from message_start.
- * We only update these fields if they have a non-null, non-zero value.
+ * Input counts can be split across frames. Preserve established counts when
+ * providers send zero placeholders, and track whether they reported reads.
  */
 export function updateUsage(
   usage: Readonly<NonNullableUsage>,
@@ -3120,6 +3145,9 @@ export function updateUsage(
   if (!partUsage) {
     return { ...usage }
   }
+  const read = partUsage.cache_read_input_tokens
+  const hasInput = (partUsage.input_tokens ?? 0) > 0 || (partUsage.cache_creation_input_tokens ?? 0) > 0 ||
+    usage.input_tokens > 0 || (usage.cache_creation_input_tokens ?? 0) > 0
   return {
     input_tokens:
       partUsage.input_tokens !== null && partUsage.input_tokens > 0
@@ -3130,11 +3158,10 @@ export function updateUsage(
       partUsage.cache_creation_input_tokens > 0
         ? partUsage.cache_creation_input_tokens
         : usage.cache_creation_input_tokens,
-    cache_read_input_tokens:
-      partUsage.cache_read_input_tokens !== null &&
-      partUsage.cache_read_input_tokens > 0
-        ? partUsage.cache_read_input_tokens
-        : usage.cache_read_input_tokens,
+    cache_read_input_tokens: typeof read === 'number' && read > 0 ? read : usage.cache_read_input_tokens,
+    ...(usage.cache_read_reported || (typeof read === 'number' && (read > 0 || (read === 0 && hasInput)))
+      ? { cache_read_reported: true as const }
+      : {}),
     output_tokens: partUsage.output_tokens ?? usage.output_tokens,
     server_tool_use: {
       web_search_requests:

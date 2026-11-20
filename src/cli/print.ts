@@ -1329,6 +1329,7 @@ function runHeadlessStreaming(
           uuid: crumb.uuid,
           timestamp: crumb.timestamp,
           isReplay: true,
+          local_command: true,
         } satisfies SDKUserMessageReplay)
       }
     }
@@ -2042,7 +2043,11 @@ function runHeadlessStreaming(
           // Prompt commands greedily collect followers with matching workload.
           const batch: QueuedCommand[] = [command]
           if (command.mode === 'prompt') {
-            while (!replacementJob && !replacementJobs.has(peek(isMainThread)?.uuid ?? '') && canBatchWith(command, peek(isMainThread))) {
+            // A queued steering prompt may turn into its own round if the
+            // previous reply ended without another tool boundary.
+            while (!replacementJob && !command.desktopSupplement) {
+              const next = peek(isMainThread)
+              if (!next || next.desktopSupplement || replacementJobs.has(next.uuid ?? '') || !canBatchWith(command, next)) break
               batch.push(dequeue(isMainThread)!)
             }
             if (batch.length > 1) {
@@ -3166,6 +3171,8 @@ function runHeadlessStreaming(
 
       if (message.type === 'control_request') {
         if (message.request.subtype === 'interrupt') {
+          const cancelled = new Set(message.request.cancel_message_uuids)
+          if (cancelled.size) dequeueAllMatching(command => !!command.uuid && cancelled.has(command.uuid))
           // Abort before awaiting task teardown: no new model request may race
           // the stop through a workflow's completion notification.
           await interruptSession()
@@ -4570,6 +4577,7 @@ function runHeadlessStreaming(
         pastedContents: intake.pastedContents,
         uuid: message.uuid,
         priority: message.priority,
+        desktopSupplement: message.desktop_supplement === true,
       })
       // Increment prompt count for attribution tracking and save snapshot
       // The snapshot persists promptCount so it survives compaction
