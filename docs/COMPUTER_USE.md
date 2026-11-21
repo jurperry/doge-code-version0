@@ -4,7 +4,7 @@ Computer Use（CU）是内置 MCP 工具组：在用户授权范围内截图、�
 
 ## 1. 工具矩阵
 
-`packages/@ant/computer-use-mcp/src/tools.ts` 的 `buildComputerUseTools()`：基础 24 工具 + Windows 专属 3（`list_windows`/`activate_window`/`get_window`）= **Windows 27 / macOS 24**；Teach 系列默认不注册（`caps.teachMode` 未启用）。
+`packages/@ant/computer-use-mcp/src/tools.ts` 的 `buildComputerUseTools()` 注册 **Windows 27 / macOS 24 / Linux X11 18** 个工具。Windows 专属工具为 `list_windows`、`activate_window`、`get_window`。Teach 系列默认不注册（`caps.teachMode` 未启用）。
 
 | 类别 | 工具 | 用途 |
 |---|---|---|
@@ -15,7 +15,9 @@ Computer Use（CU）是内置 MCP 工具组：在用户授权范围内截图、�
 | 键盘/剪贴板 | `type`、`key`、`hold_key`、`read_clipboard`、`write_clipboard` | 文本/组合键/按住；剪贴板需独立 flag |
 | 批次/等待 | `computer_batch` / `wait` | 顺序多动作与部分失败边界；有界等待 |
 
-注册条件（`src/main.tsx`）：平台 `macos|windows` 且（非交互 或 `DOGE_HEADLESS_BUILTIN_MCP` truthy），且 `getChicagoEnabled()`（`DOGE_COMPUTER_USE_MCP` falsy 关闭）。`setup.ts` 注册进程内 MCP（`mcp__computer-use__*`），工具调用走进程内 dispatch（不经 stdio）。
+注册条件（`src/main.tsx`）：平台为 macOS、Windows 或通过能力检测的 Linux X11，且为交互会话或设置了 `DOGE_HEADLESS_BUILTIN_MCP=1`。设置 `DOGE_COMPUTER_USE_MCP=0` 可关闭。`setup.ts` 注册进程内 MCP（`mcp__computer-use__*`），工具调用走进程内 dispatch（不经 stdio）。
+
+Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWMH 窗口管理器，且 PATH 中有 `xclip` 时注册。X11 协议和 JPEG 编码运行在 Bun 内，无需 Python 或编译工具。先打开目标窗口，调用 `request_access` 授权，再使用 `open_application` 聚焦并截图。授权绑定已打开的窗口。焦点或窗口几何变化后重新截图。截图和 zoom 遇到遮挡、非矩形窗口或区域越出屏幕时返回错误。文本输入临时使用纯文本剪贴板，恢复前检查其中内容是否变化。剪贴板提供非纯文本格式时停止。Wayland/Xwayland、整屏、拖拽、持键、鼠标按下/抬起和批量操作不在这一版 Linux 支持范围内。
 
 ## 2. 授权与安全模型
 
@@ -61,7 +63,7 @@ Computer Use（CU）是内置 MCP 工具组：在用户授权范围内截图、�
 
 可复用脚本（`tools/`）：`computer-use-e2e.ts`（只读）、`e2e-cu-input-guard.ts`（同名 exe/窗口绑定/真实点击）、`computer-use-input-fixture-e2e.ts`（WinForms fixture）、`computer-use-win32-unicode-e2e.ts`/`computer-use-chromium-unicode-e2e.ts`（Unicode 输入）、`computer-use-host-target-e2e.ts`、`computer-use-uac.test.ts`；package 内 `toolContract.test.ts` 校验字段契约。定向命令示例：`bun tools/check-computer-use-win32-performance.ts`（性能门禁）、`bun test tools/computer-use-uac.test.ts src/utils/computerUse/win32/elevatedPowerShell.test.ts`（UAC/管理员助手），管理员场景用 `CU_FIXTURE_ELEVATED=1` 跑 input-fixture e2e。
 
-平台限制：Windows 走 `src/utils/computerUse/platforms/win32.ts`（PowerShell + Add-Type C# + Win32），混合 DPI 多屏仍需真实硬件；macOS 见 §2；Linux 有后端但不注册。SendInput 全注入不等于业务完成；PrintWindow 返回 true 仍可能黑图；UAC/助手/自动解绑实机结果见 `../development_logs.md` §1。
+平台限制：Windows 走 `src/utils/computerUse/platforms/win32.ts`（PowerShell + Add-Type C# + Win32），混合 DPI 多屏仍需真实硬件；macOS 见 §2。Linux X11 验收可在隔离显示中运行 `xvfb-run -a sh -c 'openbox & bun tools/computer-use-linux-x11-e2e.ts'`，验收另需 `xauth xvfb openbox xdotool`。SendInput 全注入不等于业务完成；PrintWindow 返回 true 仍可能黑图；UAC/助手/自动解绑实机结果见 `../development_logs.md` §1。
 
 ## 7. 关键代码入口
 

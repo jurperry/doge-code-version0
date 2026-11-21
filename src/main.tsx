@@ -1627,15 +1627,17 @@ async function run(): Promise<CommanderCommand> {
     // doge fork: headless opt-in for the builtin MCP servers (see the
     // Playwright block below for the rationale).
     const isHeadlessBuiltinMcpEnabled = () => isEnvTruthy(process.env.DOGE_HEADLESS_BUILTIN_MCP);
-    if ((getPlatform() === 'macos' || getPlatform() === 'windows') && (!getIsNonInteractiveSession() || isHeadlessBuiltinMcpEnabled())) {
+    const isLinux = process.platform === 'linux';
+    if ((getPlatform() === 'macos' || getPlatform() === 'windows' || isLinux) && (!getIsNonInteractiveSession() || isHeadlessBuiltinMcpEnabled())) {
       try {
         const {
           getChicagoEnabled
         } = await import('src/utils/computerUse/gates.js');
-        if (getChicagoEnabled()) {
+        if (getChicagoEnabled() && (!isLinux || await (await import('src/utils/computerUse/platforms/linux.js')).isLinuxComputerUseAvailable())) {
           const {
             setupComputerUseMCP,
-            COMPUTER_USE_MCP_PROMPT_HINT
+            COMPUTER_USE_MCP_PROMPT_HINT,
+            LINUX_COMPUTER_USE_MCP_PROMPT_HINT
           } = await import('src/utils/computerUse/setup.js');
           const {
             mcpConfig,
@@ -1651,7 +1653,8 @@ async function run(): Promise<CommanderCommand> {
           // custom/translated endpoints (openai/responses bridges) don't.
           // Append the local hint so the model discovers and drives the CU
           // tools regardless of provider. Same pattern as the Chrome hint.
-          appendSystemPrompt = appendSystemPrompt ? `${appendSystemPrompt}\n\n${COMPUTER_USE_MCP_PROMPT_HINT}` : COMPUTER_USE_MCP_PROMPT_HINT;
+          const hint = isLinux ? LINUX_COMPUTER_USE_MCP_PROMPT_HINT : COMPUTER_USE_MCP_PROMPT_HINT;
+          appendSystemPrompt = appendSystemPrompt ? `${appendSystemPrompt}\n\n${hint}` : hint;
         }
       } catch (error) {
         logForDebugging(`[Computer Use MCP] Setup failed: ${errorMessage(error)}`);

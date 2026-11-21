@@ -50,6 +50,7 @@
         "ignore": "*",
         "indent-string": "*",
         "ink": "*",
+        "jpeg-js": "0.4.4",
         "jsonc-parser": "*",
         "lodash-es": "*",
         "lru-cache": "*",
@@ -78,6 +79,7 @@
         "vscode-languageserver-types": "*",
         "wrap-ansi": "*",
         "ws": "*",
+        "x11": "4.4.0",
         "xss": "*",
         "yaml": "*",
         "zod": "*",
@@ -624,6 +626,8 @@
 
     "jose": ["jose@6.2.2", "https://mirrors.cloud.tencent.com/npm/jose/-/jose-6.2.2.tgz", {}, "sha512-d7kPDd34KO/YnzaDOlikGpOurfF0ByC2sEV4cANCtdqLlTfBlw2p14O/5d/zv40gJPbIQxfES3nSx1/oYNyuZQ=="],
 
+    "jpeg-js": ["jpeg-js@0.4.4", "", {}, "sha512-WZzeDOEtTOBK4Mdsar0IqEU5sMr3vSV2RqkAIzUEV2BHnUfKGyswWFPFwK5EeDo93K3FohSHbLAjj0s1Wzd+dg=="],
+
     "json-bigint": ["json-bigint@1.0.0", "https://mirrors.cloud.tencent.com/npm/json-bigint/-/json-bigint-1.0.0.tgz", { "dependencies": { "bignumber.js": "^9.0.0" } }, "sha512-SiPv/8VpZuWbvLSMtTDU8hEfrZWg/mH/nV/b4o0CYbSxu1UIQPLdwKOCIyLQX+VIPO5vrLX3i8qtqFyhdPSUSQ=="],
 
     "json-schema-to-ts": ["json-schema-to-ts@3.1.1", "https://mirrors.cloud.tencent.com/npm/json-schema-to-ts/-/json-schema-to-ts-3.1.1.tgz", { "dependencies": { "@babel/runtime": "^7.18.3", "ts-algebra": "^2.0.0" } }, "sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g=="],
@@ -863,6 +867,8 @@
     "wrappy": ["wrappy@1.0.2", "https://mirrors.cloud.tencent.com/npm/wrappy/-/wrappy-1.0.2.tgz", {}, "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ=="],
 
     "ws": ["ws@8.20.0", "https://mirrors.cloud.tencent.com/npm/ws/-/ws-8.20.0.tgz", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-sAt8BhgNbzCtgGbt2OxmpuryO63ZoDk/sqaB/znQm94T4fCEsy/yV+7CdC1kJhOU9lboAEU7R3kquuycDoibVA=="],
+
+    "x11": ["x11@4.4.0", "", {}, "sha512-xqIUMvrWJawtd8pQgD85t0sUnBbk94Bd21Gevn0vPYvRH0hkyP3CQjeT85aJEw+ZK/txO4mIwj1P9LM1+mhuJA=="],
 
     "xss": ["xss@1.0.15", "https://mirrors.cloud.tencent.com/npm/xss/-/xss-1.0.15.tgz", { "dependencies": { "commander": "^2.20.3", "cssfilter": "0.0.10" }, "bin": { "xss": "bin/xss" } }, "sha512-FVdlVVC67WOIPvfOwhoMETV72f6GbW7aOabBC3WxN/oUdoEMDyLz4OgRv5/gck2ZeNqEQu+Tb0kloovXOfpYVg=="],
 

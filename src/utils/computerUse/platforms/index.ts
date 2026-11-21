@@ -26,9 +26,6 @@ export function loadPlatform(): Platform {
     case 'win32':
       cached = require('./win32.js').platform
       break
-    case 'linux':
-      cached = require('./linux.js').platform
-      break
     default:
       throw new Error(`Computer Use not supported on ${process.platform}`)
   }

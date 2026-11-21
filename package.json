@@ -69,6 +69,7 @@
     "ignore": "*",
     "indent-string": "*",
     "ink": "*",
+    "jpeg-js": "0.4.4",
     "jsonc-parser": "*",
     "lodash-es": "*",
     "lru-cache": "*",
@@ -97,6 +98,7 @@
     "vscode-languageserver-types": "*",
     "wrap-ansi": "*",
     "ws": "*",
+    "x11": "4.4.0",
     "xss": "*",
     "yaml": "*",
     "zod": "*"

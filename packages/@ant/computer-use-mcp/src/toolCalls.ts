@@ -43,6 +43,7 @@ import { getDefaultTierForApp, getDeniedCategoryForApp, isPolicyDenied } from ".
 import { MAX_BATCH_ACTIONS, MAX_BATCH_IMAGE_BYTES, MAX_BATCH_SCREENSHOTS, MAX_TYPE_TEXT_LENGTH } from "./limits.js";
 import type {
   ComputerExecutor,
+  ComputerExecutorCapabilities,
   DisplayGeometry,
   InstalledApp,
   ResolvePrepareCaptureResult,
@@ -51,7 +52,7 @@ import type {
 } from "./executor.js";
 import { isSystemKeyCombo } from "./keyBlocklist.js";
 import { validateClickTarget } from "./pixelCompare.js";
-import { BATCH_ACTION_NAMES } from "./tools.js";
+import { BATCH_ACTION_NAMES, isComputerUseToolAvailable } from "./tools.js";
 import { SENTINEL_BUNDLE_IDS } from "./sentinelApps.js";
 import type {
   AppGrant,
@@ -485,7 +486,7 @@ async function syncClipboardStash(
   }
 }
 
-function normalizeAppId(platform: "darwin" | "win32", id: string): string {
+function normalizeAppId(platform: ComputerExecutorCapabilities["platform"], id: string): string {
   if (platform !== "win32") return id;
   const path = id.replace(/\//g, "\\").toLowerCase();
   return windowsPath.isAbsolute(path) && path.endsWith(".exe") ? windowsPath.normalize(path) : path;
@@ -644,6 +645,11 @@ async function runInputActionPermissionGates(
   // macOS-style frontmost gate. Windows continues below with its effective
   // input target so allowlist and read/click/full tiers remain enforced.
   const isWin32 = adapter.executor.capabilities.platform === "win32";
+  const isLinux = adapter.executor.capabilities.platform === "linux";
+  if (isLinux && (!overrides.lastScreenshot ||
+      overrides.lastScreenshot.targetRevision !== adapter.executor.getBoundRevision?.())) {
+    return errorResult("Take a fresh screenshot of the authorized X11 window before acting.", "state_conflict");
+  }
   if (adapter.executor.capabilities.screenshotFiltering === 'none' && !isWin32) {
     return null;
   }
@@ -657,6 +663,9 @@ async function runInputActionPermissionGates(
   // Frontmost/effective-target gate. Check FRESH on every call.
   const frontmost = await adapter.executor.getFrontmostApp();
   throwIfActionAborted(overrides);
+  if (isLinux && (!frontmost || frontmost.bundleId !== adapter.executor.getBoundAppId?.())) {
+    return errorResult("The X11 capture target no longer has focus. Focus it and take a new screenshot.", "state_conflict");
+  }
 
   // After handleToolCall's tier backfill, every grant has a concrete tier.
   const frontmostAccess = frontmost
@@ -800,9 +809,9 @@ async function runHitTestGate(
   const target = await adapter.executor.appUnderPoint(x, y);
   throwIfActionAborted(overrides);
   if (!target) {
-    if (platform === 'win32') {
+    if (platform === 'win32' || platform === 'linux') {
       return errorResult(
-        "Windows could not identify the application under the pointer. No input was sent; take a fresh screenshot before retrying.",
+        `${platform === "win32" ? "Windows" : "X11"} could not identify the application under the pointer. No input was sent; take a fresh screenshot before retrying.`,
         "state_conflict",
       );
     }
@@ -2778,6 +2787,10 @@ async function handleZoom(
       "state_conflict",
     );
   }
+  if (adapter.executor.capabilities.platform === "linux" &&
+      last.targetRevision !== adapter.executor.getBoundRevision?.()) {
+    return errorResult("Take a fresh screenshot of the authorized X11 window before zooming.", "state_conflict");
+  }
   if (x1 > last.width || y1 > last.height) {
     return errorResult(
       `region exceeds screenshot bounds (${last.width}×${last.height})`,
@@ -2902,7 +2915,7 @@ async function handleClickVariant(
   // anyway) but BEFORE the executor call.
   const isWindows = adapter.executor.capabilities.platform === "win32";
   const boundWindows = isWindows && (adapter.executor.isWindowBound?.() ?? !!adapter.executor.getBoundAppId?.());
-  if (subGates.pixelValidation && (!isWindows || boundWindows)) {
+  if (adapter.executor.capabilities.platform !== "linux" && subGates.pixelValidation && (!isWindows || boundWindows)) {
     const { xPct, yPct } = coordToPercentageForPixelCompare(
       rawX,
       rawY,
@@ -2998,7 +3011,8 @@ async function handleType(
 
   const graphemes = segmentGraphemes(text);
 
-  if (adapter.executor.capabilities.platform === "win32") {
+  const platform = adapter.executor.capabilities.platform;
+  if (platform !== "darwin") {
     const runs = text.split(/(\r\n|\r|\n|\t)/).filter(Boolean);
     let completed = 0;
     for (const run of runs) {
@@ -3018,7 +3032,7 @@ async function handleType(
         completed += segmentGraphemes(run).length;
       } catch (err) {
         throw new Error(
-          `Windows text input failed after ${completed} fully dispatched of ${graphemes.length} graphemes; the failed run may be partially delivered. ${err instanceof Error ? err.message : String(err)}`,
+          `${platform === "win32" ? "Windows" : "X11"} text input failed after ${completed} fully dispatched of ${graphemes.length} graphemes; the failed run may be partially delivered. ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
@@ -4350,6 +4364,9 @@ export async function handleToolCall(
   // `.some()` guard keeps the hot path (empty deny list, no legacy grants)
   // zero-alloc.
   const platform = adapter.executor.capabilities.platform;
+  if (!isComputerUseToolAvailable(platform, name)) {
+    return errorResult(`Tool "${name}" is unavailable in X11 window mode.`, "feature_unavailable");
+  }
   const userDeniedSet = new Set(rawOverrides.userDeniedBundleIds.map(id => normalizeAppId(platform, id)));
   const overrides: ComputerUseOverrides = rawOverrides.allowedApps.some(
     (a) =>

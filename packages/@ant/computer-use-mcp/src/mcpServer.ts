@@ -78,6 +78,9 @@ function mergePermissionResponse(
   return { apps, flags };
 }
 
+// A Linux executor shares one window anchor and clipboard across dispatchers.
+const activeLinuxExecutors = new WeakSet<ComputerUseHostAdapter["executor"]>();
+
 /**
  * Bind session state to a reusable dispatcher. The returned function is the
  * wrapper closure: async lock gate → build overrides fresh → `handleToolCall`
@@ -160,7 +163,8 @@ export function bindSessionContext(
     : undefined;
 
   return async (name, args, requestSignal, reportProgress, beforeAction) => {
-    const ticket = ++callGeneration;
+    const isLinux = adapter.executor.capabilities.platform === "linux";
+    let ticket = isLinux ? 0 : ++callGeneration;
     const boundRevision = adapter.executor.getBoundRevision?.();
     const throwIfAborted = (): void => {
       if (requestSignal?.aborted || ctx.isAborted?.()) {
@@ -266,8 +270,15 @@ export function bindSessionContext(
     // ─── Dispatch ────────────────────────────────────────────────────────
     const changesTarget = name === "open_application" || name === "switch_display";
     const changesFocus = changesTarget || name === "activate_window";
-    if (targetChangesPending > 0 || (changesFocus && activeCalls > 0)) {
+    if (targetChangesPending > 0 || (changesFocus && activeCalls > 0) ||
+        (isLinux && activeLinuxExecutors.has(adapter.executor))) {
+      requestSignal?.removeEventListener("abort", abortDialog);
+      dialogAbort.abort();
       return errorResult("The capture target is changing or an action is still running. Wait for the current call to finish, then take a fresh screenshot before acting.", "state_conflict");
+    }
+    if (isLinux) {
+      ticket = ++callGeneration;
+      activeLinuxExecutors.add(adapter.executor);
     }
     if (changesTarget) targetGeneration++;
     if (changesFocus) targetChangesPending++;
@@ -306,6 +317,7 @@ export function bindSessionContext(
       } finally {
         if (changesFocus) targetChangesPending--;
         activeCalls--;
+        if (isLinux) activeLinuxExecutors.delete(adapter.executor);
         requestSignal?.removeEventListener("abort", abortDialog);
         dialogAbort.abort();
       }

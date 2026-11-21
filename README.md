@@ -17,7 +17,7 @@
 | API 协议 | 内部统一 Anthropic Messages，只在 API 边界转换：`CLAUDE_CODE_COMPATIBLE_API_PROVIDER` 选 `anthropic`/`openai`/`responses` |
 | 密钥 | `DOGE_API_KEY`（`x-api-key`）与 `ANTHROPIC_AUTH_TOKEN`（Bearer）严格互斥，启动由 `enforceApiKeyExclusivity` 裁决 |
 | 模型 | `~/.doge/model-catalog.json` 为连接/模型/角色/档位单一事实源；reasoning/effort 由目录策略驱动 |
-| 内置 MCP | `computer-use`（Windows/macOS）；`playwright`（无头）/`playwright-headed`（可见）两个 Node stdio 服务 |
+| 内置 MCP | `computer-use`（Windows/Linux X11，macOS 原生后端待恢复）；`playwright`（无头）/`playwright-headed`（可见）两个 Node stdio 服务 |
 | 分发 | 无打包构建，Bun 直接跑 TS 源码；`bun link` 注册全局 `doge` |
 | 文案 | 命令/提示统一 `doge`；`--version` 仍输出 `2.1.347 (Claude Code)`（上游宏保留） |
 
@@ -43,7 +43,7 @@ src/bootstrap-entry.ts     注入 MACRO 后载入
 |---|---|
 | Bun | `>=1.3.5`（`package.json` engines/packageManager；依赖以 `bun.lock` 为准） |
 | Node.js | `>=24`（Playwright MCP 以 Node 子进程运行） |
-| 平台 | 主目标 Windows；macOS 可运行（CU 原生层为恢复期 shim）；Linux 不注册 Computer Use |
+| 平台 | 主目标 Windows；macOS 可运行（CU 原生层为恢复期 shim）；Linux 支持 [X11 窗口 Computer Use](docs/COMPUTER_USE.md) |
 
 无 `lint`/`test`/`build` npm 脚本；单测与源码同目录（`*.test.ts`），实机脚本在 `tools/`。
 

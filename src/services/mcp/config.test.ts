@@ -68,9 +68,11 @@ test('setupComputerUseMCP registers the in-process server and full toolset', () 
   for (const name of allowedTools) {
     expect(name.startsWith(`mcp__${COMPUTER_USE_MCP_SERVER_NAME}__`)).toBe(true)
   }
-  for (const core of ['request_access', 'screenshot', 'zoom', 'left_click', 'type', 'computer_batch']) {
+  for (const core of ['request_access', 'screenshot', 'zoom', 'left_click', 'type']) {
     expect(allowedTools).toContain(`mcp__${COMPUTER_USE_MCP_SERVER_NAME}__${core}`)
   }
+  expect(allowedTools.includes(`mcp__${COMPUTER_USE_MCP_SERVER_NAME}__computer_batch`))
+    .toBe(process.platform !== 'linux')
 })
 
 test('local CU prompt hint covers the screenshot-act-verify loop', () => {

@@ -11,9 +11,23 @@
  */
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { ComputerExecutorCapabilities } from "./executor.js";
 
 import { MAX_BATCH_ACTIONS, MAX_TYPE_TEXT_LENGTH } from "./limits.js";
 import type { CoordinateMode } from "./types.js";
+
+const LINUX_WINDOW_TOOLS = new Set([
+  "request_access", "list_granted_applications", "open_application", "screenshot", "zoom",
+  "left_click", "double_click", "triple_click", "right_click", "middle_click", "mouse_move",
+  "type", "key", "scroll", "wait", "cursor_position", "read_clipboard", "write_clipboard",
+]);
+
+export function isComputerUseToolAvailable(
+  platform: ComputerExecutorCapabilities["platform"],
+  name: string,
+): boolean {
+  return platform !== "linux" || LINUX_WINDOW_TOOLS.has(name);
+}
 
 // See packages/desktop/computer-use-mcp/COORDINATES.md before touching any
 // model-facing coordinate text. Chrome's browserTools.ts:143 is the reference
@@ -122,7 +136,7 @@ const BATCH_ACTION_ITEM_SCHEMA = {
 export function buildComputerUseTools(
   caps: {
     screenshotFiltering: "native" | "none";
-    platform: "darwin" | "win32";
+    platform: ComputerExecutorCapabilities["platform"];
     /** Include request_teach_access + teach_step. Read once at server construction. */
     teachMode?: boolean;
   },
@@ -156,11 +170,13 @@ export function buildComputerUseTools(
   };
 
   const screenshotDesc =
-    caps.screenshotFiltering === "native"
+    caps.platform === "linux"
+      ? "Take a screenshot of the focused authorized X11 window. Use open_application to focus an approved window. Coordinates are relative to the resulting image."
+      : caps.screenshotFiltering === "native"
       ? "Take a screenshot of the primary display. Applications not in the session allowlist are excluded at the compositor level — only granted apps and the desktop are visible."
       : "Take a screenshot of the current target display or bound application window. open_application selects the bound window; switch_display selects a full display. On this platform, screenshots are NOT filtered — all captured windows are visible. Input actions targeting apps not in the session allowlist are rejected.";
 
-  return [
+  const tools: Tool[] = [
     {
       name: "request_access",
       description:
@@ -580,6 +596,7 @@ export function buildComputerUseTools(
     ...(caps.platform === "win32" ? buildWindowsTools() : []),
     ...(caps.teachMode ? buildTeachTools(coord, installedAppsHint) : []),
   ];
+  return tools.filter(tool => isComputerUseToolAvailable(caps.platform, tool.name));
 }
 
 function buildWindowsTools(): Tool[] {

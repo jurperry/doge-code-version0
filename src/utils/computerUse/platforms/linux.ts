@@ -1,426 +1,130 @@
-/**
- * Linux platform backend for Computer Use.
- *
- * Uses:
- * - xdotool for mouse/keyboard input
- * - scrot for screenshots (converted to JPEG)
- * - xrandr for display enumeration
- * - wmctrl for window management
- *
- * CRITICAL: All screenshots output JPEG. scrot outputs PNG by default,
- * so we pipe through ImageMagick `convert` to produce JPEG.
- */
+import { API_RESIZE_PARAMS, targetImageSize } from '@ant/computer-use-mcp'
+import type { ComputerExecutor, DisplayGeometry, ScreenshotResult } from '@ant/computer-use-mcp'
+import { CLI_CU_CAPABILITIES, CLI_HOST_BUNDLE_ID } from '../common.js'
+import { sleep } from '../../sleep.js'
+import { readX11Clipboard, writeX11Clipboard } from './x11/clipboard.js'
+import { withX11Desktop, type X11Window } from './x11/desktop.js'
+import { encodeX11Jpeg } from './x11/image.js'
 
-import type { Platform } from './index.js'
-import type {
-  InputPlatform,
-  ScreenshotPlatform,
-  DisplayPlatform,
-  AppsPlatform,
-  WindowHandle,
-  ScreenshotResult,
-  DisplayInfo,
-  InstalledApp,
-  FrontmostAppInfo,
-} from './types.js'
-
-// ---------------------------------------------------------------------------
-// Shell helpers
-// ---------------------------------------------------------------------------
-
-function run(cmd: string[]): string {
-  const result = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe' })
-  return new TextDecoder().decode(result.stdout).trim()
+export async function isLinuxComputerUseAvailable(): Promise<boolean> {
+  if (process.platform !== 'linux' || !Bun.which('xclip')) return false
+  try {
+    return await withX11Desktop(desktop => desktop.probe())
+  } catch {
+    return false
+  }
 }
 
-async function runAsync(cmd: string[]): Promise<string> {
-  const proc = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe' })
-  const out = await new Response(proc.stdout).text()
-  await proc.exited
-  return out.trim()
+function windowDisplay(window: X11Window): DisplayGeometry {
+  const { x: originX, y: originY, width, height } = window.geometry
+  return { displayId: 0, scaleFactor: 1, originX, originY, width, height }
 }
 
-function commandExists(name: string): boolean {
-  const result = Bun.spawnSync({ cmd: ['which', name], stdout: 'pipe', stderr: 'pipe' })
-  return result.exitCode === 0
+const buttonNumber = { left: 1, right: 3, middle: 2 }
+
+async function unsupported(): Promise<never> {
+  throw new Error('This action is unavailable in X11 window mode.')
 }
 
-// ---------------------------------------------------------------------------
-// xdotool key name mapping
-// ---------------------------------------------------------------------------
+export function createLinuxExecutor(
+  paste: (keys: (parts: string[]) => Promise<void>, text: string, signal?: AbortSignal) => Promise<void>,
+): ComputerExecutor {
+  let revision = 0
+  let anchor: { window: X11Window; revision: number } | undefined
 
-const KEY_MAP: Record<string, string> = {
-  return: 'Return', enter: 'Return', tab: 'Tab', space: 'space',
-  backspace: 'BackSpace', delete: 'Delete', escape: 'Escape', esc: 'Escape',
-  left: 'Left', up: 'Up', right: 'Right', down: 'Down',
-  home: 'Home', end: 'End', pageup: 'Prior', pagedown: 'Next',
-  f1: 'F1', f2: 'F2', f3: 'F3', f4: 'F4', f5: 'F5', f6: 'F6',
-  f7: 'F7', f8: 'F8', f9: 'F9', f10: 'F10', f11: 'F11', f12: 'F12',
-  shift: 'shift', lshift: 'shift', rshift: 'shift',
-  control: 'ctrl', ctrl: 'ctrl', lcontrol: 'ctrl', rcontrol: 'ctrl',
-  alt: 'alt', option: 'alt', lalt: 'alt', ralt: 'alt',
-  win: 'super', meta: 'super', command: 'super', cmd: 'super', super: 'super',
-  insert: 'Insert', printscreen: 'Print', pause: 'Pause',
-  numlock: 'Num_Lock', capslock: 'Caps_Lock', scrolllock: 'Scroll_Lock',
-}
+  function requireAnchor() {
+    if (!anchor) throw new Error('Focus an authorized X11 window and take a screenshot before acting.')
+    return anchor
+  }
 
-const MODIFIER_KEYS = new Set([
-  'shift', 'lshift', 'rshift', 'control', 'ctrl', 'lcontrol', 'rcontrol',
-  'alt', 'option', 'lalt', 'ralt', 'win', 'meta', 'command', 'cmd', 'super',
-])
+  function input(
+    target: ReturnType<typeof requireAnchor>,
+    action: { point?: { x: number; y: number }; keys?: string[]; buttons?: number[] },
+    signal?: AbortSignal,
+  ) {
+    if (target.revision !== revision) throw new Error('The X11 capture target changed. Take a fresh screenshot.')
+    return withX11Desktop(desktop => desktop.sendInput(target.window, action), signal)
+  }
 
-function mapKey(name: string): string {
-  return KEY_MAP[name.toLowerCase()] ?? name
-}
-
-function mouseButtonNum(button: 'left' | 'right' | 'middle'): string {
-  return button === 'left' ? '1' : button === 'right' ? '3' : '2'
-}
-
-// ---------------------------------------------------------------------------
-// Input — xdotool
-// ---------------------------------------------------------------------------
-
-const input: InputPlatform = {
-  async moveMouse(x, y) {
-    run(['xdotool', 'mousemove', '--sync', String(Math.round(x)), String(Math.round(y))])
-  },
-
-  async click(x, y, button, count = 1) {
-    run(['xdotool', 'mousemove', '--sync', String(Math.round(x)), String(Math.round(y))])
-    run(['xdotool', 'click', '--repeat', String(count), mouseButtonNum(button)])
-  },
-
-  async mouseDown(x, y) {
-    run(['xdotool', 'mousemove', '--sync', String(Math.round(x)), String(Math.round(y))])
-    run(['xdotool', 'mousedown', '1'])
-  },
-
-  async mouseUp(x, y) {
-    run(['xdotool', 'mousemove', '--sync', String(Math.round(x)), String(Math.round(y))])
-    run(['xdotool', 'mouseup', '1'])
-  },
-
-  async typeText(text) {
-    run(['xdotool', 'type', '--delay', '12', text])
-  },
-
-  async key(name, action) {
-    const mapped = mapKey(name)
-    if (action === 'press') {
-      run(['xdotool', 'keydown', mapped])
-    } else {
-      run(['xdotool', 'keyup', mapped])
-    }
-  },
-
-  async keys(parts) {
-    const modifiers: string[] = []
-    let finalKey: string | null = null
-
-    for (const part of parts) {
-      if (MODIFIER_KEYS.has(part.toLowerCase())) {
-        modifiers.push(mapKey(part))
-      } else {
-        finalKey = part
+  async function screenshot({ allowedBundleIds }: { allowedBundleIds: string[] }): Promise<ScreenshotResult> {
+    const previousRevision = revision
+    const { window, pixels } = await withX11Desktop(async (desktop) => {
+      const window = await desktop.focus()
+      if (!window || !allowedBundleIds.includes(window.bundleId)) {
+        throw new Error('Focus an authorized X11 window with open_application before taking a screenshot.')
       }
-    }
-    if (!finalKey) return
-
-    const combo = [...modifiers, mapKey(finalKey)].join('+')
-    run(['xdotool', 'key', combo])
-  },
-
-  async scroll(amount, direction) {
-    if (direction === 'vertical') {
-      const btn = amount >= 0 ? '5' : '4'
-      const repeats = Math.abs(Math.round(amount))
-      if (repeats > 0) run(['xdotool', 'click', '--repeat', String(repeats), btn])
-    } else {
-      const btn = amount >= 0 ? '7' : '6'
-      const repeats = Math.abs(Math.round(amount))
-      if (repeats > 0) run(['xdotool', 'click', '--repeat', String(repeats), btn])
-    }
-  },
-
-  async mouseLocation() {
-    const out = run(['xdotool', 'getmouselocation'])
-    const xMatch = out.match(/x:(\d+)/)
-    const yMatch = out.match(/y:(\d+)/)
+      return { window, pixels: await desktop.capture(window) }
+    })
+    if (previousRevision !== revision) throw new Error('The X11 capture target changed. Take a fresh screenshot.')
+    const size = windowDisplay(window)
+    const shot = encodeX11Jpeg(pixels, targetImageSize(size.width, size.height, API_RESIZE_PARAMS))
+    anchor = { window, revision: ++revision }
     return {
-      x: xMatch ? Number(xMatch[1]) : 0,
-      y: yMatch ? Number(yMatch[1]) : 0,
+      ...shot, displayId: 0, displayCount: 1, displayWidth: size.width, displayHeight: size.height,
+      originX: size.originX, originY: size.originY, targetRevision: revision,
     }
-  },
-
-  // No window-bound input on Linux
-}
-
-// ---------------------------------------------------------------------------
-// Screenshot — scrot → JPEG conversion
-// ---------------------------------------------------------------------------
-
-const SCREENSHOT_TMP = '/tmp/cu-screenshot-tmp.png'
-const SCREENSHOT_JPG = '/tmp/cu-screenshot.jpg'
-
-async function pngToJpegBase64(pngPath: string, width: number, height: number): Promise<ScreenshotResult> {
-  // Try ImageMagick convert first
-  if (commandExists('convert')) {
-    await runAsync(['convert', pngPath, '-quality', '75', SCREENSHOT_JPG])
-    const file = Bun.file(SCREENSHOT_JPG)
-    const buffer = await file.arrayBuffer()
-    return { base64: Buffer.from(buffer).toString('base64'), width, height }
   }
 
-  // Fallback: ffmpeg
-  if (commandExists('ffmpeg')) {
-    await runAsync(['ffmpeg', '-y', '-i', pngPath, '-q:v', '5', SCREENSHOT_JPG])
-    const file = Bun.file(SCREENSHOT_JPG)
-    const buffer = await file.arrayBuffer()
-    return { base64: Buffer.from(buffer).toString('base64'), width, height }
+  return {
+    capabilities: { ...CLI_CU_CAPABILITIES, hostBundleId: CLI_HOST_BUNDLE_ID },
+    prepareForAction: async () => [],
+    previewHideSet: async () => [],
+    getDisplaySize: async () => windowDisplay(requireAnchor().window),
+    listDisplays: async () => anchor ? [windowDisplay(anchor.window)] : [],
+    findWindowDisplays: async () => [],
+    resolvePrepareCapture: async opts => ({ ...await screenshot(opts), displayId: 0, hidden: [] }),
+    screenshot,
+    async zoom(region, allowedBundleIds) {
+      const { window } = requireAnchor()
+      if (!allowedBundleIds.includes(window.bundleId)) throw new Error('The X11 window is no longer authorized.')
+      const x = Math.round(region.x)
+      const y = Math.round(region.y)
+      const pixels = await withX11Desktop(desktop => desktop.capture(window, {
+        x, y, width: Math.round(region.x + region.w) - x, height: Math.round(region.y + region.h) - y,
+      }))
+      return encodeX11Jpeg(pixels)
+    },
+    async key(sequence, repeat = 1, signal) {
+      const target = requireAnchor()
+      const keys = sequence.split('+').map(key => key.trim())
+      for (let i = 0; i < repeat; i++) {
+        if (i > 0) await sleep(8, signal)
+        await input(target, { keys }, signal)
+      }
+    },
+    holdKey: unsupported,
+    async type(text, _options, signal) {
+      const target = requireAnchor()
+      await paste(keys => input(target, { keys }, signal), text, signal)
+    },
+    readClipboard: readX11Clipboard,
+    writeClipboard: writeX11Clipboard,
+    moveMouse: (x, y) => input(requireAnchor(), { point: { x, y } }),
+    click: (x, y, button, count, keys) => input(requireAnchor(), {
+      point: { x, y }, keys, buttons: Array(count).fill(buttonNumber[button]),
+    }),
+    mouseDown: unsupported,
+    mouseUp: unsupported,
+    getCursorPosition: () => withX11Desktop(desktop => desktop.cursor()),
+    drag: unsupported,
+    scroll: (x, y, dx, dy) => input(requireAnchor(), {
+      point: { x, y },
+      buttons: [
+        ...Array(Math.min(20, Math.abs(Math.round(dy)))).fill(dy > 0 ? 5 : 4),
+        ...Array(Math.min(20, Math.abs(Math.round(dx)))).fill(dx > 0 ? 7 : 6),
+      ],
+    }),
+    getBoundAppId: () => anchor?.window.bundleId ?? null,
+    getBoundRevision: () => revision,
+    getFrontmostApp: () => withX11Desktop(desktop => desktop.focus()),
+    appUnderPoint: (x, y) => withX11Desktop(desktop => desktop.hit({ x, y })),
+    listInstalledApps: () => withX11Desktop(desktop => desktop.windows()),
+    listRunningApps: () => withX11Desktop(desktop => desktop.windows()),
+    getAppIcon: async () => undefined,
+    async openApp(bundleId, signal) {
+      anchor = undefined
+      revision++
+      await withX11Desktop(desktop => desktop.activate(bundleId, signal), signal)
+    },
   }
-
-  // Last resort: return PNG base64 (caller should be aware)
-  const file = Bun.file(pngPath)
-  const buffer = await file.arrayBuffer()
-  return { base64: Buffer.from(buffer).toString('base64'), width, height }
 }
-
-const screenshot: ScreenshotPlatform = {
-  async captureScreen(displayId) {
-    try {
-      await runAsync(['scrot', '-o', SCREENSHOT_TMP])
-      const size = display.getSize(displayId)
-      return pngToJpegBase64(SCREENSHOT_TMP, size.width, size.height)
-    } catch {
-      return { base64: '', width: 0, height: 0 }
-    }
-  },
-
-  async captureRegion(x, y, w, h) {
-    try {
-      await runAsync(['scrot', '-a', `${x},${y},${w},${h}`, '-o', SCREENSHOT_TMP])
-      return pngToJpegBase64(SCREENSHOT_TMP, w, h)
-    } catch {
-      return { base64: '', width: w, height: h }
-    }
-  },
-
-  async captureWindow(hwnd) {
-    try {
-      // Use xdotool to get window geometry, then import (ImageMagick) to capture
-      if (commandExists('import')) {
-        const jpgPath = '/tmp/cu-window-capture.jpg'
-        await runAsync(['import', '-window', hwnd, '-quality', '75', jpgPath])
-
-        // Get dimensions from xdotool
-        const geom = run(['xdotool', 'getwindowgeometry', '--shell', hwnd])
-        const wMatch = geom.match(/WIDTH=(\d+)/)
-        const hMatch = geom.match(/HEIGHT=(\d+)/)
-        const width = wMatch ? Number(wMatch[1]) : 0
-        const height = hMatch ? Number(hMatch[1]) : 0
-
-        const file = Bun.file(jpgPath)
-        const buffer = await file.arrayBuffer()
-        return { base64: Buffer.from(buffer).toString('base64'), width, height }
-      }
-      return null
-    } catch {
-      return null
-    }
-  },
-}
-
-// ---------------------------------------------------------------------------
-// Display — xrandr
-// ---------------------------------------------------------------------------
-
-const display: DisplayPlatform = {
-  listAll(): DisplayInfo[] {
-    try {
-      const raw = run(['xrandr', '--query'])
-      const displays: DisplayInfo[] = []
-      let idx = 0
-
-      const regex = /^\S+\s+connected\s+(?:primary\s+)?(\d+)x(\d+)\+\d+\+\d+/gm
-      let match: RegExpExecArray | null
-      while ((match = regex.exec(raw)) !== null) {
-        displays.push({
-          width: Number(match[1]),
-          height: Number(match[2]),
-          scaleFactor: 1,
-          displayId: idx++,
-        })
-      }
-
-      if (displays.length === 0) {
-        return [{ width: 1920, height: 1080, scaleFactor: 1, displayId: 0 }]
-      }
-      return displays
-    } catch {
-      return [{ width: 1920, height: 1080, scaleFactor: 1, displayId: 0 }]
-    }
-  },
-
-  getSize(displayId): DisplayInfo {
-    const all = this.listAll()
-    if (displayId !== undefined) {
-      const found = all.find(d => d.displayId === displayId)
-      if (found) return found
-    }
-    return all[0] ?? { width: 1920, height: 1080, scaleFactor: 1, displayId: 0 }
-  },
-}
-
-// ---------------------------------------------------------------------------
-// Apps — wmctrl + ps + .desktop files
-// ---------------------------------------------------------------------------
-
-const apps: AppsPlatform = {
-  listRunning(): WindowHandle[] {
-    try {
-      if (commandExists('wmctrl')) {
-        const raw = run(['wmctrl', '-l', '-p'])
-        const handles: WindowHandle[] = []
-        for (const line of raw.split('\n').filter(Boolean)) {
-          const parts = line.split(/\s+/)
-          const windowId = parts[0]
-          const pid = Number(parts[2])
-          if (!pid) continue
-
-          // Title is everything after the 4th field (hostname)
-          const title = parts.slice(4).join(' ')
-
-          let exePath = ''
-          try { exePath = run(['readlink', '-f', `/proc/${pid}/exe`]) } catch {}
-
-          handles.push({
-            id: windowId ?? '',
-            pid,
-            title,
-            exePath: exePath || undefined,
-          })
-        }
-
-        // Deduplicate by id
-        const seen = new Set<string>()
-        return handles.filter(h => {
-          if (seen.has(h.id)) return false
-          seen.add(h.id)
-          return true
-        }).slice(0, 50)
-      }
-
-      // Fallback: xdotool search
-      const raw = run(['xdotool', 'search', '--name', ''])
-      const handles: WindowHandle[] = []
-      for (const windowId of raw.split('\n').filter(Boolean).slice(0, 50)) {
-        const title = run(['xdotool', 'getwindowname', windowId])
-        let pid = 0
-        try { pid = Number(run(['xdotool', 'getwindowpid', windowId])) } catch {}
-        if (title) {
-          handles.push({ id: windowId, pid, title })
-        }
-      }
-      return handles
-    } catch {
-      return []
-    }
-  },
-
-  async listInstalled(): Promise<InstalledApp[]> {
-    try {
-      const dirs = [
-        '/usr/share/applications',
-        '/usr/local/share/applications',
-        `${process.env.HOME}/.local/share/applications`,
-      ]
-      const result: InstalledApp[] = []
-
-      for (const dir of dirs) {
-        let files: string
-        try {
-          files = run(['find', dir, '-name', '*.desktop', '-maxdepth', '1'])
-        } catch { continue }
-
-        for (const filepath of files.split('\n').filter(Boolean)) {
-          try {
-            const content = run(['cat', filepath])
-            const nameMatch = content.match(/^Name=(.+)$/m)
-            const execMatch = content.match(/^Exec=(.+)$/m)
-            const noDisplay = content.match(/^NoDisplay=true$/m)
-            if (noDisplay) continue
-
-            const name = nameMatch?.[1] ?? ''
-            const exec = execMatch?.[1] ?? ''
-            if (!name) continue
-
-            result.push({
-              id: filepath.split('/').pop()?.replace('.desktop', '') ?? '',
-              displayName: name,
-              path: exec.split(/\s+/)[0] ?? '',
-            })
-          } catch { /* skip unreadable */ }
-        }
-      }
-
-      return result.slice(0, 200)
-    } catch {
-      return []
-    }
-  },
-
-  async open(name) {
-    try {
-      const desktopName = name.endsWith('.desktop') ? name : `${name}.desktop`
-      if (commandExists('gtk-launch')) {
-        await runAsync(['gtk-launch', desktopName])
-        return
-      }
-    } catch { /* fall through */ }
-    await runAsync(['xdg-open', name])
-  },
-
-  getFrontmostApp(): FrontmostAppInfo | null {
-    try {
-      const windowId = run(['xdotool', 'getactivewindow'])
-      if (!windowId) return null
-
-      const pidStr = run(['xdotool', 'getwindowpid', windowId])
-      if (!pidStr) return null
-
-      let exePath = ''
-      try { exePath = run(['readlink', '-f', `/proc/${pidStr}/exe`]) } catch {}
-      let appName = ''
-      try { appName = run(['cat', `/proc/${pidStr}/comm`]) } catch {}
-
-      if (!exePath && !appName) return null
-      return { id: exePath || `/proc/${pidStr}/exe`, appName: appName || 'unknown' }
-    } catch {
-      return null
-    }
-  },
-
-  findWindowByTitle(title): WindowHandle | null {
-    try {
-      // xdotool search by name
-      const raw = run(['xdotool', 'search', '--name', title])
-      const windowId = raw.split('\n')[0]
-      if (!windowId) return null
-
-      const windowTitle = run(['xdotool', 'getwindowname', windowId])
-      let pid = 0
-      try { pid = Number(run(['xdotool', 'getwindowpid', windowId])) } catch {}
-
-      return { id: windowId, pid, title: windowTitle }
-    } catch {
-      return null
-    }
-  },
-}
-
-// ---------------------------------------------------------------------------
-// Export
-// ---------------------------------------------------------------------------
-
-export const platform: Platform = { input, screenshot, display, apps }

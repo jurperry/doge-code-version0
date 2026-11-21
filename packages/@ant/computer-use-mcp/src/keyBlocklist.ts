@@ -9,6 +9,7 @@
  * `cmd+alt+escape` bypass the gate — see keyBlocklist.test.ts for the three
  * bypass forms and the Rust parity check that catches future alias drift.
  */
+import type { ComputerExecutorCapabilities } from "./executor.js";
 
 /**
  * Every modifier alias enigo_wrap.rs accepts (two copies: :351-359, :564-572),
@@ -127,10 +128,15 @@ export function normalizeKeySequence(seq: string): string {
  */
 export function isSystemKeyCombo(
   seq: string,
-  platform: "darwin" | "win32",
+  platform: ComputerExecutorCapabilities["platform"],
 ): boolean {
-  const blocklist = platform === "darwin" ? BLOCKED_DARWIN : BLOCKED_WIN32;
   const { mods, keys } = partitionKeys(seq);
+  if (platform === "linux") {
+    return mods.includes("meta") ||
+      (mods.includes("alt") && keys.some(key => ["tab", "escape", "f2", "f4"].includes(key))) ||
+      (mods.includes("ctrl") && mods.includes("alt") && keys.some(key => key === "delete" || /^f\d+$/.test(key)));
+  }
+  const blocklist = platform === "darwin" ? BLOCKED_DARWIN : BLOCKED_WIN32;
   const prefix = mods.length > 0 ? mods.join("+") + "+" : "";
 
   // No non-modifier keys (e.g. "cmd+shift" as click-modifiers) — check the

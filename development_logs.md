@@ -102,4 +102,4 @@
 4. **恢复缺口**：`src/server/`（server/sessionManager/backends）与 `src/ssh/` 端到端未通；`server`/`ssh`/`open` 属设计保留面。
 5. **Playwright 镜像**：依赖 App 侧 `bridge.cjs` 与 `DOGE_APP_PLAYWRIGHT_BRIDGE`，CLI 只透传；无 App 不能验证镜像链路。
 6. **IM**：Telegram/飞书/企业微信真实账号长连接、扫码网页频道的防火墙/多网卡排序仍需安装版实测。
-7. **其他**：Linux CU 未注册；本树 ANT-ONLY 面（`up/rollback/task/log/error/export` 等）不注册；SDK 运行时在外部包。
+7. **其他**：Linux CU 尚未支持 Wayland；本树 ANT-ONLY 面（`up/rollback/task/log/error/export` 等）不注册；SDK 运行时在外部包。

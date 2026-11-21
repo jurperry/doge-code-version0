@@ -50,6 +50,8 @@ import {
 import { drainRunLoop } from './drainRunLoop.js'
 import { notifyExpectedEscape } from './escHotkey.js'
 import { requireComputerUseInput } from './inputLoader.js'
+import { createLinuxExecutor } from './platforms/linux.js'
+import { readX11Clipboard, writeX11Clipboard } from './platforms/x11/clipboard.js'
 import { requireComputerUseSwift } from './swiftLoader.js'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -78,16 +80,6 @@ async function readClipboardViaPbpaste(): Promise<string> {
     }
     return stdout
   }
-  if (process.platform === 'linux') {
-    const { stdout, code } = await execFileNoThrow('xclip', ['-selection', 'clipboard', '-o'], {
-      useCwd: false,
-      stripFinalNewline: false,
-    })
-    if (code !== 0) {
-      throw new Error(`xclip exited with code ${code}`)
-    }
-    return stdout
-  }
   const { stdout, code } = await execFileNoThrow('pbpaste', [], {
     useCwd: false,
   })
@@ -106,17 +98,6 @@ async function writeClipboardViaPbcopy(text: string): Promise<void> {
     })
     if (code !== 0) {
       throw new Error(`PowerShell Set-Clipboard exited with code ${code}`)
-    }
-    return
-  }
-  if (process.platform === 'linux') {
-    const { code } = await execFileNoThrow('xclip', ['-selection', 'clipboard'], {
-      input: text,
-      useCwd: false,
-      stripFinalNewline: false,
-    })
-    if (code !== 0) {
-      throw new Error(`xclip exited with code ${code}`)
     }
     return
   }
@@ -226,18 +207,26 @@ async function withModifiers<T>(
  *   6. Restore — in a `finally`, so a throw between 2-5 never leaves the
  *      user's clipboard clobbered. Restore failures are swallowed.
  */
-async function typeViaClipboard(input: Input, text: string, signal?: AbortSignal): Promise<void> {
+async function typeViaClipboard(
+  input: Pick<Input, 'keys'>,
+  text: string,
+  signal?: AbortSignal,
+  clipboard: { read(): Promise<string>; write(value: string): Promise<void>; preserveConcurrentWrites?: boolean } = {
+    read: readClipboardViaPbpaste,
+    write: writeClipboardViaPbcopy,
+  },
+): Promise<void> {
   let saved: string
   try {
-    saved = await readClipboardViaPbpaste()
+    saved = await clipboard.read()
   } catch (error) {
     throw new Error(`Could not read the existing clipboard, so it was left unchanged: ${errorMessage(error)}`)
   }
 
   let pasteError: unknown
   try {
-    await writeClipboardViaPbcopy(text)
-    if ((await readClipboardViaPbpaste()) !== text) {
+    await clipboard.write(text)
+    if ((await clipboard.read()) !== text) {
       throw new Error('Clipboard write did not round-trip; paste was not sent.')
     }
     signal?.throwIfAborted()
@@ -248,7 +237,9 @@ async function typeViaClipboard(input: Input, text: string, signal?: AbortSignal
     throw error
   } finally {
     try {
-      await writeClipboardViaPbcopy(saved)
+      if (!clipboard.preserveConcurrentWrites || (await clipboard.read().catch(() => undefined)) === text) {
+        await clipboard.write(saved)
+      }
     } catch (restoreError) {
       if (pasteError) {
         throw new Error(`Paste failed: ${errorMessage(pasteError)}. Clipboard restore also failed: ${errorMessage(restoreError)}`)
@@ -313,14 +304,18 @@ export function createCliExecutor(opts: {
   getMouseAnimationEnabled: () => boolean
   getHideBeforeActionEnabled: () => boolean
 }): ComputerExecutor {
-  if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') {
+  if (process.platform === 'linux') {
+    const clipboard = { read: readX11Clipboard, write: writeX11Clipboard, preserveConcurrentWrites: true }
+    return createLinuxExecutor((keys, text, signal) => typeViaClipboard({ keys }, text, signal, clipboard))
+  }
+  if (process.platform !== 'darwin' && process.platform !== 'win32') {
     throw new Error(
       `createCliExecutor called on ${process.platform}. Computer control requires macOS, Windows, or Linux.`,
     )
   }
 
   // On macOS: use native @ant packages via requireComputerUseSwift/Input.
-  // On Windows/Linux: use platforms/ abstraction layer.
+  // On Windows: use platforms/ abstraction layer.
   const isDarwin = process.platform === 'darwin'
 
   // Lazy-loaded platforms/ for non-darwin.
@@ -658,7 +653,7 @@ export function createCliExecutor(opts: {
     } : undefined,
 
     async key(keySequence: string, repeat?: number, signal?: AbortSignal): Promise<void> {
-      // Windows/Linux: route through platform which handles HWND binding
+      // Windows routes through the platform which handles HWND binding.
       if (!isDarwin && platform) {
         const parts = keySequence.split('+').map(part => part.trim()).filter(Boolean)
         const n = repeat ?? 1
@@ -720,7 +715,7 @@ export function createCliExecutor(opts: {
     },
 
     async type(text: string, opts: { viaClipboard: boolean }, signal?: AbortSignal): Promise<void> {
-      // Windows/Linux: route through platform which handles HWND binding
+      // Windows routes through the platform which handles HWND binding.
       if (!isDarwin && platform) {
         if (opts.viaClipboard) {
           await typeViaClipboard(getInput(), text, signal)
@@ -957,7 +952,7 @@ export function createCliExecutor(opts: {
 }
 
 export async function restoreComputerUseClipboard(text: string): Promise<void> {
-  await writeClipboardViaPbcopy(text)
+  await (process.platform === 'linux' ? writeX11Clipboard(text) : writeClipboardViaPbcopy(text))
 }
 
 /**

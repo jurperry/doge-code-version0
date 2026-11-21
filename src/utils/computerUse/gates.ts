@@ -54,6 +54,7 @@ export function getChicagoSubGates(): CuSubGates {
 // GB flip tell the model "pixels" while transforming clicks as normalized.
 let frozenCoordinateMode: CoordinateMode | undefined
 export function getChicagoCoordinateMode(): CoordinateMode {
+  if (process.platform === 'linux') return 'pixels'
   frozenCoordinateMode ??= readConfig().coordinateMode
   return frozenCoordinateMode
 }

@@ -73,7 +73,7 @@ Doge Code（`@doge-code/cli`，命令 `doge`）是 Claude Code 的第三方 Fork
 ## 6. MCP 与内置能力
 
 - **MCP 体系**：`src/services/mcp/`（client 连接/生命周期、config 接线、auth/oauth、officialRegistry）；作用域 user/project(`.mcp.json`)/local + 内置 dynamic；`--strict-mcp-config` 只允许 `--mcp-config`。内置 CU 是**进程内 MCP**：`client.ts` 按 `isComputerUseMCPServer` 拦截，`.call()` 覆盖直接 dispatch，不启子进程。
-- **Computer Use**：注册条件 `平台 macos|windows` 且（非交互或 `DOGE_HEADLESS_BUILTIN_MCP`）且 `getChicagoEnabled()`（`DOGE_COMPUTER_USE_MCP` falsy 关闭）；`setup.ts` 注册 `mcp__computer-use__*` 并注入本地 availability hint。工具/权限/坐标/UAC 细节见 [COMPUTER_USE.md](COMPUTER_USE.md)。
+- **Computer Use**：在 macOS、Windows 或通过能力检测的 Linux X11 上，交互会话默认注册，headless 会话需 `DOGE_HEADLESS_BUILTIN_MCP=1`。`DOGE_COMPUTER_USE_MCP=0` 关闭。`setup.ts` 注册 `mcp__computer-use__*` 并注入本地 availability hint。工具、权限、坐标和平台依赖见 [COMPUTER_USE.md](COMPUTER_USE.md)。
 - **Playwright 双服务**：Playwright 无法从 Bun 驱动浏览器（pipe/WS 传输均超时），故 `playwright`（无头）/`playwright-headed`（可见）都是 Node stdio 子进程（`src/utils/playwrightMcp/`）；桌面壳按浏览器偏好改注册 `playwright-chrome|edge[-headed]`。开关 `DOGE_PLAYWRIGHT_MCP=0`；`DOGE_PLAYWRIGHT_HEADLESS=0` 让 `playwright` 也可见（legacy）；默认用系统 Chrome/Edge（`DOGE_PLAYWRIGHT_USE_SYSTEM_BROWSER`），输出目录在系统临时目录；无 Node 则不注册。权限用服务级 `mcp__<server>__*` 规则。
 - **桌面壳 browser bridge**：App 注入 `DOGE_APP_PLAYWRIGHT_BRIDGE=<bridge.cjs>`；`setup.ts` 只把该脚本前置到**无头**服务 argv（headed 不挂桥）。bridge 在 App 侧懒拉起无头浏览器并以 `--cdp-endpoint` 接管，CLI 只透传、不校验；浏览器缺失/非 Chromium 由 App 回落原生 MCP。
 - **headless 内置 MCP**：默认 `-p` 不注册 CU/Playwright（避免残留浏览器/锁）；桌面壳长驻 headless 用 `DOGE_HEADLESS_BUILTIN_MCP=1` 显式开启。
@@ -109,7 +109,7 @@ Doge Code（`@doge-code/cli`，命令 `doge`）是 Claude Code 的第三方 Fork
 ## 10. 已知限制 / ant-only / 未实测
 
 - **macOS CU 不可用**：`@ant/computer-use-swift` 解析到 `shims/ant-computer-use-swift`（固定 1440×900 空白 JPEG、`tcc` 检查恒 false），input 侧只有 osascript 实现；实机未验证。
-- **Linux CU 未注册**：`src/utils/computerUse/platforms/linux.ts` 存在但注册仅 windows/macos。
+- **Linux CU 限于 X11 窗口**：授权、截图和输入以已打开的窗口为目标，Wayland 和整屏操作尚未支持。
 - **server/ssh/open 恢复不完整**：见 §2；相关子命令未实测。
 - **ANT-ONLY**：`up/rollback/task/log/error/export`、部分工具与提示在本树不注册；`USER_TYPE=ant` 运行时分支仍存在。
 - **SDK**：本仓只有 schema + stream-json 子进程协议；SDK 运行时在外部包。

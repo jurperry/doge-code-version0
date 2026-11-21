@@ -45,6 +45,17 @@ Guidance:
 - If the user declines request_access, do not show the same dialog again. Choose a non-Computer-Use approach or ask the user to perform the action.
 </computer-use-availability>`
 
+export const LINUX_COMPUTER_USE_MCP_PROMPT_HINT = `<computer-use-availability>
+Computer Use on X11 captures and controls the currently focused authorized window.
+Ask for access to a window that is already open using request_access. Use open_application
+to focus the granted window by its approved name or ID, then call screenshot. Coordinates
+are pixels inside that window's image. Take a fresh screenshot after a focus, position or
+size change. Check the effect with another screenshot after each action.
+If the target is covered or loses focus, stop, focus the approved window again, and take
+a fresh screenshot. Do not send input on stale coordinates or retry partial actions blindly.
+Use Playwright MCP first for browser automation.
+</computer-use-availability>`
+
 /**
  * Build the dynamic MCP config + allowed tool names. Mirror of
  * `setupClaudeInChrome`. The `mcp__computer-use__*` tools are added to
