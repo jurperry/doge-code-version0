@@ -9,6 +9,22 @@ export interface DisplayGeometry {
   isPrimary?: boolean
 }
 
+/** How the last image was produced. Omitted on platforms without HWND binding. */
+export type CaptureMode = 'bound_window' | 'full_display'
+
+/** Why the previous window anchor was released. */
+export type BindingReleaseReason = 'switch_display' | 'new_foreground' | 'explicit'
+
+export interface BindingReleaseInfo {
+  reason: BindingReleaseReason
+  at: number
+  revision: number
+  appId: string | null
+  pid: number | null
+  hwnd: number | null
+  foreground: FrontmostApp | null
+}
+
 export interface ScreenshotResult {
   base64: string
   width: number
@@ -21,6 +37,10 @@ export interface ScreenshotResult {
   /** Avoid a second native enumeration just for screenshot notes. */
   displayCount?: number
   targetRevision?: number
+  /** Capture space for this image (`bound_window` vs the whole display). */
+  captureMode?: CaptureMode
+  /** Set when this capture observed its own target being released mid-call. */
+  bindingRelease?: BindingReleaseInfo
 }
 
 export interface FrontmostApp {
@@ -137,6 +157,8 @@ export interface ComputerExecutor {
   isWindowBound?(): boolean
   getBoundAppId?(): string | null
   getBoundRevision?(): number | undefined
+  /** Last automatic/explicit release; used for diagnostics and screenshot notes. */
+  getBindingRelease?(): BindingReleaseInfo | null
   getFrontmostApp(): Promise<FrontmostApp | null>
   appUnderPoint(
     x: number,

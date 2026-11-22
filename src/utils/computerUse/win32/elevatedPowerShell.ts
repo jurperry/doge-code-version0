@@ -340,6 +340,21 @@ export function isElevatedPowerShellActive(): boolean {
   return active !== undefined
 }
 
+/** PID of the long-lived broker, if any. Used to ignore our own helper when
+ *  deciding whether a foreground change is a real application takeover. */
+export function getElevatedPowerShellPid(): number | null {
+  const pid = active?.pid
+  if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return null
+  try {
+    process.kill(pid, 0)
+    return pid
+  } catch (error) {
+    // EPERM still proves the PID exists; it just belongs to a higher-integrity
+    // process. A missing PID must not suppress a real foreground transition.
+    return (error as NodeJS.ErrnoException).code === 'EPERM' ? pid : null
+  }
+}
+
 export function runComputerUsePowerShellSync(script: string, timeoutMs = 10_000): string {
   const broker = active
   if (!targetElevated) return runPowerShellSync(script, timeoutMs)

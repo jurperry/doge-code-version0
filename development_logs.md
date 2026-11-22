@@ -2,6 +2,12 @@
 
 只保留「不看代码就会再踩」的经验、版本里程碑索引与已知欠账；完整逐轮历史以 `git log` 为准，架构现状见 [docs/DESIGN.md](docs/DESIGN.md)，Computer Use 见 [docs/COMPUTER_USE.md](docs/COMPUTER_USE.md)。**文件名保持 `development_logs.md`**：`src/hooks/useMainLoopModel.ts` 注释引用了「development_logs.md §25 模型切换统一入口」；旧 §25 已并入本文 §1.3（模型目录/协议转换），勿改名。
 
+## 2026-11-22 Windows CU 绑定解绑诊断与截图模式反馈（2.1.348）
+
+1. 遇到问题：绑定窗口后调用 `open_application` 绑定同进程 `#32770` 弹窗，下一次截图变成全屏，模型只能靠 `captureMode: full_display` 事后猜测；旧诊断把“查询时的 captureMode”和“上一张截图的 anchorAgeMs”混在一起，且解绑时没有前台身份，无法判断触发者。排查确认 11:30 那次 UAC 助手进程早于弹窗绑定，不是本次切换的直接原因；11:40 的 7s 调用期间是否有第二次 UAC/新进程仍待日志确认。
+2. 解决方法：`unbindWindow` 记录 `reason/at/revision/previous app/foreground`，`prepareWindowsTarget` 排除 `consent.exe`、CU 管理员助手 broker 与自身进程；截图在 capture 前后观察到绑定时返回明确的 release 提示（全屏图/窗口图分别措辞），并把 `captureMode`/`bindingRelease` 写进截图结果；`desktop_info` 拆分为当前 `captureMode`、`lastScreenshot.captureMode/ageMs` 与 `lastBindingRelease`。绑定截图仍禁止回退全屏。
+3. 位置：`src/utils/computerUse/platforms/win32.ts`、`src/utils/computerUse/executor.ts`、`src/utils/computerUse/win32/elevatedPowerShell.ts`、`packages/@ant/computer-use-mcp/src/{executor,index,toolCalls}.ts`、`docs/COMPUTER_USE.md`；测试 `win32Semantics.test.ts`、`toolCalls.test.ts`。
+
 ## 2026-11-20 Windows CU 框架分类与 Esc 物理链路修复（2.1.347）
 
 1. 遇到问题：绑定模式下 WPF 窗口（AnyCast，`HwndWrapper[Anycast.exe;;…]`）被当成普通 Win32 窗口走 SendMessage，点击全部 `dispatched` 但像素零变化；分类器只覆盖 Chromium/自绘/WinForms。Windows Esc 的旧实现把 `LLKHF_INJECTED` 当作「模型合成」全量过滤，且 hook 回调在键盘 hook 线程里同步 `NamedPipeClientStream.Connect(100)`——IME/键盘映射/远程桌面合成的用户 Esc 会被吞，CLI 主线程执行同步 PowerShell 动作时也可能错过信号；旧测试只验证了 named pipe，未验证真实键盘回调。

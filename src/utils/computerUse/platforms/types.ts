@@ -5,6 +5,8 @@
  * display info, and app management across macOS, Windows, and Linux.
  */
 
+import type { CaptureMode } from '@ant/computer-use-mcp'
+
 // ---------------------------------------------------------------------------
 // Window / App types
 // ---------------------------------------------------------------------------
@@ -28,6 +30,8 @@ export interface ScreenshotResult {
   displayId?: number
   displayCount?: number
   targetRevision?: number
+  /** Whether this image is a bound window or the whole display. */
+  captureMode?: CaptureMode
 }
 
 export interface DisplayInfo {

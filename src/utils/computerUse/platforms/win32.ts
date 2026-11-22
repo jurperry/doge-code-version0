@@ -14,7 +14,8 @@
 
 import { win32 as windowsPath } from 'node:path'
 import { API_RESIZE_PARAMS, resetMouseButtonHeld, targetImageSize } from '@ant/computer-use-mcp'
-import type { TargetPreparation, WindowsWindow } from '@ant/computer-use-mcp'
+import type { BindingReleaseInfo, BindingReleaseReason, FrontmostApp, TargetPreparation, WindowsWindow } from '@ant/computer-use-mcp'
+import { logForDebugging } from '../../debug.js'
 import type { Platform } from './index.js'
 import type {
   InputPlatform,
@@ -43,7 +44,7 @@ import { buildPortableAppLaunchBlock, START_CU_APPLICATION } from '../win32/appL
 import { classifyWindowClasses, type WindowFramework } from '../win32/windowClassify.js'
 import { getWin32EscExpectFile, isWin32EscHotkeyRegistered } from '../win32/escHook.js'
 import { runPowerShell, runPowerShellSync } from '../win32/powerShell.js'
-import { ensureElevatedPowerShell, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, runComputerUsePowerShellSync, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
+import { ensureElevatedPowerShell, getElevatedPowerShellPid, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, runComputerUsePowerShellSync, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
 import { PROCESS_IMAGE_PS } from '../win32/processImage.js'
 import { getCurrentProcessIL, getProcessIL, INPUT_INTEGRITY_TYPES, needsElevatedHelper } from '../win32/elevation.js'
 import { desktopState } from '../win32/uacProbe.js'
@@ -244,6 +245,8 @@ let boundExeBase: string | null = null
 let boundAppId: string | null = null
 let boundAt: number | null = null
 let bindingRevision = 0
+/** Last release, kept for diagnostics and for the screenshot that observes it. */
+let lastBindingRelease: BindingReleaseInfo | null = null
 let explicitlyActivatedPid: number | undefined
 /** Track whether SendMessage is working for the bound window (UIPI check) */
 let sendMessageOk: boolean | null = null
@@ -267,6 +270,49 @@ function shouldLeaveBoundForNewForeground(boundPid: number | null, boundAt: numb
   return !!foregroundPid && foregroundPid !== boundPid && !!startedAt && startedAt > boundAt
 }
 
+function toFrontmostApp(foreground: FrontmostAppInfo): FrontmostApp {
+  return {
+    bundleId: foreground.id,
+    displayName: foreground.appName,
+    ...(foreground.hostId === undefined ? {} : { hostBundleId: foreground.hostId }),
+    ...(foreground.hostName === undefined ? {} : { hostDisplayName: foreground.hostName }),
+    ...(foreground.pid === undefined ? {} : { pid: foreground.pid }),
+    ...(foreground.hostPid === undefined ? {} : { hostPid: foreground.hostPid }),
+    ...(foreground.hostTrusted === undefined ? {} : { hostTrusted: foreground.hostTrusted }),
+    ...(foreground.startedAt === undefined ? {} : { startedAt: foreground.startedAt }),
+    ...(foreground.hostStartedAt === undefined ? {} : { hostStartedAt: foreground.hostStartedAt }),
+  }
+}
+
+/**
+ * The CU broker and the UAC consent UI are part of this tool's own elevation
+ * flow, not an application taking the target over. Treating them as a new
+ * foreground app would drop the binding we just created for the elevated
+ * target. `consent.exe` covers the secure-desktop prompt; the broker PID covers
+ * the long-lived elevated PowerShell.
+ */
+export function isComputerUseTransientForeground(
+  foreground: FrontmostAppInfo,
+  context: { selfPid: number; helperPid: number | null },
+): boolean {
+  const paths = [foreground.id, foreground.hostId]
+    .filter((value): value is string => !!value)
+    .filter(value => value.includes('\\') || value.includes('/'))
+  const systemRoot = (process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows').replace(/[\\/]+$/, '').toLowerCase()
+  const systemConsentPaths = new Set([`${systemRoot}\\system32\\consent.exe`, `${systemRoot}\\syswow64\\consent.exe`])
+  if (paths.some(value => systemConsentPaths.has(value.replace(/\//g, '\\').toLowerCase()))) return true
+  const names = [foreground.appName, foreground.hostName]
+    .filter((value): value is string => !!value)
+    .map(value => value.toLowerCase())
+  // consent.exe normally exposes its process name even when the image path is
+  // unreadable from a medium-integrity process. Only treat the bare name as
+  // transient; a path-qualified third-party consent.exe is a real app.
+  if (paths.length === 0 && names.includes('consent')) return true
+  const pid = foreground.hostPid ?? foreground.pid
+  if (pid === context.selfPid) return true
+  return context.helperPid !== null && (pid === context.helperPid || foreground.pid === context.helperPid)
+}
+
 async function flushPendingKeyReleases(): Promise<void> {
   if (pendingKeyReleases.size === 0 || desktopState() !== 'ready') return
   for (const vk of [...pendingKeyReleases]) {
@@ -287,7 +333,12 @@ export async function prepareWindowsTarget(signal?: AbortSignal, purpose: Target
   const foregroundPid = foreground?.hostPid ?? foreground?.pid
   if (foregroundPid !== explicitlyActivatedPid) {
     explicitlyActivatedPid = undefined
-    if (foreground && shouldLeaveBoundForNewForeground(boundPid, boundAt, foreground)) unbindWindow()
+    if (foreground && !isComputerUseTransientForeground(foreground, {
+      selfPid: process.pid,
+      helperPid: getElevatedPowerShellPid(),
+    }) && shouldLeaveBoundForNewForeground(boundPid, boundAt, foreground)) {
+      unbindWindow('new_foreground', foreground)
+    }
   }
   if (!boundPid && (purpose === 'capture' || purpose === 'hover')) {
     // Full-display capture and positioning operate on the desktop itself.
@@ -357,6 +408,8 @@ export function getBoundHwnd(): number | null { return boundHwnd }
 /** Authorized app identity for package-level tier checks, not a guessed foreground app. */
 export function getBoundAppId(): string | null { return boundAppId }
 export function getBoundRevision(): number { return bindingRevision }
+/** Last release; cleared when a new binding is established. */
+export function getBindingRelease(): BindingReleaseInfo | null { return lastBindingRelease }
 
 /** Get the bound app type */
 export function getBoundAppType(): string | null { return boundAppType }
@@ -376,6 +429,7 @@ export function bindWindow(hwnd: number, pid?: number, exeBase?: string, appId: 
   boundAppId = appId
   boundAt = Date.now()
   bindingRevision++
+  lastBindingRelease = null
   explicitlyActivatedPid = undefined
   mouseDownUsedRealInput = null
   // Reset SendMessage status — will be checked on first operation
@@ -402,12 +456,33 @@ export function bindFile(filePath: string, appType: import('../win32/appDispatch
   boundAppId = appId
   boundAt = Date.now()
   bindingRevision++
+  lastBindingRelease = null
   explicitlyActivatedPid = undefined
   mouseDownUsedRealInput = null
 }
 
-/** Unbind — revert to global mode, remove green border */
-export function unbindWindow(): void {
+/** Unbind — revert to global mode, remove green border, and record why. */
+export function unbindWindow(
+  reason: BindingReleaseReason = 'explicit',
+  foreground: FrontmostAppInfo | null = null,
+): void {
+  if (boundHwnd !== null || boundFilePath !== null) {
+    lastBindingRelease = {
+      reason,
+      at: Date.now(),
+      revision: bindingRevision + 1,
+      appId: boundAppId,
+      pid: boundPid,
+      hwnd: boundHwnd,
+      foreground: foreground ? toFrontmostApp(foreground) : null,
+    }
+    logForDebugging(
+      `[Computer Use] binding released: reason=${reason} app=${boundAppId ?? 'none'} ` +
+        `pid=${boundPid ?? 'none'} hwnd=${boundHwnd ?? 'none'} ` +
+        `foreground=${foreground ? `${foreground.pid ?? '?'}:${foreground.id}` : 'none'}`,
+      { level: 'debug' },
+    )
+  }
   if (boundHwnd) unmarkBound(boundHwnd)
   boundHwnd = null
   boundPid = null
@@ -1326,6 +1401,8 @@ $resized.Dispose()
       originY: src.originY,
       displayId: src.displayId,
       displayCount: src.displayCount,
+      captureMode: src.captureMode,
+      targetRevision: src.targetRevision,
     }
   } catch (error) {
     throw new Error(`Screenshot downscale failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -1357,6 +1434,7 @@ const screenshot: ScreenshotPlatform = {
         throw new Error('Bound-window capture failed. No full-screen fallback was used because its coordinate space would differ. Call open_application to rebind, then retry.')
       }
       result.displayId ??= displayId ?? 0
+      result.captureMode = 'bound_window'
       // Downscale HWND capture if target dims provided and differ
       if (targetW && targetH && (result.width !== targetW || result.height !== targetH)) {
         const fitted = fitCaptureDimensions(result.width, result.height, targetW, targetH)
@@ -1413,6 +1491,7 @@ $bmp.Dispose()
         originY: Number(yStr),
         displayId: displayId ?? 0,
         displayCount: Number(countStr),
+        captureMode: 'full_display',
       }
     } catch (error) {
       try { require('fs').unlinkSync(tmpFile.replace(/\\\\/g, '\\')) } catch {}
@@ -1965,4 +2044,5 @@ export const _test = {
   wheelDelta,
   vkForKey,
   shouldLeaveBoundForNewForeground,
+  isComputerUseTransientForeground,
 }

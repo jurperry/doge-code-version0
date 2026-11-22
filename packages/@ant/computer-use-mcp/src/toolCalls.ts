@@ -42,6 +42,8 @@ import { win32 as windowsPath } from "node:path";
 import { getDefaultTierForApp, getDeniedCategoryForApp, isPolicyDenied } from "./deniedApps.js";
 import { MAX_BATCH_ACTIONS, MAX_BATCH_IMAGE_BYTES, MAX_BATCH_SCREENSHOTS, MAX_TYPE_TEXT_LENGTH } from "./limits.js";
 import type {
+  BindingReleaseInfo,
+  CaptureMode,
   ComputerExecutor,
   ComputerExecutorCapabilities,
   DisplayGeometry,
@@ -2514,6 +2516,46 @@ async function buildMonitorNote(
   return undefined;
 }
 
+function formatBindingReleaseNote(release: BindingReleaseInfo, captureMode: CaptureMode | undefined): string {
+  const foreground = release.foreground;
+  const subject = foreground
+    ? ` (pid ${foreground.pid ?? "unknown"}, ${foreground.displayName || foreground.bundleId})`
+    : "";
+  const reason = release.reason === "new_foreground"
+    ? "a newer foreground target took over"
+    : release.reason === "switch_display"
+      ? "switch_display released the window anchor"
+      : "the window anchor was released explicitly";
+  const captureSpace = captureMode === "full_display"
+    ? "This image is full-display; do not reuse window-local coordinates."
+    : captureMode === "bound_window"
+      ? "This image is still window-bound, but the binding was released; take a fresh screenshot before acting."
+      : "Take a fresh screenshot before acting; the coordinate space may have changed.";
+  const prefix = captureMode === "bound_window"
+    ? "Binding was released after this window-bound capture"
+    : captureMode === "full_display"
+      ? "Binding released before this capture"
+      : "Binding was released around this capture";
+  return `${prefix} (${release.reason})${subject}: ${reason}. ${captureSpace}`;
+}
+
+function captureReleaseContext(
+  adapter: ComputerUseHostAdapter,
+  shot: ScreenshotResult,
+  revisionBefore: number | undefined,
+  captureStartedAt: number,
+): { release: BindingReleaseInfo | null; note: string | undefined } {
+  const release = adapter.executor.getBindingRelease?.() ?? null;
+  if (!release) return { release: null, note: undefined };
+  const releasedThisCall = revisionBefore === undefined
+    ? release.at >= captureStartedAt
+    : release.revision > revisionBefore;
+  if (shot.captureMode !== "full_display" && !releasedThisCall) {
+    return { release: null, note: undefined };
+  }
+  return { release, note: formatBindingReleaseNote(release, shot.captureMode) };
+}
+
 async function handleScreenshot(
   adapter: ComputerUseHostAdapter,
   overrides: ComputerUseOverrides,
@@ -2528,6 +2570,8 @@ async function handleScreenshot(
   }
   const boundGate = await runBoundTargetGate(adapter, overrides);
   if (boundGate) return boundGate;
+  const revisionBefore = adapter.executor.getBoundRevision?.();
+  const captureStartedAt = Date.now();
   throwIfActionAborted(overrides);
   await adapter.executor.prepareForTarget?.(overrides.requestSignal, "capture");
   throwIfActionAborted(overrides);
@@ -2633,7 +2677,10 @@ async function handleScreenshot(
       originY: result.originY,
       displayCount: result.displayCount,
       targetRevision: result.targetRevision,
+      captureMode: result.captureMode,
     };
+    const release = captureReleaseContext(adapter, shot, revisionBefore, captureStartedAt);
+    if (release.release) shot.bindingRelease = release.release;
 
     const monitorNote = await buildMonitorNote(
       adapter,
@@ -2645,7 +2692,8 @@ async function handleScreenshot(
 
     return {
       content: [
-        { type: "text" as const, text: `Screenshot dimensions: ${shot.width}x${shot.height} pixels. All mouse/click coordinates must be within this pixel space (0–${shot.width}, 0–${shot.height}).` },
+        { type: "text" as const, text: `Screenshot dimensions: ${shot.width}x${shot.height} pixels${shot.captureMode ? ` (capture=${shot.captureMode})` : ""}. All mouse/click coordinates must be within this pixel space (0–${shot.width}, 0–${shot.height}).` },
+        ...(release.note ? [{ type: "text" as const, text: release.note }] : []),
         ...(monitorNote ? [{ type: "text" as const, text: monitorNote }] : []),
         ...(hiddenNote ? [{ type: "text" as const, text: hiddenNote }] : []),
         {
@@ -2718,6 +2766,8 @@ async function handleScreenshot(
       "capture_failed",
     );
   }
+  const release = captureReleaseContext(adapter, shot, revisionBefore, captureStartedAt);
+  if (release.release) shot.bindingRelease = release.release;
 
   const hiddenNote = await buildHiddenNote(adapter, hiddenSinceLastSeen);
 
@@ -2731,7 +2781,8 @@ async function handleScreenshot(
 
   return {
     content: [
-      { type: "text" as const, text: `Screenshot dimensions: ${shot.width}x${shot.height} pixels. All mouse/click coordinates must be within this pixel space (0–${shot.width}, 0–${shot.height}).` },
+      { type: "text" as const, text: `Screenshot dimensions: ${shot.width}x${shot.height} pixels${shot.captureMode ? ` (capture=${shot.captureMode})` : ""}. All mouse/click coordinates must be within this pixel space (0–${shot.width}, 0–${shot.height}).` },
+      ...(release.note ? [{ type: "text" as const, text: release.note }] : []),
       ...(monitorNote ? [{ type: "text" as const, text: monitorNote }] : []),
       ...(hiddenNote ? [{ type: "text" as const, text: hiddenNote }] : []),
       {
@@ -3465,6 +3516,28 @@ async function handleSwitchDisplay(
   );
 }
 
+function lastBindingReleaseDiagnostics(adapter: ComputerUseHostAdapter) {
+  const release = adapter.executor.getBindingRelease?.() ?? null;
+  return release ? { ...release, ageMs: Math.max(0, Date.now() - release.at) } : null;
+}
+
+function lastScreenshotDiagnostics(overrides: ComputerUseOverrides) {
+  const shot = overrides.lastScreenshot;
+  if (!shot) return null;
+  return {
+    width: shot.width,
+    height: shot.height,
+    displayWidth: shot.displayWidth,
+    displayHeight: shot.displayHeight,
+    originX: shot.originX,
+    originY: shot.originY,
+    displayId: shot.displayId ?? 0,
+    captureMode: shot.captureMode ?? null,
+    ageMs: overrides.screenshotAgeMs ?? null,
+    bindingRelease: shot.bindingRelease ?? null,
+  };
+}
+
 async function handleListGrantedApplications(
   adapter: ComputerUseHostAdapter,
   args: Record<string, unknown>,
@@ -3485,6 +3558,8 @@ async function handleListGrantedApplications(
       integrityLevel: adapter.executor.getOwnIntegrity?.() ?? "unknown",
       captureMode: (adapter.executor.isWindowBound?.() ?? !!adapter.executor.getBoundAppId?.()) ? "bound_window" : "full_display",
       anchorAgeMs: overrides.screenshotAgeMs ?? null,
+      lastScreenshot: lastScreenshotDiagnostics(overrides),
+      lastBindingRelease: lastBindingReleaseDiagnostics(adapter),
       displays: displays.map(({ displayId, isPrimary }) => ({ displayId, label: displayLabels.get(displayId), isPrimary: isPrimary ?? false })),
       limits: { batchActions: MAX_BATCH_ACTIONS, batchScreenshots: MAX_BATCH_SCREENSHOTS, batchImageBytes: MAX_BATCH_IMAGE_BYTES, typeCodeUnits: MAX_TYPE_TEXT_LENGTH },
     },

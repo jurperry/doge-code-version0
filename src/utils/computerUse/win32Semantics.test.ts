@@ -89,6 +89,25 @@ describe('Windows bound-target transitions', () => {
       hostId: 'host', hostName: 'host', hostPid: 10, hostStartedAt: 500,
     })).toBe(false)
   })
+
+  test('UAC consent and our own elevation broker are not target takeovers', () => {
+    const transient = inputSemantics.isComputerUseTransientForeground
+    const context = { selfPid: 10, helperPid: 20 }
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows'
+    expect(transient({ id: `${systemRoot}\\System32\\consent.exe`, appName: 'consent', pid: 30, startedAt: 2000 }, context)).toBe(true)
+    expect(transient({ id: 'consent', appName: 'consent', pid: 30, startedAt: 2000 }, context)).toBe(true)
+    expect(transient({ id: 'C:\\Tools\\consent.exe', appName: 'consent', pid: 30, startedAt: 2000 }, context)).toBe(false)
+    expect(transient({
+      id: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      appName: 'powershell', pid: 20, startedAt: 2000,
+    }, context)).toBe(true)
+    expect(transient({
+      id: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      appName: 'powershell', pid: 30, hostPid: 20, startedAt: 2000, hostStartedAt: 2000,
+    }, context)).toBe(true)
+    expect(transient({ id: 'C:\\Tools\\doge.exe', appName: 'doge', pid: 10, startedAt: 2000 }, context)).toBe(true)
+    expect(transient({ id: 'C:\\Games\\game.exe', appName: 'game', pid: 30, startedAt: 2000 }, context)).toBe(false)
+  })
 })
 
 

@@ -1,4 +1,7 @@
 export type {
+  BindingReleaseInfo,
+  BindingReleaseReason,
+  CaptureMode,
   ComputerExecutor,
   DisplayGeometry,
   FrontmostApp,

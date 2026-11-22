@@ -59,7 +59,9 @@ export async function runPowerShell(script: string, timeoutMs = 15_000, stdin?: 
   observeSpawn?.()
   const proc = Bun.spawn(
     ['powershell', '-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
-    { stdin: stdin === undefined ? 'ignore' : 'pipe', stdout: 'pipe', stderr: 'pipe' },
+    // Same visibility rule as the sync runner: helper/client PowerShell must
+    // never flash or steal the foreground from the bound app.
+    { stdin: stdin === undefined ? 'ignore' : 'pipe', stdout: 'pipe', stderr: 'pipe', windowsHide: true },
   )
   let timedOut = false
   let completed = false

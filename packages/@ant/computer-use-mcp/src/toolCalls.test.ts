@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { buildComputerUseTools } from './tools.js'
-import type { ComputerExecutor } from './executor.js'
+import type { BindingReleaseInfo, ComputerExecutor } from './executor.js'
 import {
   handleToolCall,
   resetMouseButtonHeld,
@@ -142,6 +142,138 @@ describe('screenshot validity and persistence', () => {
     expect((await handleToolCall(adapter, 'screenshot', {}, options)).isError).toBeUndefined()
     expect((await handleToolCall(adapter, 'zoom', { region: [0, 0, 20, 20] }, options)).isError).toBeUndefined()
     expect(calls).toEqual(['prepare', 'screenshot', 'prepare', 'zoom'])
+  })
+
+  test('a binding released during capture is reported instead of silently changing space', async () => {
+    let bound = true
+    let release: BindingReleaseInfo | null = null
+    const adapter = makeAdapter({
+      isWindowBound: () => bound,
+      getBoundAppId: () => bound ? 'app.test' : null,
+      getBoundRevision: () => bound ? 1 : 2,
+      prepareForTarget: async () => {
+        bound = false
+        release = {
+          reason: 'new_foreground',
+          at: Date.now(),
+          revision: 2,
+          appId: 'app.test',
+          pid: 1,
+          hwnd: 10,
+          foreground: {
+            bundleId: 'C:\\Windows\\System32\\consent.exe',
+            displayName: 'consent',
+            pid: 99,
+            startedAt: Date.now(),
+          },
+        }
+      },
+      getBindingRelease: () => release,
+      screenshot: async () => ({ ...shot(), captureMode: 'full_display' }),
+    })
+    const result = await handleToolCall(adapter, 'screenshot', {}, makeOverrides())
+    expect(result.isError).toBeUndefined()
+    expect(result.screenshot?.captureMode).toBe('full_display')
+    expect(result.screenshot?.bindingRelease).toEqual(release!)
+    expect(result.content.some(item => item.type === 'text' && item.text.includes('(capture=full_display)'))).toBe(true)
+    expect(result.content.some(item => item.type === 'text' && item.text.includes('Binding released before this capture'))).toBe(true)
+  })
+
+  test('a release from an earlier call is still surfaced on the next full-display capture', async () => {
+    const release: BindingReleaseInfo = {
+      reason: 'new_foreground',
+      at: Date.now() - 1000,
+      revision: 2,
+      appId: 'app.test',
+      pid: 1,
+      hwnd: 10,
+      foreground: null,
+    }
+    const adapter = makeAdapter({
+      getBoundRevision: () => 2,
+      getBindingRelease: () => release,
+      screenshot: async () => ({ ...shot(), captureMode: 'full_display' }),
+    })
+    const result = await handleToolCall(adapter, 'screenshot', {}, makeOverrides())
+    expect(result.isError).toBeUndefined()
+    expect(result.screenshot?.bindingRelease).toEqual(release)
+    expect(result.content.some(item => item.type === 'text' && item.text.includes('Binding released before this capture'))).toBe(true)
+  })
+
+  test('atomic capture surfaces capture mode and release metadata', async () => {
+    const release: BindingReleaseInfo = {
+      reason: 'new_foreground',
+      at: Date.now() - 1000,
+      revision: 2,
+      appId: 'app.test',
+      pid: 1,
+      hwnd: 10,
+      foreground: null,
+    }
+    const adapter = makeAdapter({
+      getBoundRevision: () => 2,
+      getBindingRelease: () => release,
+      resolvePrepareCapture: async () => ({ ...shot(), captureMode: 'full_display', hidden: [] }),
+    })
+    const gates = adapter.getSubGates()
+    adapter.getSubGates = () => ({ ...gates, autoTargetDisplay: true })
+    const result = await handleToolCall(adapter, 'screenshot', {}, makeOverrides())
+    expect(result.isError).toBeUndefined()
+    expect(result.screenshot?.captureMode).toBe('full_display')
+    expect(result.screenshot?.bindingRelease).toEqual(release)
+    expect(result.content.some(item => item.type === 'text' && item.text.includes('(capture=full_display)'))).toBe(true)
+    expect(result.content.some(item => item.type === 'text' && item.text.includes('Binding released before this capture'))).toBe(true)
+  })
+
+  test('a release during capture is surfaced even when prepare did not unbind', async () => {
+    let release: BindingReleaseInfo | null = null
+    const adapter = makeAdapter({
+      getBoundRevision: () => release ? 2 : 1,
+      getBindingRelease: () => release,
+      screenshot: async () => {
+        release = {
+          reason: 'new_foreground',
+          at: Date.now(),
+          revision: 2,
+          appId: 'app.test',
+          pid: 1,
+          hwnd: 10,
+          foreground: null,
+        }
+        return { ...shot(), captureMode: 'full_display' }
+      },
+    })
+    const result = await handleToolCall(adapter, 'screenshot', {}, makeOverrides())
+    expect(result.isError).toBeUndefined()
+    expect(result.screenshot?.bindingRelease).toEqual(release!)
+    expect(result.content.some(item => item.type === 'text' && item.text.includes('Binding released before this capture'))).toBe(true)
+  })
+
+  test('a post-capture release never relabels a bound image as full-display', async () => {
+    let release: BindingReleaseInfo | null = null
+    const adapter = makeAdapter({
+      getBoundRevision: () => release ? 2 : 1,
+      getBindingRelease: () => release,
+      screenshot: async () => {
+        release = {
+          reason: 'new_foreground',
+          at: Date.now(),
+          revision: 2,
+          appId: 'app.test',
+          pid: 1,
+          hwnd: 10,
+          foreground: null,
+        }
+        return { ...shot(), captureMode: 'bound_window' }
+      },
+    })
+    const result = await handleToolCall(adapter, 'screenshot', {}, makeOverrides())
+    expect(result.isError).toBeUndefined()
+    const text = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n')
+    expect(text).toContain('(capture=bound_window)')
+    expect(text).toContain('still window-bound')
+    expect(text).not.toContain('This image is full-display')
+    expect(result.screenshot?.bindingRelease).toEqual(release!)
   })
 
   test('a revoked bound target cannot prepare elevation or be captured', async () => {
@@ -1066,6 +1198,30 @@ describe('Windows effective-target permission gates', () => {
     const denied = await handleToolCall(adapter, 'list_granted_applications', { include_windows: true }, deniedOverrides)
     expect(json(denied).windows).toEqual([])
     expect((await handleToolCall(adapter, 'open_application', { app: grantedExe, window_id: '10:20' }, deniedOverrides)).telemetry?.error_kind).toBe('app_not_granted')
+  })
+
+  test('desktop diagnostics separate the current mode from the last image', async () => {
+    const adapter = windowsAdapter('full')
+    adapter.executor.isWindowBound = () => false
+    adapter.executor.getBindingRelease = () => ({
+      reason: 'new_foreground',
+      at: 100,
+      revision: 2,
+      appId: 'app.test',
+      pid: 20,
+      hwnd: 10,
+      foreground: null,
+    })
+    const result = await handleToolCall(adapter, 'list_granted_applications', { include_desktop: true }, makeOverrides({
+      lastScreenshot: { ...shot(), captureMode: 'bound_window' },
+      screenshotAgeMs: 25,
+    }))
+    expect(json(result).desktop_info).toMatchObject({
+      captureMode: 'full_display',
+      anchorAgeMs: 25,
+      lastScreenshot: { captureMode: 'bound_window', ageMs: 25 },
+      lastBindingRelease: { reason: 'new_foreground', revision: 2 },
+    })
   })
 
   test('unknown and non-granted targets fail closed on Windows', async () => {

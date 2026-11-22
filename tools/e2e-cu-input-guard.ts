@@ -138,6 +138,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile exact-window fixture' }
 
   const capture = await handleToolCall(adapter, 'screenshot', {}, overrides)
   assert.ok(capture.screenshot, JSON.stringify(capture.content.filter(block => block.type === 'text')))
+  const afterCapture = await handleToolCall(adapter, 'list_granted_applications', { include_desktop: true }, {
+    ...overrides,
+    lastScreenshot: capture.screenshot,
+  })
+  const afterCaptureInfo = JSON.parse(afterCapture.content[0].text).desktop_info
+  assert.equal(afterCaptureInfo.lastScreenshot?.captureMode, 'bound_window')
+  assert.equal(afterCaptureInfo.lastBindingRelease, null)
   const coordinates = [Math.round(capture.screenshot!.width / 2), Math.round(capture.screenshot!.height / 2)]
   const click = (snapshot: typeof capture.screenshot) => handleToolCall(adapter, 'left_click', { coordinate: coordinates },
     { ...overrides, lastScreenshot: snapshot, boundRevision: getBoundRevision() })

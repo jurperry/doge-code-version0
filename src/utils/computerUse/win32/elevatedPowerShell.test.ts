@@ -8,6 +8,7 @@ import { getCurrentProcessIL, getProcessIL, needsElevatedHelper, parseIntegrityL
 import {
   _test,
   ensureElevatedPowerShell,
+  getElevatedPowerShellPid,
   isElevatedPowerShellActive,
   prepareComputerUseRelease,
   runComputerUsePowerShell,
@@ -39,6 +40,7 @@ test.skipIf(process.platform !== 'win32')('the persistent broker preserves outpu
   await _test.startLocal()
   try {
     expect(isElevatedPowerShellActive()).toBe(true)
+    expect(getElevatedPowerShellPid()).toBe(_test.activePid())
     expect(runComputerUsePowerShellSync('[Console]::Out.Write("sync-ok")')).toBe('sync-ok')
     expect(await runComputerUsePowerShell('[Console]::Out.Write([Console]::In.ReadToEnd())', 5000, 'input-中😀\n'.repeat(10_000) + 'end')).toBe('input-中😀\n'.repeat(10_000) + 'end')
     expect(await runComputerUsePowerShell('[Console]::Out.Write("first"); [Console]::Out.Write("second")')).toBe('firstsecond')
@@ -87,6 +89,7 @@ Start-Sleep -Milliseconds 1500
     process.kill(_test.activePid()!, 9)
     await prepareComputerUseRelease()
     expect(isElevatedPowerShellActive()).toBe(false)
+    expect(getElevatedPowerShellPid()).toBeNull()
     expect(await runComputerUsePowerShell('$PID')).toMatch(/^\d+$/)
   } finally {
     await _test.stop()

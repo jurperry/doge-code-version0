@@ -861,6 +861,12 @@ export function createCliExecutor(opts: {
       return getBoundRevision()
     },
 
+    getBindingRelease() {
+      if (process.platform !== 'win32') return null
+      const { getBindingRelease } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      return getBindingRelease()
+    },
+
     async getFrontmostApp(): Promise<FrontmostApp | null> {
       // The package gate needs the effective input target for authorization.
       // Background HWND delivery may legitimately differ from the physical
@@ -946,7 +952,7 @@ export function createCliExecutor(opts: {
     async unbindApp(): Promise<void> {
       if (process.platform !== 'win32') return
       const { unbindWindow } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
-      unbindWindow()
+      unbindWindow('switch_display')
     },
   }
 }

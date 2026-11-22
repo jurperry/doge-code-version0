@@ -37,7 +37,7 @@ Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWM
 
 **截图与缩放**：截图按 API 目标尺寸算法预缩放（`imageResize.ts`：28px/token、长边 ≤1568、token ≤1568、保持宽高比）。`pixels` 模式用**截图当时**的几何换算：`屏幕 x = round(图像 x × displayWidth / 图像 width) + originX`，y 同理（`toolCalls.ts` `scaleCoord`）；无截图冷启动退化 `scaleFactor` 并告警。捕获/命中/输入统一 Per-Monitor-V2 物理像素；已验证 DPI-unaware 窗口按显示器 DPI 归一化画布，其他不盲目裁剪。`zoom` 仅放大上一张完整截图区域，后续点击仍用完整截图坐标；空图/零尺寸/非法原点/连续异常 → `capture_failed`，`save_to_disk:true` 才落盘且失败不更新锚点。
 
-**代际与一致性**：窗口/元素绑定有单调 `boundRevision`（`src/utils/computerUse/platforms/win32.ts`），输入与 zoom 执行前比较 revision，截图记录捕获前 revision 并在返回前复核；迟到旧图不得覆盖新锚点。绑定后若有**绑定之后新启动**的进程接管前台，旧绑定自动解除；已有进程的普通前台切换不误判。
+**代际与一致性**：窗口/元素绑定有单调 `boundRevision`（`src/utils/computerUse/platforms/win32.ts`），输入与 zoom 执行前比较 revision，截图记录捕获前 revision 并在返回前复核；迟到旧图不得覆盖新锚点。绑定后若有**绑定之后新启动**的进程接管前台，旧绑定自动解除；已有进程的普通前台切换不误判。`consent.exe`、本工具管理员助手 broker、CU 自身进程属于工具自己的提权/控制流程，不算“新应用接管”，不能因此解除绑定。解绑会记录 `reason` 与前台身份；若本次截图在 capture 前后观察到解绑（包括此前动作已解绑、本次 `prepareForTarget("capture")` 内解绑），结果必须带明确的 “Binding released …” 提示：全屏图说明坐标空间已变为 display，窗口图说明绑定已释放且需重新截图，禁止静默改变坐标空间。诊断接口把**当前** `captureMode` 与 `lastScreenshot.captureMode/ageMs`、`lastBindingRelease` 分开返回，`lastScreenshot.ageMs` 与 `anchorAgeMs` 同源，避免把旧截图锚点误读成当前模式。
 
 ## 4. 输入原语与批次约束
 
