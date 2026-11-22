@@ -154,6 +154,7 @@ export function* normalizeMessage(message: Message): Generator<SDKMessage> {
                 uuid: _.uuid,
                 timestamp: _.timestamp,
                 isSynthetic: _.isMeta || _.isVisibleInTranscriptOnly,
+                ...(typeof _.toolPreviewPath === 'string' ? { tool_preview_path: _.toolPreviewPath } : {}),
                 tool_use_result: _.mcpMeta
                   ? { content: _.toolUseResult, ..._.mcpMeta }
                   : _.toolUseResult,
@@ -217,6 +218,7 @@ export function* normalizeMessage(message: Message): Generator<SDKMessage> {
           uuid: _.uuid,
           timestamp: _.timestamp,
           isSynthetic: _.isMeta || _.isVisibleInTranscriptOnly,
+          ...(typeof _.toolPreviewPath === 'string' ? { tool_preview_path: _.toolPreviewPath } : {}),
           tool_use_result: _.mcpMeta
             ? { content: _.toolUseResult, ..._.mcpMeta }
             : _.toolUseResult,

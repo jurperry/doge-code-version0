@@ -471,6 +471,7 @@ export function createUserMessage({
   timestamp,
   imagePasteIds,
   sourceToolAssistantUUID,
+  toolPreviewPath,
   permissionMode,
   origin,
 }: {
@@ -490,6 +491,7 @@ export function createUserMessage({
   imagePasteIds?: number[]
   // For tool_result messages: the UUID of the assistant message containing the matching tool_use
   sourceToolAssistantUUID?: UUID
+  toolPreviewPath?: string
   // Permission mode when message was sent (for rewind restoration)
   permissionMode?: PermissionMode
   summarizeMetadata?: {
@@ -517,6 +519,7 @@ export function createUserMessage({
     mcpMeta,
     imagePasteIds,
     sourceToolAssistantUUID,
+    ...(toolPreviewPath ? { toolPreviewPath } : {}),
     permissionMode,
     origin,
   }
@@ -807,6 +810,7 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
             ...createUserMessage({
               content: [_],
               toolUseResult: message.toolUseResult,
+              toolPreviewPath: _.type === 'tool_result' ? message.toolPreviewPath : undefined,
               mcpMeta: message.mcpMeta,
               isMeta: message.isMeta,
               isVisibleInTranscriptOnly: message.isVisibleInTranscriptOnly,

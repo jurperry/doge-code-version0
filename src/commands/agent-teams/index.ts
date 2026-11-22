@@ -29,7 +29,7 @@ You are coordinating this work as a team lead using agent teams. Agent teams are
 
 Work through these steps:
 
-1. Read the requirement below. If it is missing or too vague to decompose, ask the user for specifics and stop.
+1. Read the requirement below. If it only asks to use agent teams, use the existing task from the conversation when the reference is clear. If you still cannot identify a task to decompose, ask the user for specifics and stop.
 2. Create a team with TeamCreate — pick a short kebab-case team_name related to the work.
 3. Decompose the requirement into teammate-sized assignments using the team-lead discipline: Research → Synthesis → Implementation → Verification. Fan out read-only research in parallel; keep at most one writer per set of files; run verification alongside implementation on different areas.
 4. Spawn each teammate with the Agent tool, passing team_name, name, and a self-contained prompt (teammates cannot see this conversation — include file paths and exact expectations). Choose each teammate's model deliberately via the model parameter:

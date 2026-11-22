@@ -449,7 +449,7 @@ export function regenerateSessionId(
   // null so getTranscriptPath() derives from originalCwd.
   STATE.sessionId = randomUUID() as SessionId
   STATE.sessionProjectDir = null
-  emitShellWorkspaceMarker(STATE.cwd, STATE.sessionId)
+  reportWorkspace()
   return STATE.sessionId
 }
 
@@ -479,7 +479,7 @@ export function switchSession(
   STATE.planSlugCache.delete(STATE.sessionId)
   STATE.sessionId = sessionId
   STATE.sessionProjectDir = projectDir
-  emitShellWorkspaceMarker(STATE.cwd, STATE.sessionId)
+  reportWorkspace()
   sessionSwitched.emit(sessionId)
 }
 
@@ -519,6 +519,12 @@ export function getProjectRoot(): string {
 
 export function setOriginalCwd(cwd: string): void {
   STATE.originalCwd = cwd.normalize('NFC')
+  reportWorkspace()
+}
+
+/** The desktop follows the session/worktree directory. Shell commands keep a separate cwd. */
+export function reportWorkspace(): void {
+  emitShellWorkspaceMarker(STATE.originalCwd, STATE.sessionId)
 }
 
 /**
@@ -535,7 +541,6 @@ export function getCwdState(): string {
 
 export function setCwdState(cwd: string): void {
   STATE.cwd = cwd.normalize('NFC')
-  emitShellWorkspaceMarker(STATE.cwd, STATE.sessionId)
 }
 
 export function getDirectConnectServerUrl(): string | undefined {

@@ -21,7 +21,9 @@
  * per side only when that side of the keyword is an ASCII word char.
  */
 
+const COMMAND_KEYWORD = 'agent-teams'
 const ASCII_KEYWORDS = [
+  COMMAND_KEYWORD,
   'agent teams',
   'agent team',
   'agent swarms',
@@ -46,6 +48,11 @@ const OPEN_TO_CLOSE: Record<string, string> = {
   '[': ']',
   '(': ')',
   "'": "'",
+  '“': '”',
+  '‘': '’',
+  '「': '」',
+  '『': '』',
+  '（': '）',
 }
 
 const isWord = (ch: string | undefined) =>
@@ -87,7 +94,16 @@ function findQuotedRanges(text: string): Array<{ start: number; end: number }> {
 const isAsciiWordChar = (ch: string | undefined) =>
   !!ch && /[a-zA-Z0-9_]/.test(ch)
 
-function keywordOccurs(text: string, keyword: string): boolean {
+/** The hyphenated command name also appears in questions, docs and settings. */
+function requestsTeamCommand(text: string, start: number): boolean {
+  const preceding = text.slice(0, start)
+  const request = /(?:\b(?:use|enable|activate|invoke|start|launch|run(?:\s+with)?)\s+(?:the\s+)?|(?:使用|启用|调用|启动|开启|运行|用)\s*)$/i.exec(preceding)
+  if (!request) return false
+  const qualifier = preceding.slice(0, request.index)
+  return !/(?:\b(?:do\s+not|don['’]t|never|not|avoid)\s+(?:\w+\s+)?|(?:别|不要|不用|不必|无需|禁止|避免|不想|不需要|不)\s*(?:再|去)?\s*)$/i.test(qualifier)
+}
+
+function keywordOccurs(text: string, keyword: string, quotedRanges: ReturnType<typeof findQuotedRanges>): boolean {
   // 'g' is required: rejected matches resume scanning at lastIndex — a
   // non-global exec would return the same match forever.
   const re = new RegExp(
@@ -98,16 +114,11 @@ function keywordOccurs(text: string, keyword: string): boolean {
   while ((match = re.exec(text)) !== null) {
     const start = match.index
     const end = start + match[0].length
-    // Zero-width safety (cannot happen with these keywords, but guard anyway)
-    if (end === start) {
-      re.lastIndex++
-      continue
-    }
     const before = text[start - 1]
     const after = text[end]
     // Question about the feature ("agent teams?"), not a request to use it.
     const isQuestion = after === '?' || after === '？'
-    let rejected = isQuestion
+    let rejected = isQuestion || quotedRanges.some(range => start < range.end && end > range.start)
     if (!rejected && isAsciiWordChar(keyword[0]!)) {
       // ASCII-word neighbor means the keyword is part of a larger identifier
       // ("multiagent teams"). A CJK neighbor is normal Chinese prose
@@ -134,7 +145,7 @@ function keywordOccurs(text: string, keyword: string): boolean {
         rejected = true
       }
     }
-    if (!rejected) return true
+    if (!rejected && (keyword !== COMMAND_KEYWORD || requestsTeamCommand(text, start))) return true
     re.lastIndex = end
   }
   return false
@@ -145,21 +156,9 @@ function keywordOccurs(text: string, keyword: string): boolean {
  * quotes/paths. Slash-prefixed input never matches (command invocation).
  */
 export function hasAgentTeamsKeyword(text: string): boolean {
-  if (!text.trim() || text.startsWith('/')) return false
+  if (!text.trim() || text.trimStart().startsWith('/')) return false
   const quotedRanges = findQuotedRanges(text)
-  if (quotedRanges.length === 0) {
-    return [...ASCII_KEYWORDS, ...CJK_KEYWORDS].some(k =>
-      keywordOccurs(text, k),
-    )
-  }
-  // Strip quoted ranges before matching — simpler than position filtering
-  // for multi-byte CJK keywords, and the scanner keeps code/quote payloads
-  // from triggering while normal prose (rarely fully quoted) still matches.
-  const stripped = text
-    .split('')
-    .filter((_, i) => !quotedRanges.some(r => i >= r.start && i < r.end))
-    .join('')
   return [...ASCII_KEYWORDS, ...CJK_KEYWORDS].some(k =>
-    keywordOccurs(stripped, k),
+    keywordOccurs(text, k, quotedRanges),
   )
 }

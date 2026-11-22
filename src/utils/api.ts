@@ -144,10 +144,14 @@ export async function toolToAPISchema(
   // call — name-only keying returned a stale schema (5.4% → 51% err rate, see
   // PR#25424). MCP tools also set inputJSONSchema but each has a stable schema,
   // so including it preserves their GB-flip cache stability.
-  const cacheKey =
+  const schemaKey =
     'inputJSONSchema' in tool && tool.inputJSONSchema
       ? `${tool.name}:${jsonStringify(tool.inputJSONSchema)}`
       : tool.name
+  // A running session can opt in to teams after caching the ordinary Agent
+  // schema. Cache the two variants independently for tools with swarm fields.
+  const hideSwarmFields = !!SWARM_FIELDS_BY_TOOL[tool.name] && !isAgentSwarmsEnabled()
+  const cacheKey = hideSwarmFields ? `${schemaKey}:without-swarm-fields` : schemaKey
   const cache = getToolSchemaCache()
   let base = cache.get(cacheKey)
   if (!base) {
@@ -162,7 +166,7 @@ export async function toolToAPISchema(
 
     // Filter out swarm-related fields when swarms are not enabled
     // This ensures external non-EAP users don't see swarm features in the schema
-    if (!isAgentSwarmsEnabled()) {
+    if (hideSwarmFields) {
       input_schema = filterSwarmFieldsFromSchema(tool.name, input_schema)
     }
 

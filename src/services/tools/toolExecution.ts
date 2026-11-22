@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { resolve } from 'node:path'
 import type {
   ContentBlockParam,
   ToolResultBlockParam,
@@ -59,6 +60,7 @@ import type {
 } from '../../types/message.js'
 import { count } from '../../utils/array.js'
 import { createAttachmentMessage } from '../../utils/attachments.js'
+import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
 import {
   AbortError,
@@ -77,6 +79,7 @@ import {
   createUserMessage,
   withMemoryCorrectionHint,
 } from '../../utils/messages.js'
+import { expandPath } from '../../utils/path.js'
 import type {
   PermissionDecisionReason,
   PermissionResult,
@@ -1221,6 +1224,20 @@ async function checkPermissionsAndCallTool(
     callInput = processedInput
   }
   try {
+    // Capture the path at execution time: a previous tool in the same model
+    // response may have changed cwd after the assistant message was emitted.
+    let toolPreviewPath: string | undefined
+    if (process.env.DOGE_APP_WORKSPACE_MARKER === '1' && tool.getPath) {
+      if (tool.name === NOTEBOOK_EDIT_TOOL_NAME) {
+        toolPreviewPath = resolve(getCwd(), tool.getPath(callInput))
+      } else if (
+        tool.name === FILE_READ_TOOL_NAME ||
+        tool.name === FILE_EDIT_TOOL_NAME ||
+        tool.name === FILE_WRITE_TOOL_NAME
+      ) {
+        toolPreviewPath = expandPath(tool.getPath(callInput))
+      }
+    }
     const result = await tool.call(
       callInput,
       {
@@ -1480,6 +1497,7 @@ async function checkPermissionsAndCallTool(
               : toolUseResult,
           mcpMeta: toolUseContext.agentId ? undefined : mcpMeta,
           sourceToolAssistantUUID: assistantMessage.uuid,
+          toolPreviewPath,
         }),
         contextModifier: toolContextModifier
           ? {

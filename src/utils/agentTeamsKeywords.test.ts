@@ -6,6 +6,8 @@ describe('hasAgentTeamsKeyword', () => {
     test.each([
       // English forms (case-insensitive, singular/plural)
       'use agent teams to build this',
+      '我要求你使用agent-teams完成这个任务',
+      'Please run with agent-teams',
       'Agent Teams please',
       'spawn an agent team for the refactor',
       'run an agent swarm on this repo',
@@ -25,7 +27,7 @@ describe('hasAgentTeamsKeyword', () => {
       '这个任务复杂，多agent协作。开始吧',
       'please, use agent teams.',
       // One valid occurrence after a rejected one
-      'see agent-teams config, then use agent teams to start',
+      'see src/agent-teams/config.ts, then use agent teams to start',
       // Question mark elsewhere in the sentence
       'can you use agent teams for this? yes',
     ])('%s', input => {
@@ -40,14 +42,21 @@ describe('hasAgentTeamsKeyword', () => {
       // Slash commands never keyword-match
       '/agent-teams do the thing',
       '/rename agent teams',
+      '  /rename agent-teams',
       // Questions about the feature (only the punctuated form is excluded —
       // an unpunctuated "agent teams是什么意思" is indistinguishable from a
       // request, same aggressive posture as the ultraplan keyword)
       'agent teams?',
       '什么是agent teams？',
+      '请问你使用的是agent-teams功能还是普通agent?',
+      '不要使用agent-teams',
+      "Don't use agent-teams",
+      '解释 agent-teams 功能',
       // Quoted / code content
       'read the "agent teams" doc section first',
       'grep for `agent swarm` in the docs',
+      '解释「agent-teams」和“多agent协作”两个说法',
+      'agent`identifier`-teams',
       "the term 'agent swarm' means many agents",
       // Path / identifier / flag-like
       'look at src/agent-teams/foo.ts',

@@ -1289,6 +1289,7 @@ const SDKUserMessageContentSchema = lazySchema(() =>
     parent_tool_use_id: z.string().nullable(),
     isSynthetic: z.boolean().optional(),
     tool_use_result: z.unknown().optional(),
+    tool_preview_path: z.string().optional(),
     priority: z.enum(['now', 'next', 'later']).optional(),
     desktop_supplement: z.literal(true).optional(),
     timestamp: z

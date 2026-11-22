@@ -23,6 +23,7 @@ export type AttachmentMessage = MessageBase & {
 
 export type UserMessage = MessageBase & {
   type: 'user'
+  toolPreviewPath?: string
   message: {
     content: string | Array<{ type: string; text?: string; [key: string]: unknown }>
     [key: string]: unknown

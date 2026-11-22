@@ -14,6 +14,7 @@ import {
   getIsNonInteractiveSession,
   getProjectRoot,
   getSessionId,
+  reportWorkspace,
   setOriginalCwd,
   setProjectRoot,
   switchSession,
@@ -159,6 +160,7 @@ export async function setup(
 
   // IMPORTANT: setCwd() must be called before any other code that depends on the cwd
   setCwd(cwd)
+  reportWorkspace()
 
   // Capture hooks configuration snapshot to avoid hidden hook modifications.
   // IMPORTANT: Must be called AFTER setCwd() so hooks are loaded from the correct directory

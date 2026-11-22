@@ -890,8 +890,18 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
   const metadata = formatCommandLoadingMetadata(command, args);
   const additionalAllowedTools = parseToolListFromCLI(command.allowedTools ?? []);
 
-  // Create content for the main message, including any pasted images
-  const mainMessageContent: ContentBlockParam[] = imageContentBlocks.length > 0 || precedingInputBlocks.length > 0 ? [...imageContentBlocks, ...precedingInputBlocks, ...result] : result;
+  // Desktop history displays the command echo and skips its expanded prompt.
+  // Keep the user's screenshots on the visible Agent Teams message.
+  const imagesOnEcho = command.source === 'builtin' && command.name === 'agent-teams' &&
+    process.env.DOGE_APP_WORKSPACE_MARKER === '1' && imageContentBlocks.length > 0;
+  const echoContent: string | ContentBlockParam[] = imagesOnEcho
+    ? [{ type: 'text', text: metadata }, ...imageContentBlocks]
+    : metadata;
+  const mainMessageContent: ContentBlockParam[] = [
+    ...(!imagesOnEcho ? imageContentBlocks : []),
+    ...precedingInputBlocks,
+    ...result
+  ];
 
   // Extract attachments from command arguments (@-mentions, MCP resources,
   // agent mentions in SKILL.md). skipSkillDiscovery prevents the SKILL.md
@@ -904,7 +914,7 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
     skipSkillDiscovery: true
   }));
   const messages = [createUserMessage({
-    content: metadata,
+    content: echoContent,
     uuid
   }), createUserMessage({
     content: mainMessageContent,
