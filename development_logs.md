@@ -1,5 +1,11 @@
 # development_logs.md — Doge Code 开发经验与版本索引
 
+## 2026-11-22 Windows CU 永久提权授权（2.1.350）
+
+1. 遇到问题：原管理员 PowerShell 助手绑定单个 CLI 进程，每个会话首次操作 High 完整性目标都要在应用授权之后再确认一次 UAC，打断 Computer Use 流程。
+2. 解决方法：新增 App 设置显式永久授权：一次 UAC 注册当前用户 + 当前配置目录隔离的最高权限交互式计划任务，CLI 后续按需启动/重连管理员代理；代理闲置 15 分钟退出，会话结束只断开。撤销需再次 UAC 并删除任务与脚本；标准账户与未启用用户保留原单次提权。代理脚本生成抽至 `brokerScript.ts`，请求携带属主 PID + 启动时间，并在动作前打开属主退出监测句柄，永久代理仍监测客户端和属主生命周期；撤销标记阻止撤销期间的新启动/动作，撤销探针区分管道不存在与忙碌，避免并发重连后误报成功。
+3. 位置：`src/utils/computerUse/win32/{brokerScript,permanentElevation,elevationCommand,elevatedPowerShell}.ts`、`src/entrypoints/cli.tsx`；测试覆盖用户/配置隔离、真实管理员令牌、无 UAC 停止后重启、跨进程重连与撤销清理，关联 UAC/代理/Windows 语义回归 28 项通过。App 设置页完整启用/撤销黑盒通过。
+
 只保留「不看代码就会再踩」的经验、版本里程碑索引与已知欠账；完整逐轮历史以 `git log` 为准，架构现状见 [docs/DESIGN.md](docs/DESIGN.md)，Computer Use 见 [docs/COMPUTER_USE.md](docs/COMPUTER_USE.md)。**文件名保持 `development_logs.md`**：`src/hooks/useMainLoopModel.ts` 注释引用了「development_logs.md §25 模型切换统一入口」；旧 §25 已并入本文 §1.3（模型目录/协议转换），勿改名。
 
 ## 2026-11-22 Windows CU 绑定解绑诊断与截图模式反馈（2.1.348）
@@ -41,7 +47,7 @@
 ### 1.4 Computer Use / Windows
 
 - 坐标三条铁律：Windows 命中前必须启用并验证 **Per-Monitor-V2** 再调 `WindowFromPoint`（否则空命中让模型重试到 64+ 次，2.1.336 根因不是 UIPI）；绑定窗口 origin=(0,0) 与全屏两空间，真实输入只加一次 `GetWindowRect` 偏移，`switch_display` 显式解绑并清锚点；输入/zoom 前比较 `boundRevision`、截图返回前复核，迟到旧图不得覆盖新锚点。
-- UAC 永远由用户处理：检测到即起 30 秒期限（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报，提示后必须重新截图；只有高完整性目标才请求管理员 PowerShell 助手（命名管道+属主校验），普通目标切回本地。
+- UAC 永远由用户处理：检测到即起 30 秒期限（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报，提示后必须重新截图；只有高完整性目标才请求管理员 PowerShell 助手（命名管道+属主校验），普通目标切回本地。永久授权只从 App 设置显式启用/撤销，计划任务按用户 + 配置目录隔离；永久代理解绑 CLI 属主生命周期，但每个动作仍校验客户端和请求属主，会话退出不得停止其他会话正在共用的代理。
 - SendMessage 不是通用协议（Chromium/自绘忽略）；bound HWND 的直接文本必须走真实 Unicode `SendInput + KEYEVENTF_UNICODE`（stdin base64 传文本），不要回后台 `WM_CHAR`；双/三击同一脚本完成，系统 click count 会出现 `1,2,1`。
 - 身份 fail-closed：完整 exe 路径、可信宿主（真实父/根关系+祖先链）、deny 优先、未知前台拒绝；窗口 owner 不是安全边界；便携 exe 用自身目录为 cwd。
 - 验证只看 UI/像素/独立 `GetCursorPos`，不看「已派发」文案。

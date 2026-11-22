@@ -2,9 +2,24 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { POWER_SHELL_PREFIX, runPowerShell, runPowerShellSync } from './powerShell.js'
+import { buildBrokerServerScript } from './brokerScript.js'
+import { runPowerShell, runPowerShellSync } from './powerShell.js'
+import {
+  assertPermanentElevationNotRevoking,
+  getPermanentElevationDescriptor,
+  getPermanentElevationStatus,
+  getWindowsOwnerIdentity,
+  startPermanentElevationTask,
+} from './permanentElevation.js'
 
-type Broker = { pipeName: string; pid: number; localProcess?: ReturnType<typeof Bun.spawn> }
+type Broker = {
+  pipeName: string
+  pid: number
+  ownerPid: number
+  ownerStartTicks: string
+  permanent: boolean
+  localProcess?: ReturnType<typeof Bun.spawn>
+}
 type Command = 'execute' | 'ping' | 'stop'
 
 const CLIENT_SCRIPT = `
@@ -20,6 +35,8 @@ try {
     $writer.Write([string]$request.command)
     $writer.Write([string]$request.script)
     $writer.Write([string]$request.stdin)
+    $writer.Write([int]$request.ownerPid)
+    $writer.Write([long]$request.ownerStartTicks)
     $writer.Flush()
     $stdout = $reader.ReadString()
     $stderr = $reader.ReadString()
@@ -36,168 +53,14 @@ try {
 if ($exitCode -ne 0) { exit $exitCode }
 `
 
-// The bootstrap reads one framed script line and leaves the remaining input
-// available to the action through the same console reader.
-const ACTION_BOOTSTRAP = Buffer.from(`${POWER_SHELL_PREFIX}
-$encoded = [Console]::In.ReadLine()
-$script = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
-try {
-    & ([ScriptBlock]::Create($script))
-} catch {
-    [Console]::Error.WriteLine($_.Exception.Message)
-    exit 1
-}
-`, 'utf16le').toString('base64')
-
-const BROKER_CS = `
-using System;
-using System.Diagnostics;
-using System.IO;
-using System.IO.Pipes;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-using System.Security.AccessControl;
-using System.Security.Principal;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-
-public static class CuElevatedBroker {
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint pid);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern SafeWaitHandle OpenProcess(uint access, bool inherit, uint pid);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern uint WaitForSingleObject(SafeWaitHandle handle, uint milliseconds);
-    const uint Synchronize = 0x00100000;
-    const uint WaitTimeout = 258;
-
-    class Result {
-        public string Stdout = "";
-        public string Stderr = "";
-        public int ExitCode = 1;
-    }
-
-    static bool OwnerAlive(int pid, long startTicks) {
-        try {
-            using (var process = Process.GetProcessById(pid)) return !process.HasExited && process.StartTime.Ticks == startTicks;
-        } catch { return false; }
-    }
-
-    static NamedPipeServerStream CreatePipe(string name, string callerSid) {
-        var security = new PipeSecurity();
-        security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(callerSid), PipeAccessRights.ReadWrite, AccessControlType.Allow));
-        var current = WindowsIdentity.GetCurrent().User;
-        if (current != null && current.Value != callerSid) {
-            security.AddAccessRule(new PipeAccessRule(current, PipeAccessRights.ReadWrite, AccessControlType.Allow));
-        }
-        try {
-            return new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.None, 4096, 4096, security);
-        } catch (Exception error) {
-            int allowRules = security.GetAccessRules(true, false, typeof(SecurityIdentifier)).Count;
-            throw new InvalidOperationException("[CU_HELPER_PIPE_ACL] Could not create the named pipe (" + allowRules + " explicit access rules).", error);
-        }
-    }
-
-    static Result Execute(NamedPipeServerStream pipe, int ownerPid, long ownerStartTicks, string script, string input) {
-        uint clientPid;
-        if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out clientPid)) {
-            throw new InvalidOperationException("Could not identify the Computer Use action client.");
-        }
-        using (var client = OpenProcess(Synchronize, false, clientPid)) {
-            if (client.IsInvalid || WaitForSingleObject(client, 0) != WaitTimeout) {
-                throw new InvalidOperationException("The Computer Use action client is no longer running.");
-            }
-            return RunAction(client, ownerPid, ownerStartTicks, script, input);
-        }
-    }
-
-    static Result RunAction(SafeWaitHandle client, int ownerPid, long ownerStartTicks, string script, string input) {
-        var start = new ProcessStartInfo {
-            FileName = Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\\v1.0\\powershell.exe"),
-            Arguments = "-NoProfile -NonInteractive -EncodedCommand ${ACTION_BOOTSTRAP}",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8
-        };
-        using (var process = new Process()) {
-            process.StartInfo = start;
-            if (!process.Start()) throw new InvalidOperationException("Could not start the elevated Computer Use action.");
-            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
-            Task<string> stderr = process.StandardError.ReadToEndAsync();
-            try {
-                var frame = Encoding.UTF8.GetBytes(Convert.ToBase64String(Encoding.UTF8.GetBytes(script)) + "\\n" + input);
-                Task feeding = Task.Run(() => {
-                    process.StandardInput.BaseStream.Write(frame, 0, frame.Length);
-                    process.StandardInput.Close();
-                });
-                while (!process.WaitForExit(50)) {
-                    if (WaitForSingleObject(client, 0) != WaitTimeout || !OwnerAlive(ownerPid, ownerStartTicks)) {
-                        throw new InvalidOperationException("The elevated Computer Use action was cancelled.");
-                    }
-                    if (feeding.IsFaulted) feeding.GetAwaiter().GetResult();
-                }
-                if (process.ExitCode == 0) feeding.GetAwaiter().GetResult();
-                return new Result { Stdout = stdout.Result, Stderr = stderr.Result, ExitCode = process.ExitCode };
-            } finally {
-                try { if (!process.HasExited) process.Kill(); } catch {}
-            }
-        }
-    }
-
-    public static void Run(string pipeName, int ownerPid, long ownerStartTicks, string callerSid) {
-        while (OwnerAlive(ownerPid, ownerStartTicks)) {
-            using (var pipe = CreatePipe(pipeName, callerSid)) {
-                var connecting = pipe.WaitForConnectionAsync();
-                while (!connecting.IsCompleted) {
-                    if (!OwnerAlive(ownerPid, ownerStartTicks)) return;
-                    Thread.Sleep(100);
-                }
-                try { connecting.GetAwaiter().GetResult(); }
-                catch (Exception error) { throw new InvalidOperationException("[CU_HELPER_PIPE_WAIT] Named pipe wait failed.", error); }
-
-                try {
-                    var reader = new BinaryReader(pipe, Encoding.UTF8, true);
-                    var writer = new BinaryWriter(pipe, Encoding.UTF8, true);
-                    string command = reader.ReadString();
-                    string script = Encoding.UTF8.GetString(Convert.FromBase64String(reader.ReadString()));
-                    string input = Encoding.UTF8.GetString(Convert.FromBase64String(reader.ReadString()));
-                    if (command != "execute" && command != "ping" && command != "stop") {
-                        throw new InvalidOperationException("Unknown Computer Use transaction command.");
-                    }
-                    if (command == "stop") {
-                        writer.Write(""); writer.Write(""); writer.Write(0); writer.Flush();
-                        return;
-                    }
-                    Result result = command == "ping"
-                        ? new Result { Stdout = "ready", ExitCode = 0 }
-                        : Execute(pipe, ownerPid, ownerStartTicks, script, input);
-                    writer.Write(result.Stdout);
-                    writer.Write(result.ExitCode == 0 ? result.Stderr : "[CU_HELPER_ACTION] " + result.Stderr);
-                    writer.Write(result.ExitCode);
-                    writer.Flush();
-                } catch (Exception error) {
-                    try {
-                        var writer = new BinaryWriter(pipe, Encoding.UTF8, true);
-                        writer.Write(""); writer.Write("[CU_HELPER_REQUEST] " + error.Message); writer.Write(21); writer.Flush();
-                    } catch {}
-                }
-            }
-        }
-    }
-}
-`
-
 function payload(broker: Broker, command: Command, script = '', stdin = ''): string {
   return JSON.stringify({
     pipe: broker.pipeName,
     command,
     script: Buffer.from(script, 'utf8').toString('base64'),
     stdin: Buffer.from(stdin, 'utf8').toString('base64'),
+    ownerPid: broker.ownerPid,
+    ownerStartTicks: broker.ownerStartTicks,
   })
 }
 
@@ -222,22 +85,31 @@ let targetElevated = false
 let transactionTail: Promise<void> = Promise.resolve()
 let transactionCount = 0
 
-async function startBroker(elevated: boolean, signal?: AbortSignal): Promise<void> {
+async function startBroker(elevated: boolean, signal?: AbortSignal, permanent = false): Promise<void> {
   if (active) return
   if (starting) return starting
   const operation = (async () => {
     signal?.throwIfAborted()
     const pipeName = `doge-cu-${process.pid}-${randomUUID()}`
-    const identity = runPowerShellSync(`[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value + '|' + (Get-Process -Id ${process.pid}).StartTime.Ticks`, 5000).trim()
-    const [callerSid, ownerStartTicks] = identity.split('|')
-    if (!callerSid || !/^\d+$/.test(ownerStartTicks ?? '')) throw new Error('Could not identify the Windows user or owner process for the Computer Use helper.')
+    const { callerSid, ownerStartTicks } = getWindowsOwnerIdentity()
+    const server = buildBrokerServerScript({
+      pipeName,
+      ownerPid: permanent ? 0 : process.pid,
+      ownerStartTicks: permanent ? '0' : ownerStartTicks,
+      callerSid,
+    })
     const scriptPath = join(tmpdir(), `doge-cu-broker-${randomUUID()}.ps1`)
     const logPath = `${scriptPath}.log`
     const scriptLiteral = scriptPath.replace(/'/g, "''")
     const logLiteral = logPath.replace(/'/g, "''")
-    const server = `try {\n[Console]::Out.Close()\n[Console]::Error.Close()\n$ErrorActionPreference = 'Stop'\nAdd-Type @'\n${BROKER_CS}\n'@\n[CuElevatedBroker]::Run('${pipeName}', ${process.pid}, ${ownerStartTicks}L, '${callerSid}')\n} catch {\n[System.IO.File]::WriteAllText('${logLiteral}', ($_ | Out-String), [System.Text.Encoding]::UTF8)\nexit 1\n}`
-    writeFileSync(scriptPath, `\uFEFF${server}`, 'utf8')
-    const broker = { pipeName, pid: 0 }
+    writeFileSync(scriptPath, `\uFEFFtry {\n${server}\n} catch {\n[System.IO.File]::WriteAllText('${logLiteral}', ($_ | Out-String), [System.Text.Encoding]::UTF8)\nexit 1\n}`, 'utf8')
+    const broker: Broker = {
+      pipeName,
+      pid: 0,
+      ownerPid: process.pid,
+      ownerStartTicks,
+      permanent,
+    }
     try {
       if (elevated) {
         const rawPid = await runPowerShell(`
@@ -264,7 +136,7 @@ try {
       } else {
         broker.localProcess = Bun.spawn([
           'powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath,
-        ], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+        ], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', windowsHide: true })
         broker.pid = broker.localProcess.pid
       }
       if (!Number.isInteger(broker.pid) || broker.pid <= 0) throw new Error('The Windows Computer Use helper did not return a process ID.')
@@ -296,6 +168,44 @@ try {
   try { await operation } finally { if (starting === operation) starting = undefined }
 }
 
+async function attachPermanentBroker(signal?: AbortSignal): Promise<boolean> {
+  if (active) return true
+  if (starting) return starting.then(() => active?.permanent === true)
+  const operation = (async () => {
+    signal?.throwIfAborted()
+    assertPermanentElevationNotRevoking()
+    const status = getPermanentElevationStatus()
+    if (status.needsRepair) throw new Error('The permanent Computer Use authorization needs repair. Enable it again from Settings.')
+    if (!status.enabled) return
+    const descriptor = getPermanentElevationDescriptor()
+    const { ownerStartTicks } = getWindowsOwnerIdentity()
+    const broker: Broker = {
+      pipeName: descriptor.pipeName,
+      pid: 0,
+      ownerPid: process.pid,
+      ownerStartTicks,
+      permanent: true,
+    }
+    active = broker
+    try {
+      if (!status.running) await startPermanentElevationTask()
+      if (await transact(broker, 'ping', 20_000, '', '', signal) !== 'ready') {
+        throw new Error('The permanent Windows Computer Use helper failed its readiness check.')
+      }
+    } catch (error) {
+      if (active === broker) active = undefined
+      throw new Error(`The permanent Windows Computer Use helper is unavailable. No input was sent. Enable it again from Settings if this persists. ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })()
+  starting = operation
+  try {
+    await operation
+    return active?.permanent === true
+  } finally {
+    if (starting === operation) starting = undefined
+  }
+}
+
 export async function ensureElevatedPowerShell(signal?: AbortSignal): Promise<void> {
   const broker = active
   if (broker) {
@@ -305,9 +215,12 @@ export async function ensureElevatedPowerShell(signal?: AbortSignal): Promise<vo
     } catch (error) {
       if (signal?.aborted) throw error
       forgetBroker(broker)
-      throw new Error(`The Windows Computer Use helper is unavailable. No input was sent; retry only after inspecting the target. ${error instanceof Error ? error.message : String(error)}`)
+      if (!broker.permanent) {
+        throw new Error(`The Windows Computer Use helper is unavailable. No input was sent; retry only after inspecting the target. ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
   }
+  if (await attachPermanentBroker(signal)) return
   await startBroker(true, signal)
 }
 
@@ -340,8 +253,6 @@ export function isElevatedPowerShellActive(): boolean {
   return active !== undefined
 }
 
-/** PID of the long-lived broker, if any. Used to ignore our own helper when
- *  deciding whether a foreground change is a real application takeover. */
 export function getElevatedPowerShellPid(): number | null {
   const pid = active?.pid
   if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return null
@@ -349,8 +260,6 @@ export function getElevatedPowerShellPid(): number | null {
     process.kill(pid, 0)
     return pid
   } catch (error) {
-    // EPERM still proves the PID exists; it just belongs to a higher-integrity
-    // process. A missing PID must not suppress a real foreground transition.
     return (error as NodeJS.ErrnoException).code === 'EPERM' ? pid : null
   }
 }
@@ -373,15 +282,40 @@ export async function stopElevatedPowerShell(): Promise<void> {
   const broker = active
   active = undefined
   targetElevated = false
-  if (!broker) return
+  if (!broker || broker.permanent) return
   try { await transact(broker, 'stop', 1500) } catch {}
+}
+
+export async function verifyPermanentElevation(): Promise<void> {
+  if (!await attachPermanentBroker()) throw new Error('Permanent Computer Use authorization was not registered.')
+  if (active?.permanent) active = undefined
+}
+
+export async function stopPermanentElevationBroker(): Promise<boolean> {
+  if (process.platform !== 'win32') return true
+  let stopped = false
+  try {
+    const descriptor = getPermanentElevationDescriptor()
+    const { ownerStartTicks } = getWindowsOwnerIdentity()
+    const broker: Broker = {
+      pipeName: descriptor.pipeName,
+      pid: 0,
+      ownerPid: process.pid,
+      ownerStartTicks,
+      permanent: true,
+    }
+    await transact(broker, 'stop', 2000)
+    stopped = true
+  } catch {}
+  if (active?.permanent) active = undefined
+  return stopped
 }
 
 process.once('exit', () => {
   const broker = active
   active = undefined
   targetElevated = false
-  if (!broker) return
+  if (!broker || broker.permanent) return
   try { transactSync(broker, 'stop', 1500) } catch {}
 })
 
@@ -390,6 +324,25 @@ export const _test = {
   startLocal: async () => {
     await startBroker(false)
     targetElevated = true
+  },
+  startPersistentLocal: async () => {
+    await startBroker(false, undefined, true)
+    targetElevated = true
+    return active!.pipeName
+  },
+  attachPersistentLocal: async (pipeName: string) => {
+    const { ownerStartTicks } = getWindowsOwnerIdentity()
+    const broker: Broker = { pipeName, pid: 0, ownerPid: process.pid, ownerStartTicks, permanent: true }
+    active = broker
+    targetElevated = true
+    await transact(broker, 'ping', 5000)
+  },
+  stopPipe: async (pipeName: string) => {
+    const broker = active?.pipeName === pipeName ? active : undefined
+    if (!broker) return
+    active = undefined
+    targetElevated = false
+    await transact(broker, 'stop', 2000)
   },
   stop: stopElevatedPowerShell,
 }

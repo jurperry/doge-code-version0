@@ -25,7 +25,7 @@ Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWM
 
 **目标身份**：Windows 不凭标题授权——候选窗口须匹配目标进程，输入前查 HWND 当前 PID，SendMessage/PrintWindow 前复核 expected PID，HWND 复用后旧授权失效；完整 exe 路径绑定必须经 `open_application`。全局输入鼠标用真实 `WindowFromPoint`、键盘用前台目标，命中失败/空目标拒绝；allow/deny 用同一身份集合、deny 优先、未知前台 fail-closed。可信宿主仅当内嵌内容存在真实父/根窗口关系且宿主在进程祖先链（≤32 层、父创建不晚于子），窗口 owner 不是安全边界。
 
-**UAC 与管理员助手**：授权 ≠ 提权，UAC 提权不提升 tier。普通目标用普通 PowerShell；High 目标且本地更低才请求常驻管理员 PowerShell 助手（命名管道 + 属主校验），普通目标切回本地。UAC 安全桌面由用户处理：检测到即暂停并等 30 秒（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报；提示后必须重新截图。完整性 RID 读令牌 SID；System/安全桌面/应用反作弊不属于绕过目标。
+**UAC 与管理员助手**：授权 ≠ 提权，UAC 提权不提升 tier。普通目标用普通 PowerShell；High 目标且本地更低才请求管理员 PowerShell 助手（命名管道 + 属主校验），普通目标切回本地。默认仍在每个 CLI 会话首次需要时通过 `RunAs` 单次提权；App「设置 → MCP → Computer Use」的**永久授权**则由用户显式完成一次 UAC，注册当前用户 + 当前 `CLAUDE_CONFIG_DIR` 专属的最高权限交互式计划任务。之后 CLI 按需启动并重连永久代理，不再重复弹 UAC；代理闲置 15 分钟退出，授权仍保留，CLI 会话结束只断开、不停止永久代理。永久通道以当前 Windows 用户为信任边界，命名管道 ACL 不允许其他用户使用，但同一账户下的软件也在该信任域内。每个动作进入带 `KILL_ON_JOB_CLOSE` 的 Job Object，代理正常取消或被强杀都会终止动作进程树。撤销需再次 UAC，并在确认代理不可连接后删除任务与持久化脚本。标准账户不能永久化管理员能力，仍走单次 UAC 凭据流程。UAC 安全桌面由用户处理：检测到即暂停并等 30 秒（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报；提示后必须重新截图。完整性 RID 读令牌 SID；System/安全桌面/应用反作弊不属于绕过目标。
 
 **macOS TCC（恢复缺口）**：TCC 检查 Accessibility + Screen Recording，失败转 TCC 面板并返回 `tcc_not_granted`；但本树 `@ant/computer-use-swift` 解析到 `shims/ant-computer-use-swift`（空白 JPEG、TCC 恒 false），因此 macOS CU 不可用、实机未验证。
 
@@ -61,7 +61,7 @@ Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWM
 
 **不能只验证「有结果」**：`Clicked/Typed` 不等于应用生效；image block 不等于截图正确；`cursor_position` 只是冒烟（用独立 `GetCursorPos + GetWindowRect` 对照，绑定窗口验证局部坐标）；down/up 对数不代表双击/三击被识别；不能拿另一通道 happy path 当证明。只许专用测试应用或只读截图，不得复用用户已打开的应用、做系统级破坏或覆盖剪贴板；测试产物必须清理。
 
-可复用脚本（`tools/`）：`computer-use-e2e.ts`（只读）、`e2e-cu-input-guard.ts`（同名 exe/窗口绑定/真实点击）、`computer-use-input-fixture-e2e.ts`（WinForms fixture）、`computer-use-win32-unicode-e2e.ts`/`computer-use-chromium-unicode-e2e.ts`（Unicode 输入）、`computer-use-host-target-e2e.ts`、`computer-use-uac.test.ts`；package 内 `toolContract.test.ts` 校验字段契约。定向命令示例：`bun tools/check-computer-use-win32-performance.ts`（性能门禁）、`bun test tools/computer-use-uac.test.ts src/utils/computerUse/win32/elevatedPowerShell.test.ts`（UAC/管理员助手），管理员场景用 `CU_FIXTURE_ELEVATED=1` 跑 input-fixture e2e。
+可复用脚本（`tools/`）：`computer-use-e2e.ts`（只读）、`e2e-cu-input-guard.ts`（同名 exe/窗口绑定/真实点击）、`computer-use-input-fixture-e2e.ts`（WinForms fixture）、`computer-use-win32-unicode-e2e.ts`/`computer-use-chromium-unicode-e2e.ts`（Unicode 输入）、`computer-use-host-target-e2e.ts`、`computer-use-uac.test.ts`；package 内 `toolContract.test.ts` 校验字段契约。定向命令示例：`bun tools/check-computer-use-win32-performance.ts`（性能门禁）、`bun test tools/computer-use-uac.test.ts src/utils/computerUse/win32/{elevatedPowerShell,permanentElevation}.test.ts`（UAC/单次与永久管理员助手）。管理员场景用 `CU_FIXTURE_ELEVATED=1` 跑 input-fixture e2e；CLI `tools/computer-use-permanent-elevation-e2e.ts` 覆盖真实启用、管理员令牌、原进程首次重连、属主强杀取消、持续重连中的并发撤销与清理；App 侧 `tools/verify-computer-use-elevation-settings.mjs` 默认只测隔离状态，显式 `CU_PERMANENT_ELEVATION_E2E=1` 才执行真实启用/撤销（各需一次 UAC）。
 
 平台限制：Windows 走 `src/utils/computerUse/platforms/win32.ts`（PowerShell + Add-Type C# + Win32），混合 DPI 多屏仍需真实硬件；macOS 见 §2。Linux X11 验收可在隔离显示中运行 `xvfb-run -a sh -c 'openbox & bun tools/computer-use-linux-x11-e2e.ts'`，验收另需 `xauth xvfb openbox xdotool`。SendInput 全注入不等于业务完成；PrintWindow 返回 true 仍可能黑图；UAC/助手/自动解绑实机结果见 `../development_logs.md` §1。
 

@@ -41,6 +41,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === '--computer-use-elevation') {
+    const { runComputerUseElevationCommand } = await import('../utils/computerUse/win32/elevationCommand.js');
+    await runComputerUseElevationCommand(args.slice(1));
+    return;
+  }
+
   // For all other paths, load the startup profiler
   const {
     profileCheckpoint

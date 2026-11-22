@@ -98,6 +98,45 @@ Start-Sleep -Milliseconds 1500
 }, 30_000)
 
 
+test.skipIf(process.platform !== 'win32')('a permanent broker detaches and reconnects without stopping between sessions', async () => {
+  const pipeName = await _test.startPersistentLocal()
+  try {
+    expect(await runComputerUsePowerShell('"first-owner"')).toBe('first-owner')
+    await _test.stop()
+    expect(isElevatedPowerShellActive()).toBe(false)
+    await _test.attachPersistentLocal(pipeName)
+    expect(isElevatedPowerShellActive()).toBe(true)
+    expect(await runComputerUsePowerShell('"second-owner"')).toBe('second-owner')
+  } finally {
+    await _test.stopPipe(pipeName)
+  }
+  expect(isElevatedPowerShellActive()).toBe(false)
+}, 20_000)
+
+test.skipIf(process.platform !== 'win32')('force-killing a broker also terminates its action job', async () => {
+  const marker = join(tmpdir(), `doge-cu-job-${process.pid}.txt`)
+  rmSync(marker, { force: true })
+  const markerLiteral = marker.replace(/'/g, "''")
+  await _test.startPersistentLocal()
+  let brokerPid = 0
+  try {
+    const outcome = runComputerUsePowerShell(`[System.IO.File]::WriteAllText('${markerLiteral}', 'started'); Start-Sleep -Milliseconds 5000; [System.IO.File]::WriteAllText('${markerLiteral}', 'finished')`)
+      .then(() => 'resolved', () => 'rejected')
+    const deadline = Date.now() + 10_000
+    while (!existsSync(marker) && Date.now() < deadline) await Bun.sleep(20)
+    expect(existsSync(marker)).toBe(true)
+    brokerPid = _test.activePid()!
+    process.kill(brokerPid, 9)
+    expect(await outcome).toBe('rejected')
+    await Bun.sleep(5200)
+    expect(readFileSync(marker, 'utf8')).toBe('started')
+  } finally {
+    if (brokerPid > 0) { try { process.kill(brokerPid, 9) } catch {} }
+    await _test.stop()
+    rmSync(marker, { force: true })
+  }
+}, 20_000)
+
 test.skipIf(process.platform !== 'win32')('broker exits when its owner is force-killed', async () => {
   const dir = join(tmpdir(), `doge-cu-owner-${process.pid}`)
   const ownerFile = join(dir, 'owner.ts')
