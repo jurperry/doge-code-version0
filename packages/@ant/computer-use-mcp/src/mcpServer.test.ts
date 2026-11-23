@@ -69,8 +69,10 @@ describe('bindSessionContext request cancellation', () => {
     const dispatch = bindSessionContext(adapter(), 'pixels', context())
     const pending = dispatch('computer_batch', {
       actions: [{ action: 'wait', duration: 0.02 }, { action: 'wait', duration: 5 }],
-    }, controller.signal, event => progress.push(event.progress))
-    setTimeout(() => controller.abort(), 15)
+    }, controller.signal, event => {
+      progress.push(event.progress)
+      controller.abort()
+    })
     const result = await pending
     expect(result.isError).toBe(true)
     expect(result.content[0]).toMatchObject({
@@ -165,7 +167,7 @@ describe('bindSessionContext request cancellation', () => {
     expect(captures).toBe(0)
   })
 
-  test('open_application and switch_display invalidate the old coordinate anchor', async () => {
+  test('open_application replaces the anchor with its screenshot and switch_display clears it', async () => {
     const events: Array<number | string> = []
     let unbinds = 0
     const dispatch = bindSessionContext(adapter({
@@ -184,8 +186,26 @@ describe('bindSessionContext request cancellation', () => {
     await dispatch('open_application', { app: 'app.test' })
     await dispatch('switch_display', { display: 'auto' })
     await dispatch('screenshot', {})
-    expect(events).toEqual([100, 'cleared', 'cleared', 100])
+    expect(events).toEqual([100, 'cleared', 100, 'cleared', 100])
     expect(unbinds).toBe(1)
+  })
+
+  test('only a successful trailing batch screenshot replaces the coordinate anchor', async () => {
+    const captured: number[] = []
+    let size = 100
+    const dispatch = bindSessionContext(adapter({
+      screenshot: async () => ({
+        base64: Buffer.alloc(2048, 1).toString('base64'),
+        width: size, height: size, displayWidth: size, displayHeight: size,
+        originX: 0, originY: 0, displayId: 0,
+      }),
+    }), 'pixels', context({ onScreenshotCaptured: dims => captured.push(dims.width) }))
+    await dispatch('screenshot', {})
+    size = 200
+    await dispatch('computer_batch', { actions: [{ action: 'screenshot' }, { action: 'wait', duration: 0 }] })
+    expect(captured).toEqual([100])
+    await dispatch('computer_batch', { actions: [{ action: 'wait', duration: 0 }, { action: 'screenshot' }] })
+    expect(captured).toEqual([100, 200])
   })
 
   test('an older capture cannot overwrite the anchor after a target change', async () => {
@@ -275,7 +295,7 @@ describe('bindSessionContext request cancellation', () => {
       screenshot: async () => ({
         base64: Buffer.alloc(2048, 1).toString('base64'),
         width: 100, height: 100, displayWidth: 100, displayHeight: 100,
-        originX: 0, originY: 0, displayId: 0,
+        originX: 0, originY: 0, displayId: 0, targetRevision: revision,
       }),
     }), 'pixels', context({
       onScreenshotCaptured: dims => events.push(dims.width),

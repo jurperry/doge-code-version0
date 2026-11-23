@@ -38,6 +38,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { win32 as windowsPath } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { getDefaultTierForApp, getDeniedCategoryForApp, isPolicyDenied } from "./deniedApps.js";
 import { MAX_BATCH_ACTIONS, MAX_BATCH_IMAGE_BYTES, MAX_BATCH_SCREENSHOTS, MAX_TYPE_TEXT_LENGTH } from "./limits.js";
@@ -598,6 +599,11 @@ async function runInputActionGates(
   actionKind: CuActionKind,
   prepareTarget = true,
 ): Promise<CuCallToolResult | null> {
+  const liveRevision = adapter.executor.getBoundRevision?.();
+  if (prepareTarget && actionKind !== "keyboard" && adapter.executor.capabilities.platform === "win32" &&
+      liveRevision !== undefined && overrides.lastScreenshot?.targetRevision !== liveRevision) {
+    return errorResult("Take a fresh Windows screenshot before using mouse coordinates.", "state_conflict");
+  }
   const gate = await runInputActionPermissionGates(adapter, overrides, subGates, actionKind);
   if (gate) return gate;
   if (prepareTarget) {
@@ -694,7 +700,7 @@ async function runInputActionPermissionGates(
   if (!frontmost) {
     if (isWin32) {
       return errorResult(
-        "The Windows input target could not be identified. Call open_application for an authorized app, then take a screenshot before retrying.",
+        "Windows could not identify the input target. No input was sent. Open the intended authorized window and use the fresh screenshot it returns.",
         "state_conflict",
       );
     }
@@ -970,19 +976,20 @@ async function takeScreenshotWithRetry(
   isAborted?: () => boolean,
 ): Promise<ScreenshotResult> {
   if (isAborted?.()) throw new DOMException("Screenshot aborted", "AbortError");
+  const options = { allowedBundleIds, displayId, allowDisplayFallback: executor.capabilities.platform === "win32" };
   let shot: ScreenshotResult;
   try {
-    shot = await executor.screenshot({ allowedBundleIds, displayId });
+    shot = await executor.screenshot(options);
   } catch (err) {
     logger.warn(`[computer-use] screenshot threw, retrying once: ${err instanceof Error ? err.message : String(err)}`);
     if (isAborted?.()) throw new DOMException("Screenshot aborted", "AbortError");
-    return executor.screenshot({ allowedBundleIds, displayId });
+    return executor.screenshot(options);
   }
   const firstIssue = screenshotRetryIssue(shot);
   if (firstIssue) {
     logger.warn(`[computer-use] screenshot invalid (${firstIssue}), retrying once`);
     if (isAborted?.()) throw new DOMException("Screenshot aborted", "AbortError");
-    shot = await executor.screenshot({ allowedBundleIds, displayId });
+    shot = await executor.screenshot(options);
   }
   return shot;
 }
@@ -2523,6 +2530,8 @@ function formatBindingReleaseNote(release: BindingReleaseInfo, captureMode: Capt
     : "";
   const reason = release.reason === "new_foreground"
     ? "a newer foreground target took over"
+    : release.reason === "capture_unavailable"
+      ? "the bound window did not provide a usable image"
     : release.reason === "switch_display"
       ? "switch_display released the window anchor"
       : "the window anchor was released explicitly";
@@ -2544,13 +2553,16 @@ function captureReleaseContext(
   shot: ScreenshotResult,
   revisionBefore: number | undefined,
   captureStartedAt: number,
+  previous: ScreenshotResult | undefined,
 ): { release: BindingReleaseInfo | null; note: string | undefined } {
   const release = adapter.executor.getBindingRelease?.() ?? null;
   if (!release) return { release: null, note: undefined };
   const releasedThisCall = revisionBefore === undefined
     ? release.at >= captureStartedAt
     : release.revision > revisionBefore;
-  if (shot.captureMode !== "full_display" && !releasedThisCall) {
+  const firstFullDisplayCapture = shot.captureMode === "full_display" &&
+    (previous?.targetRevision === undefined || release.revision > previous.targetRevision);
+  if (!releasedThisCall && !firstFullDisplayCapture) {
     return { release: null, note: undefined };
   }
   return { release, note: formatBindingReleaseNote(release, shot.captureMode) };
@@ -2679,7 +2691,7 @@ async function handleScreenshot(
       targetRevision: result.targetRevision,
       captureMode: result.captureMode,
     };
-    const release = captureReleaseContext(adapter, shot, revisionBefore, captureStartedAt);
+    const release = captureReleaseContext(adapter, shot, revisionBefore, captureStartedAt, overrides.lastScreenshot);
     if (release.release) shot.bindingRelease = release.release;
 
     const monitorNote = await buildMonitorNote(
@@ -2766,7 +2778,7 @@ async function handleScreenshot(
       "capture_failed",
     );
   }
-  const release = captureReleaseContext(adapter, shot, revisionBefore, captureStartedAt);
+  const release = captureReleaseContext(adapter, shot, revisionBefore, captureStartedAt, overrides.lastScreenshot);
   if (release.release) shot.bindingRelease = release.release;
 
   const hiddenNote = await buildHiddenNote(adapter, hiddenSinceLastSeen);
@@ -3381,12 +3393,16 @@ async function handleOpenApplication(
   adapter: ComputerUseHostAdapter,
   args: Record<string, unknown>,
   overrides: ComputerUseOverrides,
+  subGates: CuSubGates,
 ): Promise<CuCallToolResult> {
   const app = requireString(args, "app");
   if (app instanceof Error) return errorResult(app.message, "bad_args");
 
   // Resolve display-name → bundle ID. Same logic as request_access.
   const platform = adapter.executor.capabilities.platform;
+  if (platform === "win32" && args.screenshot !== undefined && typeof args.screenshot !== "boolean") {
+    return errorResult("screenshot must be a boolean.", "bad_args");
+  }
   const allowedById = new Map(
     overrides.allowedApps.map((g) => [normalizeAppId(platform, g.bundleId), g.bundleId]),
   );
@@ -3431,6 +3447,14 @@ async function handleOpenApplication(
   await releaseHeldMouse(adapter);
   if (typeof windowId === "string") await adapter.executor.openApp(targetBundleId, overrides.requestSignal, windowId);
   else await adapter.executor.openApp(targetBundleId, overrides.requestSignal);
+
+  if (platform === "win32") {
+    const opened = `Open dispatched for "${app}".`;
+    if (args.screenshot === false) return okText(`${opened} Call screenshot before clicking.`);
+    const shot = await handleScreenshot(adapter, { ...overrides, lastScreenshot: undefined }, subGates);
+    if (shot.isError) return okText(`${opened} A fresh image was unavailable. Call screenshot before clicking.`);
+    return { ...shot, content: [{ type: "text", text: opened }, ...shot.content] };
+  }
 
   // On multi-monitor setups, macOS may place the opened window on a monitor
   // the resolver won't pick (e.g. Claude + another allowed app are co-located
@@ -3757,6 +3781,7 @@ async function handleWriteClipboard(
  */
 async function handleWait(
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<CuCallToolResult> {
   const duration = args.duration;
   if (typeof duration !== "number" || !Number.isFinite(duration)) {
@@ -3771,7 +3796,7 @@ async function handleWait(
       "bad_args",
     );
   }
-  await sleep(duration * 1000);
+  await delay(duration * 1000, undefined, { signal });
   return okText(`Waited ${duration}s.`);
 }
 
@@ -4210,6 +4235,7 @@ async function handleComputerBatch(
     });
     return { ...result, isError: true, content: [...result.content, ...batchImages] };
   };
+  let lastScreenshot: ScreenshotResult | undefined;
   for (const [i, act] of actions.entries()) {
     // Overlay Stop → host's stopSession → lifecycleState leaves "running"
     // synchronously before query.interrupt(). The SDK abort tears down the
@@ -4228,18 +4254,16 @@ async function handleComputerBatch(
 
     let inner: CuCallToolResult;
     try {
-      // Drop mid-batch screenshot piggyback (strip .screenshot). Click coords
-      // stay anchored to the pre-batch lastScreenshot.
-      const { screenshot: _dropped, ...dispatched } = await dispatchAction(
+      // Every input in this batch still uses its pre-batch coordinates.
+      inner = await dispatchAction(
         action,
         actionArgs,
         adapter,
         overrides,
         batchSubGates,
       );
-      inner = dispatched;
     } catch (err) {
-      if (err instanceof PreActionAbortError) {
+      if (err instanceof PreActionAbortError || (action === "wait" && overrides.requestSignal?.aborted)) {
         return finishAbortedBatch(i);
       }
       const message = err instanceof Error ? err.message : String(err);
@@ -4286,10 +4310,13 @@ async function handleComputerBatch(
     if (inner.isError) {
       return finishFailedAction(result, inner.telemetry);
     }
+    if (adapter.executor.capabilities.platform === "win32" && action === "screenshot" && i === actions.length - 1) {
+      lastScreenshot = inner.screenshot;
+    }
   }
 
   const result = okJson({ completed: results });
-  return { ...result, content: [...result.content, ...batchImages] };
+  return { ...result, content: [...result.content, ...batchImages], ...(lastScreenshot ? { screenshot: lastScreenshot } : {}) };
 }
 
 function textContent(r: CuCallToolResult): string {
@@ -4364,7 +4391,7 @@ async function dispatchAction(
       return handleMoveMouse(adapter, a, overrides, subGates);
 
     case "wait":
-      return handleWait(a);
+      return handleWait(a, overrides.requestSignal);
 
     case "cursor_position":
       return handleCursorPosition(adapter, overrides);
@@ -4379,7 +4406,7 @@ async function dispatchAction(
       return handleLeftMouseUp(adapter, overrides, subGates);
 
     case "open_application":
-      return handleOpenApplication(adapter, a, overrides);
+      return handleOpenApplication(adapter, a, overrides, subGates);
 
     case "switch_display":
       return handleSwitchDisplay(adapter, a, overrides);

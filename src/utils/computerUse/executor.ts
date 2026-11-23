@@ -386,9 +386,9 @@ export function createCliExecutor(opts: {
   }
 
   const captureWindowsForApi = !isDarwin && process.platform === 'win32'
-    ? async (displayId?: number): Promise<ScreenshotResult> => {
+    ? async (displayId?: number, allowDisplayFallback?: boolean): Promise<ScreenshotResult> => {
         const { captureScreenForApi } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
-        return captureScreenForApi(displayId)
+        return captureScreenForApi(displayId, allowDisplayFallback)
       }
     : null
 
@@ -544,7 +544,7 @@ export function createCliExecutor(opts: {
       doHide?: boolean
     }): Promise<ResolvePrepareCaptureResult> {
       if (captureWindowsForApi) {
-        const shot = await captureWindowsForApi(opts.preferredDisplayId)
+        const shot = await captureWindowsForApi(opts.preferredDisplayId, true)
         return { ...shot, hidden: [], displayId: shot.displayId ?? opts.preferredDisplayId ?? 0 }
       }
       const d = cu.display.getSize(opts.preferredDisplayId)
@@ -583,8 +583,9 @@ export function createCliExecutor(opts: {
     async screenshot(opts: {
       allowedBundleIds: string[]
       displayId?: number
+      allowDisplayFallback?: boolean
     }): Promise<ScreenshotResult> {
-      if (captureWindowsForApi) return captureWindowsForApi(opts.displayId)
+      if (captureWindowsForApi) return captureWindowsForApi(opts.displayId, opts.allowDisplayFallback)
       const d = cu.display.getSize(opts.displayId)
       const [targetW, targetH] = computeTargetDims(
         d.width,

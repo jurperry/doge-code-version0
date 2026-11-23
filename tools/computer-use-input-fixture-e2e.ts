@@ -142,8 +142,8 @@ public static class CuFixtureProgram {
       .replaceAll('Environment.GetEnvironmentVariable("CU_FIXTURE_LOG")', JSON.stringify(LOG_FILE))
       .replaceAll('Environment.GetEnvironmentVariable("CU_FIXTURE_HWND")', JSON.stringify(HWND_FILE))
     writeFileSync(sourcePath, `${elevatedCs}\n${program}`, 'utf8')
-    const { runPowerShell, runPowerShellSync } = await import('../src/utils/computerUse/win32/powerShell.js')
-    runPowerShellSync(`
+    const { runPowerShell } = await import('../src/utils/computerUse/win32/powerShell.js')
+    await runPowerShell(`
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
 & $compiler /nologo /target:winexe /out:'${fixturePath.replace(/'/g, "''")}' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll '${sourcePath.replace(/'/g, "''")}'
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile the elevated input fixture' }
@@ -162,11 +162,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile the elevated input fixture' 
   await waitFor(() => existsSync(HWND_FILE) && readFileSync(HWND_FILE, 'utf8').trim().length > 0, 'fixture HWND')
 
   const { bindWindow, unbindWindow, getBoundHwnd, platform, prepareWindowsTarget } = await import('../src/utils/computerUse/platforms/win32.js')
-  const { sendClick } = await import('../src/utils/computerUse/win32/windowMessage.js')
-  const { ensureWindow } = await import('../src/utils/computerUse/win32/windowGuard.js')
-  const { runPowerShellSync: runLocalPowerShellSync } = await import('../src/utils/computerUse/win32/powerShell.js')
-  const { runComputerUsePowerShellSync } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
-  const runPowerShellSync = ELEVATED ? runComputerUsePowerShellSync : runLocalPowerShellSync
+  const { sendClick, sendMouseButton, sendScroll } = await import('../src/utils/computerUse/win32/windowMessage.js')
+  const { activateObservedWindow } = await import('../src/utils/computerUse/win32/windowGuard.js')
+  const { runPowerShell: runLocalPowerShell } = await import('../src/utils/computerUse/win32/powerShell.js')
+  const { runComputerUsePowerShell } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+  const runPowerShell = ELEVATED ? runComputerUsePowerShell : runLocalPowerShell
   const { createCliExecutor } = await import('../src/utils/computerUse/executor.js')
   const hwnd = Number(readFileSync(HWND_FILE, 'utf8').trim())
   bindWindow(hwnd, fixturePid, undefined, 'fixture.app')
@@ -184,7 +184,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile the elevated input fixture' 
 
   const boundPath = join(TMP_DIR, 'bound.jpg')
   writeFileSync(boundPath, Buffer.from(boundShot.base64, 'base64'))
-  const pixel = runPowerShellSync(`
+  const pixel = await runPowerShell(`
 Add-Type -AssemblyName System.Drawing
 $bmp = [System.Drawing.Bitmap]::FromFile('${boundPath.replace(/'/g, "''")}')
 $p = $bmp.GetPixel([Math]::Min(100, $bmp.Width - 1), [Math]::Min(100, $bmp.Height - 1))
@@ -194,7 +194,7 @@ $bmp.Dispose()
   const channels = pixel.split(',').map(Number)
   check('bound-window capture contains the white fixture rather than a black frame', channels.every(value => value > 200), pixel)
 
-  const bottomRight = runPowerShellSync(`
+  const bottomRight = await runPowerShell(`
 Add-Type -AssemblyName System.Drawing
 $bmp = [System.Drawing.Bitmap]::FromFile('${boundPath.replace(/'/g, "''")}')
 $x = [Math]::Floor($bmp.Width * 0.9)
@@ -208,7 +208,7 @@ $bmp.Dispose()
   check('DPI-unaware capture normalizes content across the full declared canvas', bottomPixel.split(',').map(Number).every(value => value > 200), bottomPixel)
   check('encoded JPEG dimensions match the declared screenshot dimensions', actualDimensions === `${boundShot.width},${boundShot.height}`, `${actualDimensions} vs ${boundShot.width},${boundShot.height}`)
 
-  const geometryParts = runPowerShellSync(`
+  const geometry = await runPowerShell(`
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public class CuFixtureGeometry {
@@ -234,7 +234,8 @@ $dpiY = [uint32]0
 [CuFixtureGeometry]::GetDpiForMonitor($monitor, 0, [ref]$dpiX, [ref]$dpiY) | Out-Null
 $awareness = [CuFixtureGeometry]::GetAwarenessFromDpiAwarenessContext([CuFixtureGeometry]::GetWindowDpiAwarenessContext([IntPtr]${hwnd}))
 "$($p.X - $r.L),$($p.Y - $r.T),$dpiX,$awareness"
-`).split(',').map(Number)
+`)
+  const geometryParts = geometry.split(',').map(Number)
   const [clientOffsetX, clientOffsetY, windowDpi, windowAwareness] = geometryParts
   check('fixture exercises the DPI-unaware non-96-DPI capture path', windowAwareness === 0 && windowDpi > 96, `awareness=${windowAwareness}, monitorDpi=${windowDpi}`)
   const clickPoint = {
@@ -246,14 +247,14 @@ $awareness = [CuFixtureGeometry]::GetAwarenessFromDpiAwarenessContext([CuFixture
     y: Math.round((clickPoint.y - clientOffsetY) * 96 / windowDpi),
   }
   clearEvents()
-  sendClick(hwnd, clickPoint.x, clickPoint.y, 'left', fixturePid)
+  await sendClick(hwnd, clickPoint.x, clickPoint.y, 'left', fixturePid)
   const coordinatedDown = events().find(event => event.kind === 'leftmsg' && event.detail.startsWith('msg=513'))
   const actualClient = coordinatedDown
     ? { x: Number(coordinatedDown.detail.match(/;x=(\d+)/)?.[1]), y: Number(coordinatedDown.detail.match(/;y=(\d+)/)?.[1]) }
     : null
   check('background SendMessage maps physical screenshot coordinates to the DPI-unaware client', JSON.stringify(actualClient) === JSON.stringify(expectedClient), `expected=${JSON.stringify(expectedClient)}, actual=${JSON.stringify(actualClient)}`)
 
-  runPowerShellSync(`
+  await runPowerShell(`
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public class CuFixtureCursor {
@@ -271,7 +272,7 @@ $r = New-Object CuFixtureCursor+RECT
   const liveCursor = await executor.getCursorPosition()
   check('cursor_position reads the live cursor in bound-window coordinates', liveCursor.x === 120 && liveCursor.y === 90, JSON.stringify(liveCursor))
 
-  runPowerShellSync(`
+  await runPowerShell(`
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public class CuFixtureWindow {
@@ -284,7 +285,7 @@ public class CuFixtureWindow {
   const minimizedShot = await executor.screenshot({ allowedBundleIds: ['fixture.app'] })
   const minimizedPath = join(TMP_DIR, 'minimized.jpg')
   writeFileSync(minimizedPath, Buffer.from(minimizedShot.base64, 'base64'))
-  const minimizedPixel = runPowerShellSync(`
+  const minimizedPixel = await runPowerShell(`
 Add-Type -AssemblyName System.Drawing
 $bmp = [System.Drawing.Bitmap]::FromFile('${minimizedPath.replace(/'/g, "''")}')
 $p = $bmp.GetPixel([Math]::Floor($bmp.Width * 0.9), [Math]::Floor($bmp.Height * 0.9))
@@ -292,7 +293,7 @@ $bmp.Dispose()
 "$($p.R),$($p.G),$($p.B)"
 `)
   check('minimized capture preserves normalized content as well as window state', minimizedPixel.split(',').map(Number).every(value => value > 200), minimizedPixel)
-  const minimized = runPowerShellSync(`
+  const minimized = await runPowerShell(`
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public class CuFixtureMin {
@@ -302,9 +303,13 @@ public class CuFixtureMin {
 [CuFixtureMin]::IsIconic([IntPtr]${hwnd})
 `)
   check('minimized-window capture restores the original minimized state', minimizedShot.base64.length > 0 && minimized.trim() === 'True', minimized)
-  const activation = ensureWindow(hwnd, true, fixturePid)
-  check('fixture can be foregrounded again after minimized capture', activation.status === 'ok')
+  const activation = await activateObservedWindow(hwnd, fixturePid)
+  check('fixture can be foregrounded again after minimized capture', activation)
 
+  // Foregrounding the form does not focus its child input after a restore.
+  clearEvents()
+  await executor.click(60, 60, 'left', 1)
+  await waitFor(() => events().some(e => e.kind === 'mousedown'), 'focus restored child control')
   clearEvents()
   await executor.type('A中😀!', { viaClipboard: false })
   await waitFor(() => events().filter(e => e.kind === 'keypress').length >= 5, 'Unicode keypress events')
@@ -348,7 +353,7 @@ public class CuFixtureMin {
     events().some(e => e.kind === 'mousedown' && e.detail.startsWith('button=Middle;')), JSON.stringify(events()))
 
   clearEvents()
-  sendClick(hwnd, 60, 60, 'middle', fixturePid)
+  await sendClick(hwnd, 60, 60, 'middle', fixturePid)
   const middle = events().filter(e => e.kind === 'middle').map(e => e.detail).join(',')
   check('background middle-click emits WM_MBUTTONDOWN/UP', middle.includes('msg=519') && middle.includes('msg=520'), middle)
 
@@ -361,6 +366,12 @@ public class CuFixtureMin {
   clearEvents()
   await executor.mouseDown()
   await executor.mouseUp()
+  await waitFor(() => events().some(e => e.kind === 'mousedown') && events().some(e => e.kind === 'mouseup'), 'paired WinForms mouse down/up')
+  check('WinForms decomposed press and release use the real mouse channel', events().filter(e => e.kind === 'mousedown' || e.kind === 'mouseup').length === 2)
+
+  clearEvents()
+  await sendMouseButton(hwnd, 75, 75, 'left', 'down', fixturePid)
+  await sendMouseButton(hwnd, 75, 75, 'left', 'up', fixturePid)
   await waitFor(() => events().filter(e => e.kind === 'leftmsg').length >= 2, 'paired background mouse down/up')
   const leftMessages = events().filter(e => e.kind === 'leftmsg').map(e => e.detail).join(',')
   check('background mouse-down and mouse-up use the same SendMessage channel', leftMessages.includes('msg=513') && leftMessages.includes('msg=514'), leftMessages)
@@ -372,7 +383,7 @@ public class CuFixtureMin {
     [1, 0, 276, 1, 'right'],
   ] as const) {
     clearEvents()
-    await executor.scroll(60, 60, dx, dy)
+    await sendScroll(hwnd, dx || dy, dx ? 'horizontal' : 'vertical', fixturePid)
     await waitFor(() => events().some(e => e.kind === 'scroll'), `scroll ${label}`)
     const actual = events().find(e => e.kind === 'scroll')!.detail
     check(`scroll ${label} uses the native direction`, actual === `msg=${msg};param=${param}`, actual)
@@ -407,7 +418,7 @@ public class CuFixtureMin {
   check('full-display capture uses the display rather than the old window dimensions', globalShot.base64.length > 0
     && globalShot.displayWidth! > boundShot.displayWidth! && globalShot.displayHeight! > boundShot.displayHeight!)
 
-  const rect = runPowerShellSync(`
+  const rect = await runPowerShell(`
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public class CuGlobalRect {
@@ -525,7 +536,7 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
   const previousBinding = getBoundHwnd()
   if (ELEVATED) {
     const secondaryPath = join(TMP_DIR, 'fixture.exe').replace(/'/g, "''")
-    const rawPid = runComputerUsePowerShellSync(`Start-Process -FilePath '${secondaryPath}' -PassThru | Select-Object -ExpandProperty Id`)
+    const rawPid = await runComputerUsePowerShell(`Start-Process -FilePath '${secondaryPath}' -PassThru | Select-Object -ExpandProperty Id`)
     secondaryPid = Number(rawPid.trim())
   } else {
     secondaryProc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-STA', '-Command', fixtureScript], {
@@ -536,12 +547,12 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
   await waitFor(() => platform.apps.listRunning().some(window => window.pid === secondaryPid), 'second application window')
   const secondaryWindow = platform.apps.listRunning().find(window => window.pid === secondaryPid)!
   const secondaryHwnd = Number(secondaryWindow.id)
-  let secondaryActivation = ensureWindow(secondaryHwnd, true, secondaryPid)
-  for (let i = 0; i < 3 && secondaryActivation.status !== 'ok'; i++) {
+  let secondaryActivation = await activateObservedWindow(secondaryHwnd, secondaryPid)
+  for (let i = 0; i < 3 && !secondaryActivation; i++) {
     await Bun.sleep(300)
-    secondaryActivation = ensureWindow(secondaryHwnd, true, secondaryPid)
+    secondaryActivation = await activateObservedWindow(secondaryHwnd, secondaryPid)
   }
-  check('new application can be foregrounded before target transition', secondaryActivation.status === 'ok', JSON.stringify(secondaryActivation))
+  check('new application can be foregrounded before target transition', secondaryActivation)
   await prepareWindowsTarget()
   check('a newly started foreground application releases the previous binding', previousBinding === hwnd && getBoundHwnd() === null, JSON.stringify({ previousBinding, current: getBoundHwnd(), secondaryPid }))
 } catch (error) {

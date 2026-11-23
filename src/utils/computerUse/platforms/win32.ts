@@ -34,7 +34,7 @@ import { detectAppType, openWithController } from '../win32/appDispatcher.js'
 import { markBound, unmarkBound } from '../win32/windowBorder.js'
 import {
   activateObservedWindow,
-  ensureWindow,
+  ensureInputWindow,
   buildRequireWindowScript,
   findReplacementWindow,
   getPidsForProcessName,
@@ -43,8 +43,9 @@ import { listInstalledAppsWin32 } from '../win32/installedApps.js'
 import { buildPortableAppLaunchBlock, START_CU_APPLICATION } from '../win32/appLaunch.js'
 import { classifyWindowClasses, type WindowFramework } from '../win32/windowClassify.js'
 import { getWin32EscExpectFile, isWin32EscHotkeyRegistered } from '../win32/escHook.js'
-import { runPowerShell, runPowerShellSync } from '../win32/powerShell.js'
-import { ensureElevatedPowerShell, getElevatedPowerShellPid, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, runComputerUsePowerShellSync, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
+import { runPowerShell, windowsActionSignal } from '../win32/powerShell.js'
+import { childWindowClasses, enumerateDisplays, foregroundTarget, monitorForWindow, targetAtPoint, windowRectangle, windowText } from '../win32/nativeWindows.js'
+import { ensureElevatedPowerShell, getElevatedPowerShellPid, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
 import { PROCESS_IMAGE_PS } from '../win32/processImage.js'
 import { getCurrentProcessIL, getProcessIL, INPUT_INTEGRITY_TYPES, needsElevatedHelper } from '../win32/elevation.js'
 import { desktopState } from '../win32/uacProbe.js'
@@ -59,10 +60,10 @@ const SCREENSHOT_CACHE_TTL = 500 // ms — reuse cached capture for zoom within 
  * Crop a region from a cached screenshot using in-memory JPEG decode + crop.
  * Returns the cropped region as a new ScreenshotResult.
  */
-function cropScreenshot(
+async function cropScreenshot(
   cache: { base64: string; width: number; height: number },
   rx: number, ry: number, rw: number, rh: number,
-): ScreenshotResult {
+): Promise<ScreenshotResult> {
   // Clamp crop region to source bounds
   const cx = Math.max(0, Math.min(Math.round(rx), cache.width))
   const cy = Math.max(0, Math.min(Math.round(ry), cache.height))
@@ -79,7 +80,7 @@ function cropScreenshot(
     const inBuf = Buffer.from(cache.base64, 'base64')
     fs.writeFileSync(tmpIn.replace(/\\\\/g, '\\'), inBuf)
     // Use .NET System.Drawing to crop (fast, no external deps)
-    ps(`
+    await psAsync(`
 ${DPI_AWARE_PS}
 Add-Type -AssemblyName System.Drawing
 $src = [System.Drawing.Image]::FromFile('${tmpIn}')
@@ -105,12 +106,14 @@ $src.Dispose()
 // PowerShell helpers
 // ---------------------------------------------------------------------------
 
-function ps(script: string): string {
-  return runComputerUsePowerShellSync(script)
-}
-
 async function psAsync(script: string, timeoutMs = 15_000): Promise<string> {
   return runComputerUsePowerShell(script, timeoutMs)
+}
+
+/** Let a short press/release pair finish once started so Escape cannot strand a button or modifier. */
+async function sendAtomicInput(script: string): Promise<void> {
+  windowsActionSignal.getStore()?.throwIfAborted()
+  await windowsActionSignal.exit(() => psAsync(script, 8000))
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +320,7 @@ async function flushPendingKeyReleases(): Promise<void> {
   if (pendingKeyReleases.size === 0 || desktopState() !== 'ready') return
   for (const vk of [...pendingKeyReleases]) {
     try {
-      ps(`${WIN32_TYPES}; [CuWin32]::keybd_event([byte]${vk}, 0, 2, [UIntPtr]::Zero)`)
+      await psAsync(`${WIN32_TYPES}; [CuWin32]::keybd_event([byte]${vk}, 0, 2, [UIntPtr]::Zero)`)
       pendingKeyReleases.delete(vk)
     } catch (error) {
       throw new Error(`Could not release a held Windows key before the next action. ${error instanceof Error ? error.message : String(error)}`)
@@ -367,6 +370,14 @@ export async function releaseWindowsInputBeforeAction(afterUac: boolean): Promis
   if (afterUac || inputReleasePendingAfterTurn || pendingKeyReleases.size > 0) {
     await releaseWindowsMouseAfterTurn()
   }
+  if (clearTargetWhenInputReleased && !inputReleasePendingAfterTurn) clearWindowsTargetAfterStop()
+}
+
+let clearTargetWhenInputReleased = false
+
+export function clearWindowsTargetAfterStop(): void {
+  clearTargetWhenInputReleased = inputReleasePendingAfterTurn
+  if (!clearTargetWhenInputReleased) unbindWindow()
 }
 
 /** Clean up an unfinished decomposed press once the user desktop is active. */
@@ -538,14 +549,14 @@ export function getBoundInputChannel(): {
  * 窗口已死时先按 PID / 进程名找替身窗口重绑（应用换了窗口而非退出），
  * 找不到才抛错并指引模型重新 open_application。
  */
-function guardBoundWindow(needForeground: boolean): void {
+async function guardBoundWindow(needForeground: boolean): Promise<void> {
   if (!boundHwnd) return
-  let result = ensureWindow(boundHwnd, needForeground, boundPid ?? undefined, true)
+  let result = await ensureInputWindow(boundHwnd, needForeground, boundPid ?? undefined)
   if (result.status === 'dead' && !isAbsoluteExe(boundAppId)) {
     const replacement = findReplacementWindow(boundPid, boundExeBase)
     if (replacement) {
       bindWindow(replacement.hwnd, replacement.pid, boundExeBase ?? undefined, boundAppId)
-      result = ensureWindow(boundHwnd, needForeground, boundPid ?? undefined, true)
+      result = await ensureInputWindow(boundHwnd, needForeground, boundPid ?? undefined)
     }
   }
   if (result.status === 'ok') return
@@ -581,16 +592,16 @@ if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw 'Foreground changed immediate
 // UIPI check: test whether SendMessage reaches the bound window
 // ---------------------------------------------------------------------------
 
-function checkSendMessageAccess(hwnd: number): boolean {
+async function checkSendMessageAccess(hwnd: number): Promise<boolean> {
   const { testSendMessage } = require('../win32/elevation.js') as typeof import('../win32/elevation.js')
   return testSendMessage(hwnd)
 }
 
 /** Ensure we can SendMessage to the bound window, or fail with actionable guidance. */
-function ensureSendAccess(): boolean {
+async function ensureSendAccess(): Promise<boolean> {
   if (!boundHwnd) return false
   if (sendMessageOk === null) {
-    sendMessageOk = checkSendMessageAccess(boundHwnd)
+    sendMessageOk = await checkSendMessageAccess(boundHwnd)
   }
   if (sendMessageOk === false) {
     throw new Error('Windows UIPI blocked messages to the target application. Ask the user to operate this window directly. No input was sent.')
@@ -610,42 +621,8 @@ function ensureSendAccess(): boolean {
  * SendMessage is preferred, and only frameworks that demonstrably ignore
  * synthetic messages get the real-input channel (foreground guard).
  */
-function detectWindowFramework(hwnd: number): import('../win32/windowClassify.js').WindowFrameworkInfo {
-  const script = `
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Collections.Generic;
-public class CuClasses {
-    public delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
-    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumChildProc proc, IntPtr lParam);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
-    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-    public static List<string> classNames = new List<string>();
-    public static void Find(IntPtr parent) {
-        classNames.Clear();
-        StringBuilder top = new StringBuilder(256);
-        GetClassName(parent, top, top.Capacity);
-        classNames.Add(top.ToString());
-        EnumChildWindows(parent, delegate(IntPtr hWnd, IntPtr lParam) {
-            StringBuilder sb = new StringBuilder(256);
-            GetClassName(hWnd, sb, sb.Capacity);
-            classNames.Add(sb.ToString());
-            return true;
-        }, IntPtr.Zero);
-    }
-}
-'@
-[CuClasses]::SetProcessDPIAware() | Out-Null
-[CuClasses]::Find([IntPtr]${hwnd})
-[CuClasses]::classNames | ForEach-Object { $_ }
-`
-  const raw = ps(script)
-  if (!raw) return classifyWindowClasses('', [])
-  const classes = raw.split('\n').map(s => s.trim()).filter(Boolean)
-  const [top, ...children] = classes
-  return classifyWindowClasses(top ?? '', children)
+function detectWindowFramework(hwnd: number) {
+  return classifyWindowClasses(windowText(hwnd, 'class'), childWindowClasses(hwnd))
 }
 
 // ---------------------------------------------------------------------------
@@ -670,57 +647,10 @@ function getWm() {
 // and verifies the bound window first, or the action fails with an error.
 // ---------------------------------------------------------------------------
 
-/**
- * Get window rect origin (left, top) via GetWindowRect with DPI awareness.
- * Returns "left,top" string, or null on failure.
- */
-function getWindowOrigin(hwnd: number): { left: number; top: number } | null {
-  const script = `
-${DPI_AWARE_PS}
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class CuRect {
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-}
-'@
-\$r = New-Object CuRect+RECT
-[CuRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r) | Out-Null
-"\$(\$r.L),\$(\$r.T)"
-`
-  const raw = ps(script)
-  if (!raw) return null
-  const parts = raw.split(',')
-  if (parts.length !== 2) return null
-  return { left: parseInt(parts[0], 10), top: parseInt(parts[1], 10) }
-}
-
 export function getBoundWindowDimensions(): { width: number; height: number } | null {
-  if (!boundHwnd) return null
-  const raw = ps(`
-${DPI_AWARE_PS}
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class CuWindowSize {
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-}
-'@
-$r = New-Object CuWindowSize+RECT
-if (-not [CuWindowSize]::GetWindowRect([IntPtr]${boundHwnd}, [ref]$r)) { throw 'GetWindowRect failed while reading input surface' }
-"$($r.R - $r.L),$($r.B - $r.T)"
-`)
-  const [w, h] = raw.split(',').map(Number)
-  if (![w, h].every(value => Number.isFinite(value) && value > 0)) return null
-  return { width: w, height: h }
+  return boundHwnd ? windowRectangle(boundHwnd) : null
 }
 
-/**
- * Click at screen coordinates using mouse_event.
- * Uses SetCursorPos to position the cursor, then mouse_event for the click.
- * mouse_event takes simple parameters (no struct), avoiding PowerShell's
- * mutable-struct trap where $i.mi.dwFlags = value silently writes to a copy.
- */
 function clickPowerShellScript(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', count: number): string {
   const downFlag = button === 'left' ? '0x0002' : button === 'right' ? '0x0008' : '0x0020'
   const upFlag = button === 'left' ? '0x0004' : button === 'right' ? '0x0010' : '0x0040'
@@ -751,18 +681,18 @@ for (\$i = 0; \$i -lt ${count}; \$i++) {
 `
 }
 
-function sendInputClick(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', count: number): void {
-  ps(clickPowerShellScript(hwnd, x, y, button, count))
+async function sendInputClick(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', count: number): Promise<void> {
+  await sendAtomicInput(clickPowerShellScript(hwnd, x, y, button, count))
 }
 
 /**
  * SetCursorPos-based mouse move to screen coordinates.
  * Converts screenshot coords to screen coords using GetWindowRect.
  */
-function sendInputMove(hwnd: number, x: number, y: number): void {
+async function sendInputMove(hwnd: number, x: number, y: number): Promise<void> {
   const rx = Math.round(x)
   const ry = Math.round(y)
-  ps(`${WIN32_TYPES}
+  await sendAtomicInput(`${WIN32_TYPES}
 ${INPUT_INTEGRITY_TYPES}
 [CuInputIntegrity]::RequireWindow([IntPtr]${hwnd})
 [CuWin32]::SetProcessDPIAware() | Out-Null
@@ -784,13 +714,13 @@ if (-not [CuWin32]::SetCursorPos(${rx} + \$r.L, ${ry} + \$r.T)) { throw 'SetCurs
  * Used by drag (down → move → up) — separate phases so the physical button
  * stays held between invocations, unlike sendInputClick.
  */
-function sendInputButton(
+async function sendInputButton(
   hwnd: number | undefined,
   x: number,
   y: number,
   button: 'left' | 'right' | 'middle',
   phase: 'down' | 'up',
-): void {
+): Promise<void> {
   const flag =
     phase === 'down'
       ? button === 'left' ? '0x0002' : button === 'right' ? '0x0008' : '0x0020'
@@ -799,7 +729,7 @@ function sendInputButton(
   const ry = Math.round(y)
   if (phase === 'up') {
     // Cleanup does not need a live target rectangle or a new cursor position.
-    ps(`${WIN32_TYPES}; [CuWin32]::mouse_event(${flag}, 0, 0, 0, [IntPtr]::Zero)`)
+    await psAsync(`${WIN32_TYPES}; [CuWin32]::mouse_event(${flag}, 0, 0, 0, [IntPtr]::Zero)`)
     return
   }
   const guard = hwnd === undefined ? '' : requireForegroundScript(hwnd)
@@ -816,7 +746,7 @@ if (-not [CuBtnRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWind
 \$ox = \$r.L
 \$oy = \$r.T
 `
-  ps(`${WIN32_TYPES}
+  await sendAtomicInput(`${WIN32_TYPES}
 ${guard}
 ${hwnd === undefined ? INPUT_INTEGRITY_TYPES : ''}
 [CuWin32]::SetProcessDPIAware() | Out-Null
@@ -836,14 +766,14 @@ Start-Sleep -Milliseconds 20
  * physical button-held movement stream into client touch-drag events.
  * Ease-out cubic, 40 fps, mirroring executor.ts animatedMove.
  */
-function sendInputDrag(
+async function sendInputDrag(
   hwnd: number | undefined,
   fromX: number,
   fromY: number,
   toX: number,
   toY: number,
   durationMs: number,
-): void {
+): Promise<void> {
   const fx = Math.round(fromX)
   const fy = Math.round(fromY)
   const tx = Math.round(toX)
@@ -867,7 +797,8 @@ if (-not [CuDragRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWin
   const beforePress = hwnd === undefined ? '' : `if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw 'Foreground changed before drag press' }`
   const duringDrag = hwnd === undefined ? '' : `if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw "Foreground changed during drag frame \$i; the drag may be partial" }`
   // Interpolation is computed PowerShell-side (single process).
-  ps(`${WIN32_TYPES}
+  mouseDownUsedRealInput = true
+  await psAsync(`${WIN32_TYPES}
 ${guard}
 ${hwnd === undefined ? INPUT_INTEGRITY_TYPES : ''}
 [CuWin32]::SetProcessDPIAware() | Out-Null
@@ -894,6 +825,7 @@ try {
     [CuWin32]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
 }
 `)
+  mouseDownUsedRealInput = null
 }
 
 const KEYBOARD_TYPES = `
@@ -1015,11 +947,11 @@ export function planKeyChord(parts: string[]): { modifiers: number[]; keys: numb
   return { modifiers, keys }
 }
 
-function sendInputChord(parts: string[], hwnd?: number): void {
+async function sendInputChord(parts: string[], hwnd?: number): Promise<void> {
   const { modifiers, keys } = planKeyChord(parts)
   const modifierArgs = `@(${modifiers.join(',')})`
   const keyArgs = `@(${keys.join(',')})`
-  ps(`${KEYBOARD_TYPES}
+  await sendAtomicInput(`${KEYBOARD_TYPES}
 ${hwnd === undefined ? `${INPUT_INTEGRITY_TYPES}\n[CuInputIntegrity]::RequireForeground()` : requireForegroundScript(hwnd)}
 ${expectedEscapeScript(parts)}[CuKeyboard]::Chord([int[]]${modifierArgs}, [int[]]${keyArgs})
 `)
@@ -1061,13 +993,13 @@ function wheelDelta(amount: number, direction: 'vertical' | 'horizontal'): numbe
   return direction === 'vertical' ? -amount * 120 : amount * 120
 }
 
-function sendInputScroll(
+async function sendInputScroll(
   hwnd: number,
   x: number | undefined,
   y: number | undefined,
   amount: number,
   direction: 'vertical' | 'horizontal',
-): void {
+): Promise<void> {
   const flag = direction === 'vertical' ? '0x0800' : '0x1000'
   const position = x === undefined || y === undefined ? '' : `
 Add-Type @'
@@ -1081,7 +1013,7 @@ public class CuScrollRect {
 if (-not [CuScrollRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before scroll' }
 if (-not [CuWin32]::SetCursorPos(${Math.round(x)} + \$r.L, ${Math.round(y)} + \$r.T)) { throw 'SetCursorPos failed before scroll' }
 `
-  ps(`${WIN32_TYPES}
+  await sendAtomicInput(`${WIN32_TYPES}
 ${requireForegroundScript(hwnd)}
 [CuWin32]::SetProcessDPIAware() | Out-Null
 ${position}
@@ -1097,20 +1029,20 @@ const input: InputPlatform = {
     if (boundHwnd) {
       // Pure positioning — no click. Liveness only (dead binding must error
       // instead of silently no-op'ing); a physical cursor move is harmless.
-      guardBoundWindow(false)
+      await guardBoundWindow(false)
       if (realMouseChannel()) {
         // Chromium / self-drawn windows ignore SendMessage mouse — move the
         // physical cursor instead.
-        sendInputMove(boundHwnd, x, y)
+        await sendInputMove(boundHwnd, x, y)
       } else {
-        ensureSendAccess()
-        if (!getWm().sendMouseMove(boundHwnd, Math.round(x), Math.round(y), boundPid ?? undefined)) {
+        await ensureSendAccess()
+        if (!await getWm().sendMouseMove(boundHwnd, Math.round(x), Math.round(y), boundPid ?? undefined)) {
           throw new Error('Window mouse-move dispatch failed; no fallback was attempted.')
         }
       }
       return
     }
-    ps(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed during mouse move' }`)
+    await sendAtomicInput(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed during mouse move' }`)
   },
 
   async click(x, y, button, count = 1) {
@@ -1121,20 +1053,20 @@ const input: InputPlatform = {
       // Multi-click needs the real system click counter; background messages
       // remain limited to single-click delivery.
       const realInput = count > 1 || realMouseChannel()
-      guardBoundWindow(realInput)
+      await guardBoundWindow(realInput)
       if (realInput) {
-        sendInputClick(boundHwnd, x, y, button, count)
+        await sendInputClick(boundHwnd, x, y, button, count)
         return
       }
-      ensureSendAccess()
-      if (!getWm().sendClick(boundHwnd, Math.round(x), Math.round(y), button, boundPid ?? undefined)) {
+      await ensureSendAccess()
+      if (!await getWm().sendClick(boundHwnd, Math.round(x), Math.round(y), button, boundPid ?? undefined)) {
         throw new Error('Window click dispatch failed; no fallback was attempted.')
       }
       return
     }
     const downFlag = button === 'left' ? '0x0002' : button === 'right' ? '0x0008' : '0x0020'
     const upFlag = button === 'left' ? '0x0004' : button === 'right' ? '0x0010' : '0x0040'
-    ps(`${WIN32_TYPES}
+    await sendAtomicInput(`${WIN32_TYPES}
 ${INPUT_INTEGRITY_TYPES}
 [CuWin32]::SetProcessDPIAware() | Out-Null
 if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed before click' }
@@ -1151,26 +1083,26 @@ for ($i = 0; $i -lt ${count}; $i++) {
 
   async mouseDown(x, y) {
     if (!boundHwnd) {
-      sendInputButton(undefined, x, y, 'left', 'down')
       mouseDownUsedRealInput = true
+      await sendInputButton(undefined, x, y, 'left', 'down')
       return
     }
     const realInput = realMouseChannel()
-    guardBoundWindow(realInput)
+    await guardBoundWindow(realInput)
     if (realInput) {
-      sendInputButton(boundHwnd, x, y, 'left', 'down')
       mouseDownUsedRealInput = true
+      await sendInputButton(boundHwnd, x, y, 'left', 'down')
       return
     }
-    ensureSendAccess()
-    if (!getWm().sendMouseButton(boundHwnd, Math.round(x), Math.round(y), 'left', 'down', boundPid ?? undefined)) {
+    await ensureSendAccess()
+    mouseDownUsedRealInput = false
+    if (!await getWm().sendMouseButton(boundHwnd, Math.round(x), Math.round(y), 'left', 'down', boundPid ?? undefined)) {
       throw new Error('Window mouse-down dispatch failed; button state may be unchanged.')
     }
-    mouseDownUsedRealInput = false
   },
 
   async mouseUp(x, y) {
-    if (desktopState() !== 'ready') {
+    if (desktopState() !== 'ready' || windowsActionSignal.getStore()?.aborted) {
       if (mouseDownUsedRealInput === true) {
         inputReleasePendingAfterTurn = true
         throw new Error('The Windows input desktop is unavailable. The physical mouse release will be retried when it is ready.')
@@ -1178,15 +1110,15 @@ for ($i = 0; $i -lt ${count}; $i++) {
       return
     }
     if (!boundHwnd) {
-      sendInputButton(undefined, x, y, 'left', 'up')
+      await sendInputButton(undefined, x, y, 'left', 'up')
       mouseDownUsedRealInput = null
       return
     }
     const realInput = mouseDownUsedRealInput ?? realMouseChannel()
     if (realInput) {
       // Physical release is cleanup: no foreground or window-rect check.
-      sendInputButton(boundHwnd, x, y, 'left', 'up')
-    } else if (!getWm().sendMouseButton(boundHwnd, Math.round(x), Math.round(y), 'left', 'up', boundPid ?? undefined)) {
+      await sendInputButton(boundHwnd, x, y, 'left', 'up')
+    } else if (!await getWm().sendMouseButton(boundHwnd, Math.round(x), Math.round(y), 'left', 'up', boundPid ?? undefined)) {
       throw new Error('Window mouse-up dispatch failed; the button may still be held. Inspect the target before retrying.')
     }
     mouseDownUsedRealInput = null
@@ -1194,17 +1126,17 @@ for ($i = 0; $i -lt ${count}; $i++) {
 
   async drag(from, to, durationMs) {
     if (!boundHwnd) {
-      sendInputDrag(undefined, from.x, from.y, to.x, to.y, durationMs)
+      await sendInputDrag(undefined, from.x, from.y, to.x, to.y, durationMs)
       return
     }
     const realInput = realMouseChannel()
-    guardBoundWindow(realInput)
+    await guardBoundWindow(realInput)
     if (realInput) {
-      sendInputDrag(boundHwnd, from.x, from.y, to.x, to.y, durationMs)
+      await sendInputDrag(boundHwnd, from.x, from.y, to.x, to.y, durationMs)
       return
     }
-    ensureSendAccess()
-    if (!getWm().sendDrag(boundHwnd, Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y), durationMs, boundPid ?? undefined)) {
+    await ensureSendAccess()
+    if (!await getWm().sendDrag(boundHwnd, Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y), durationMs, boundPid ?? undefined)) {
       throw new Error('Window drag dispatch failed; the gesture may be partial. Do not retry blindly.')
     }
   },
@@ -1222,7 +1154,7 @@ for ($i = 0; $i -lt ${count}; $i++) {
     // WM_CHAR is not reliable for Unicode text, including native EDIT controls.
     // Use the same verified SendInput path for every bound window.
     if (boundHwnd) {
-      guardBoundWindow(true)
+      await guardBoundWindow(true)
       await sendInputUnicode(text, boundHwnd, signal)
       return
     }
@@ -1238,12 +1170,16 @@ for ($i = 0; $i -lt ${count}; $i++) {
         return
       }
       if (boundHwnd && !realKeyboardChannel()) {
-        try { getWm().sendKey(boundHwnd, vk, 'up') } catch {}
+        try { await windowsActionSignal.exit(() => getWm().sendKey(boundHwnd!, vk, 'up', boundPid ?? undefined)) } catch {}
+      }
+      if (windowsActionSignal.getStore()?.aborted) {
+        pendingKeyReleases.add(vk)
+        return
       }
       // Always attempt the physical release too; key-up is idempotent and must
       // not depend on the target still being foreground or alive.
       try {
-        ps(`${WIN32_TYPES}; [CuWin32]::keybd_event([byte]${vk}, 0, 2, [UIntPtr]::Zero)`)
+        await psAsync(`${WIN32_TYPES}; [CuWin32]::keybd_event([byte]${vk}, 0, 2, [UIntPtr]::Zero)`)
         pendingKeyReleases.delete(vk)
       } catch (error) {
         pendingKeyReleases.add(vk)
@@ -1253,20 +1189,20 @@ for ($i = 0; $i -lt ${count}; $i++) {
     }
     if (boundHwnd) {
       if (!realKeyboardChannel()) {
-        guardBoundWindow(false)
-        ensureSendAccess()
-        if (!getWm().sendKey(boundHwnd, vk, 'down', boundPid ?? undefined)) {
+        await guardBoundWindow(false)
+        await ensureSendAccess()
+        if (!await getWm().sendKey(boundHwnd, vk, 'down', boundPid ?? undefined)) {
           throw new Error(`Window key ${action} dispatch failed for "${name}".`)
         }
         return
       }
-      guardBoundWindow(true)
-      ps(`${WIN32_TYPES}
+      await guardBoundWindow(true)
+      await sendAtomicInput(`${WIN32_TYPES}
 ${requireForegroundScript(boundHwnd)}
 ${expectedEscapeScript([name])}[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPtr]::Zero)`)
       return
     }
-    ps(`${WIN32_TYPES}
+    await sendAtomicInput(`${WIN32_TYPES}
 ${INPUT_INTEGRITY_TYPES}
 [CuInputIntegrity]::RequireForeground()
 ${expectedEscapeScript([name])}[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPtr]::Zero)`)
@@ -1278,51 +1214,35 @@ ${expectedEscapeScript([name])}[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPt
       // Return/Tab need the focused control, which may have its own HWND.
       const needsRealChord = chord.modifiers.length > 0 || chord.keys.includes(VK_MAP.return) || chord.keys.includes(VK_MAP.tab)
       if (!realKeyboardChannel() && !needsRealChord) {
-        guardBoundWindow(false)
-        ensureSendAccess()
-        if (!getWm().sendKeys(boundHwnd, parts, boundPid ?? undefined)) {
+        await guardBoundWindow(false)
+        await ensureSendAccess()
+        if (!await getWm().sendKeys(boundHwnd, parts, boundPid ?? undefined)) {
           throw new Error('Window key-chord arguments are invalid; no fallback was attempted.')
         }
         return
       }
-      guardBoundWindow(true)
-      sendInputChord(parts, boundHwnd)
+      await guardBoundWindow(true)
+      await sendInputChord(parts, boundHwnd)
       return
     }
-    sendInputChord(parts)
+    await sendInputChord(parts)
   },
 
   async scroll(amount, direction, x, y) {
     if (boundHwnd) {
       if (realMouseChannel()) {
-        guardBoundWindow(true)
-        sendInputScroll(boundHwnd, x, y, amount, direction)
+        await guardBoundWindow(true)
+        await sendInputScroll(boundHwnd, x, y, amount, direction)
         return
       }
-      guardBoundWindow(false)
-      ensureSendAccess()
-      // WM_VSCROLL / WM_HSCROLL for window-bound scrolling
-      const msg = direction === 'vertical' ? '0x0115' : '0x0114' // WM_VSCROLL / WM_HSCROLL
-      const wParam = amount > 0 ? '1' : '0' // positive = SB_LINEDOWN/RIGHT, negative = SB_LINEUP/LEFT
-      const n = Math.abs(Math.round(amount))
-      let script = `
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public class WScroll {
-    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
-}
-'@
-`
-      for (let i = 0; i < n; i++) {
-        script += `[WScroll]::SendMessage([IntPtr]${boundHwnd}, ${msg}, [IntPtr]${wParam}, [IntPtr]::Zero) | Out-Null; `
-      }
-      ps(script)
+      await guardBoundWindow(false)
+      await ensureSendAccess()
+      await getWm().sendScroll(boundHwnd, amount, direction, boundPid ?? undefined)
       return
     }
     const flag = direction === 'vertical' ? '0x0800' : '0x1000' // MOUSEEVENTF_WHEEL / MOUSEEVENTF_HWHEEL
     const position = x === undefined || y === undefined ? '' : `if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed before scroll' }; `
-    ps(`${WIN32_TYPES}
+    await sendAtomicInput(`${WIN32_TYPES}
 ${INPUT_INTEGRITY_TYPES}
 [CuWin32]::SetProcessDPIAware() | Out-Null
 ${position}[CuInputIntegrity]::RequireAtCursor()
@@ -1335,7 +1255,7 @@ ${position}[CuInputIntegrity]::RequireAtCursor()
       ? `$r = New-Object CuWin32+RECT; if (-not [CuWin32]::GetWindowRect([IntPtr]${boundHwnd}, [ref]$r)) { throw 'GetWindowRect failed while reading cursor position' }; `
       : ''
     const output = boundHwnd ? '$($p.X - $r.L),$($p.Y - $r.T)' : '$($p.X),$($p.Y)'
-    const out = ps(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; $p = New-Object CuWin32+POINT; if (-not [CuWin32]::GetCursorPos([ref]$p)) { throw 'GetCursorPos failed' }; ${windowOffset}"${output}"`)
+    const out = await psAsync(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; $p = New-Object CuWin32+POINT; if (-not [CuWin32]::GetCursorPos([ref]$p)) { throw 'GetCursorPos failed' }; ${windowOffset}"${output}"`)
     const [xStr, yStr] = out.split(',')
     if (![xStr, yStr].every(value => Number.isFinite(Number(value)))) {
       throw new Error(`Invalid cursor position: ${out}`)
@@ -1343,11 +1263,11 @@ ${position}[CuInputIntegrity]::RequireAtCursor()
     return { x: Number(xStr), y: Number(yStr) }
   },
 
-  async sendChar(hwnd, char) { getWm().sendChar(Number(hwnd), char) },
-  async sendKey(hwnd, vk, action) { getWm().sendKey(Number(hwnd), vk, action) },
-  async sendMouseMove(hwnd, x, y) { getWm().sendMouseMove(Number(hwnd), x, y) },
-  async sendClick(hwnd, x, y, button) { getWm().sendClick(Number(hwnd), x, y, button) },
-  async sendText(hwnd, text) { getWm().sendText(Number(hwnd), text) },
+  async sendChar(hwnd, char) { await getWm().sendChar(Number(hwnd), char) },
+  async sendKey(hwnd, vk, action) { await getWm().sendKey(Number(hwnd), vk, action) },
+  async sendMouseMove(hwnd, x, y) { await getWm().sendMouseMove(Number(hwnd), x, y) },
+  async sendClick(hwnd, x, y, button) { await getWm().sendClick(Number(hwnd), x, y, button) },
+  async sendText(hwnd, text) { await getWm().sendText(Number(hwnd), text) },
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,139 +1284,59 @@ function fitCaptureDimensions(srcW: number, srcH: number, maxW: number, maxH: nu
   return [Math.max(1, Math.round(srcW * scale)), Math.max(1, Math.round(srcH * scale))]
 }
 
-function downscaleCapture(
+async function downscaleCapture(
   src: ScreenshotResult,
   targetW: number,
   targetH: number,
-): ScreenshotResult {
+): Promise<ScreenshotResult> {
   if (!src.base64 || src.width === targetW && src.height === targetH) return src
-  const tmpIn = `${process.env.TEMP || '/tmp'}/cu_ds_in_${Date.now()}.jpg`.replace(/\\/g, '\\\\')
-  const tmpOut = `${process.env.TEMP || '/tmp'}/cu_ds_out_${Date.now()}.jpg`.replace(/\\/g, '\\\\')
-  try {
-    const fs = require('fs')
-    fs.writeFileSync(tmpIn.replace(/\\\\/g, '\\'), Buffer.from(src.base64, 'base64'))
-    ps(`
+  const base64 = await runComputerUsePowerShell(`
 Add-Type -AssemblyName System.Drawing
-$src = [System.Drawing.Image]::FromFile('${tmpIn}')
-$resized = New-Object System.Drawing.Bitmap(${targetW}, ${targetH})
-$rg = [System.Drawing.Graphics]::FromImage($resized)
-$rg.InterpolationMode = 7
-$rg.DrawImage($src, 0, 0, ${targetW}, ${targetH})
-$rg.Dispose()
-$src.Dispose()
-$resized.Save('${tmpOut}', [System.Drawing.Imaging.ImageFormat]::Jpeg)
+$inputBytes = [Convert]::FromBase64String([Console]::In.ReadToEnd())
+$inputStream = [System.IO.MemoryStream]::new($inputBytes)
+$source = [System.Drawing.Image]::FromStream($inputStream)
+$resized = [System.Drawing.Bitmap]::new(${targetW}, ${targetH})
+$graphics = [System.Drawing.Graphics]::FromImage($resized)
+$graphics.InterpolationMode = 7
+$graphics.DrawImage($source, 0, 0, ${targetW}, ${targetH})
+$graphics.Dispose()
+$source.Dispose()
+$inputStream.Dispose()
+$output = [System.IO.MemoryStream]::new()
+$resized.Save($output, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+[Convert]::ToBase64String($output.ToArray())
+$output.Dispose()
 $resized.Dispose()
-"ok"
-`)
-    try { fs.unlinkSync(tmpIn.replace(/\\\\/g, '\\')) } catch {}
-    const buf = fs.readFileSync(tmpOut.replace(/\\\\/g, '\\'))
-    try { fs.unlinkSync(tmpOut.replace(/\\\\/g, '\\')) } catch {}
-    return {
-      base64: buf.toString('base64'),
-      width: targetW,
-      height: targetH,
-      displayWidth: src.width,     // original physical width
-      displayHeight: src.height,   // original physical height
-      originX: src.originX,
-      originY: src.originY,
-      displayId: src.displayId,
-      displayCount: src.displayCount,
-      captureMode: src.captureMode,
-      targetRevision: src.targetRevision,
-    }
-  } catch (error) {
-    throw new Error(`Screenshot downscale failed: ${error instanceof Error ? error.message : String(error)}`)
+`, 8000, src.base64)
+  return {
+    base64,
+    width: targetW,
+    height: targetH,
+    displayWidth: src.displayWidth ?? src.width,
+    displayHeight: src.displayHeight ?? src.height,
+    originX: src.originX,
+    originY: src.originY,
+    displayId: src.displayId,
+    displayCount: src.displayCount,
+    captureMode: src.captureMode,
+    targetRevision: src.targetRevision,
   }
 }
 
-function parseCaptureOutput(raw: string): ScreenshotResult | null {
-  const trimmed = raw.trim()
-  if (!trimmed || trimmed === 'NOT_FOUND' || trimmed === 'INVALID_SIZE') return null
-  const firstComma = trimmed.indexOf(',')
-  const secondComma = trimmed.indexOf(',', firstComma + 1)
-  if (firstComma === -1 || secondComma === -1) return null
-  const width = Number(trimmed.slice(0, firstComma))
-  const height = Number(trimmed.slice(firstComma + 1, secondComma))
-  const base64 = trimmed.slice(secondComma + 1)
-  if (!width || !height || !base64) return null
-  return { base64, width, height, displayWidth: width, displayHeight: height, originX: 0, originY: 0 }
-}
-
-const screenshot: ScreenshotPlatform = {
-  async captureScreen(displayId, targetW?: number, targetH?: number) {
-    // computeTargetDims can yield non-integers; .NET Bitmap ctor takes ints.
-    if (targetW != null) targetW = Math.round(targetW)
-    if (targetH != null) targetH = Math.round(targetH)
-    // If HWND is bound, capture that specific window via PrintWindow
+const screenshot = {
+  async captureScreen(displayId?: number, targetW?: number, targetH?: number, fitForApi = false) {
     if (boundHwnd) {
-      const result = this.captureWindow?.(String(boundHwnd), boundPid ?? undefined)
-      if (!result) {
-        throw new Error('Bound-window capture failed. No full-screen fallback was used because its coordinate space would differ. Call open_application to rebind, then retry.')
-      }
-      result.displayId ??= displayId ?? 0
+      const result = await captureWindowByHwnd(boundHwnd, boundPid ?? undefined)
+      if (!result) throw new Error('The bound window did not produce an image.')
+      result.displayId = displayId ?? 0
       result.captureMode = 'bound_window'
-      // Downscale HWND capture if target dims provided and differ
-      if (targetW && targetH && (result.width !== targetW || result.height !== targetH)) {
+      if (targetW && targetH) {
         const fitted = fitCaptureDimensions(result.width, result.height, targetW, targetH)
         return downscaleCapture(result, fitted[0], fitted[1])
       }
       return result
     }
-    // Full-screen: save JPEG to temp file, read back as base64
-    const tmpFile = `${process.env.TEMP || '/tmp'}/cu_screen_${Date.now()}.jpg`.replace(/\\/g, '\\\\')
-    // Build optional resize block — pre-sizes to targetImageSize output so
-    // the API transcoder's early-return fires (no server-side resize) and
-    // scaleCoord stays coherent.
-    const hasResize = targetW != null && targetH != null
-    const resizeBlock = hasResize ? `
-$resized = New-Object System.Drawing.Bitmap(${targetW}, ${targetH})
-$rg = [System.Drawing.Graphics]::FromImage($resized)
-$rg.InterpolationMode = 7
-$rg.DrawImage($bmp, 0, 0, ${targetW}, ${targetH})
-$rg.Dispose()
-$bmp.Dispose()
-$bmp = $resized
-` : ''
-    const raw = await psAsync(`
-${DPI_AWARE_PS}
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$screens = [System.Windows.Forms.Screen]::AllScreens
-$screen = if (${displayId ?? -1} -ge 0) { $screens[${displayId ?? 0}] } else { [System.Windows.Forms.Screen]::PrimaryScreen }
-$bounds = $screen.Bounds
-$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$g.Dispose()
-${resizeBlock}
-$bmp.Save('${tmpFile}', [System.Drawing.Imaging.ImageFormat]::Jpeg)
-$bmp.Dispose()
-"$($bounds.Width),$($bounds.Height),$($bounds.X),$($bounds.Y),$($screens.Length)"
-`)
-    const [wStr, hStr, xStr, yStr, countStr] = (raw || '').split(',')
-    try {
-      const fs = require('fs')
-      const buf = fs.readFileSync(tmpFile.replace(/\\\\/g, '\\'))
-      try { fs.unlinkSync(tmpFile.replace(/\\\\/g, '\\')) } catch {}
-      if (![wStr, hStr, xStr, yStr, countStr].every(value => Number.isFinite(Number(value)))) {
-        throw new Error(`Invalid capture metadata: ${JSON.stringify(raw).slice(0, 200)}`)
-      }
-      return {
-        base64: buf.toString('base64'),
-        width: hasResize ? targetW! : Number(wStr),
-        height: hasResize ? targetH! : Number(hStr),
-        displayWidth: Number(wStr),   // original physical width
-        displayHeight: Number(hStr),  // original physical height
-        originX: Number(xStr),
-        originY: Number(yStr),
-        displayId: displayId ?? 0,
-        displayCount: Number(countStr),
-        captureMode: 'full_display',
-      }
-    } catch (error) {
-      try { require('fs').unlinkSync(tmpFile.replace(/\\\\/g, '\\')) } catch {}
-      throw new Error(`win32 captureScreen failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
+    return captureDisplay(displayId, targetW, targetH, fitForApi)
   },
 
   async captureRegion(x, y, w, h, origin = { x: 0, y: 0 }) {
@@ -1508,7 +1348,9 @@ $bmp.Dispose()
     if (boundHwnd) {
       const now = Date.now()
       if (!cachedScreenshot || (now - cachedScreenshot.ts) > SCREENSHOT_CACHE_TTL) {
-        const full = this.captureWindow?.(String(boundHwnd), boundPid ?? undefined)
+        const revision = bindingRevision
+        const full = await captureWindowByHwnd(boundHwnd, boundPid ?? undefined)
+        if (bindingRevision !== revision) throw new Error('The capture target changed during zoom. Take a fresh screenshot.')
         if (full) {
           cachedScreenshot = { ...full, ts: now }
         }
@@ -1521,114 +1363,96 @@ $bmp.Dispose()
     // Unbound zoom uses the origin of the screenshot being inspected.
     const screenX = rx + origin.x
     const screenY = ry + origin.y
-    const tmpFile = `${process.env.TEMP || '/tmp'}/cu_region_${Date.now()}.jpg`.replace(/\\/g, '\\\\')
-    const raw = await psAsync(`
+    const base64 = await runPowerShell(`
 ${DPI_AWARE_PS}
-Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$bmp = New-Object System.Drawing.Bitmap(${rw}, ${rh})
+$size = [System.Drawing.Size]::new(${rw}, ${rh})
+$bmp = [System.Drawing.Bitmap]::new(${rw}, ${rh})
 $g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen(${screenX}, ${screenY}, 0, 0, (New-Object System.Drawing.Size(${rw}, ${rh})))
+$g.CopyFromScreen(${screenX}, ${screenY}, 0, 0, $size)
 $g.Dispose()
-$bmp.Save('${tmpFile}', [System.Drawing.Imaging.ImageFormat]::Jpeg)
+$stream = [System.IO.MemoryStream]::new()
+$bmp.Save($stream, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+[Convert]::ToBase64String($stream.ToArray())
+$stream.Dispose()
 $bmp.Dispose()
-"${rw},${rh}"
 `)
-    const [wStr, hStr] = (raw || '').split(',')
-    try {
-      const fs = require('fs')
-      const buf = fs.readFileSync(tmpFile.replace(/\\\\/g, '\\'))
-      try { fs.unlinkSync(tmpFile.replace(/\\\\/g, '\\')) } catch {}
-      return { base64: buf.toString('base64'), width: Number(wStr), height: Number(hStr), displayWidth: Number(wStr), displayHeight: Number(hStr), originX: screenX, originY: screenY }
-    } catch (error) {
-      try { require('fs').unlinkSync(tmpFile.replace(/\\\\/g, '\\')) } catch {}
-      throw new Error(`win32 captureRegion failed (region ${screenX},${screenY} ${rw}x${rh}: ${error instanceof Error ? error.message : String(error)})`)
-    }
+    return { base64, width: rw, height: rh, displayWidth: rw, displayHeight: rh, originX: screenX, originY: screenY }
   },
 
-  captureWindow(hwnd, expectedPid) {
-    // PrintWindow via win32/windowCapture.ts — now outputs JPEG directly via temp file
-    return captureWindowByHwnd(Number(hwnd), expectedPid)
-  },
+} satisfies ScreenshotPlatform
+
+async function captureDisplay(displayId?: number, targetW?: number, targetH?: number, fitForApi = false): Promise<ScreenshotResult> {
+  const displays = enumerateDisplays()
+  const monitor = displays.find(item => item.displayId === displayId) ?? displays.find(item => item.isPrimary) ?? displays[0]!
+  const { originX = 0, originY = 0, width, height } = monitor
+  const [outputW, outputH] = fitForApi
+    ? targetImageSize(width, height, API_RESIZE_PARAMS)
+    : [Math.round(targetW ?? width), Math.round(targetH ?? height)]
+  const resize = outputW === width && outputH === height ? '' : `
+    $resized = [System.Drawing.Bitmap]::new(${outputW}, ${outputH})
+    $rg = [System.Drawing.Graphics]::FromImage($resized)
+    $rg.InterpolationMode = 7
+    $rg.DrawImage($bmp, 0, 0, ${outputW}, ${outputH})
+    $rg.Dispose()
+    $bmp.Dispose()
+    $bmp = $resized
+  `
+  const base64 = await runPowerShell(`
+${DPI_AWARE_PS}
+Add-Type -AssemblyName System.Drawing
+$bmp = [System.Drawing.Bitmap]::new(${width}, ${height})
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen(${originX}, ${originY}, 0, 0, [System.Drawing.Size]::new(${width}, ${height}))
+$g.Dispose()
+${resize}
+$stream = [System.IO.MemoryStream]::new()
+$bmp.Save($stream, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+[Convert]::ToBase64String($stream.ToArray())
+$stream.Dispose()
+$bmp.Dispose()
+`)
+  return { base64, width: outputW, height: outputH, displayWidth: width, displayHeight: height,
+    originX, originY, displayCount: displays.length, displayId: monitor.displayId, captureMode: 'full_display' }
 }
 
-export async function captureScreenForApi(displayId?: number): Promise<ScreenshotResult> {
+export async function captureScreenForApi(displayId?: number, allowDisplayFallback = false): Promise<ScreenshotResult> {
   const captureRevision = bindingRevision
-  const shot = await screenshot.captureScreen(displayId)
-  const displayWidth = shot.displayWidth ?? shot.width
-  const displayHeight = shot.displayHeight ?? shot.height
-  const [width, height] = targetImageSize(displayWidth, displayHeight, API_RESIZE_PARAMS)
-  const resized = shot.width === width && shot.height === height
-    ? shot
-    : downscaleCapture(shot, width, height)
-  if (bindingRevision !== captureRevision) {
-    throw new Error('The capture target changed while the screenshot was in progress. The old image was discarded; take a fresh screenshot.')
+  const hwnd = boundHwnd
+  if (hwnd) {
+    let shot: ScreenshotResult | undefined
+    try {
+      shot = await screenshot.captureScreen(displayId)
+    } catch (error) {
+      windowsActionSignal.getStore()?.throwIfAborted()
+      if (error instanceof Error && error.name === 'AbortError') throw error
+      if (!allowDisplayFallback || bindingRevision !== captureRevision) throw error
+      await releaseWindowsMouseAfterTurn()
+      windowsActionSignal.getStore()?.throwIfAborted()
+      if (bindingRevision !== captureRevision || inputReleasePendingAfterTurn) throw error
+      displayId = monitorForWindow(hwnd) ?? displayId
+      unbindWindow('capture_unavailable')
+    }
+    if (shot) {
+      const [width, height] = targetImageSize(shot.width, shot.height, API_RESIZE_PARAMS)
+      const resized = await downscaleCapture(shot, width, height)
+      if (bindingRevision !== captureRevision) throw new Error('The capture target changed during the screenshot. Take a fresh screenshot.')
+      return { ...resized, targetRevision: captureRevision }
+    }
   }
-  return {
-    ...resized,
-    displayWidth,
-    displayHeight,
-    originX: resized.originX ?? shot.originX ?? 0,
-    originY: resized.originY ?? shot.originY ?? 0,
-    displayId: resized.displayId ?? shot.displayId ?? displayId ?? 0,
-    targetRevision: captureRevision,
-  }
+  const revision = bindingRevision
+  const shot = await screenshot.captureScreen(displayId, undefined, undefined, true)
+  if (bindingRevision !== revision) throw new Error('The capture target changed while the screenshot was in progress. The old image was discarded; take a fresh screenshot.')
+  return { ...shot, targetRevision: revision }
 }
 
 // ---------------------------------------------------------------------------
-// Display — Screen.AllScreens
+// Display
 // ---------------------------------------------------------------------------
-
-function parseDisplayEntries(raw: string): DisplayInfo[] {
-  return raw.split('|').filter(Boolean).map(entry => {
-    const [w, h, id, x, y, primary, _scale] = entry.split(',')
-    const values = [w, h, id, x, y].map(Number)
-    if (values.some(value => !Number.isFinite(value))) {
-      throw new Error(`Invalid display metadata entry: ${entry}`)
-    }
-    return {
-      width: values[0]!,
-      height: values[1]!,
-      displayId: values[2]!,
-      originX: values[3]!,
-      originY: values[4]!,
-      // Dimensions are already physical pixels (DPI-aware PS script).
-      scaleFactor: 1,
-      isPrimary: primary?.toLowerCase() === 'true',
-    }
-  })
-}
 
 const display: DisplayPlatform = {
   listAll(): DisplayInfo[] {
-    try {
-      const raw = ps(`
-${DPI_AWARE_PS}
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class CuDpiInfo {
-    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hwnd);
-    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
-    [DllImport("gdi32.dll")] public static extern int GetDeviceCaps(IntPtr hdc, int index);
-}
-'@
-Add-Type -AssemblyName System.Windows.Forms
-$dc = [CuDpiInfo]::GetDC([IntPtr]::Zero)
-$dpi = [CuDpiInfo]::GetDeviceCaps($dc, 88)
-[Void][CuDpiInfo]::ReleaseDC([IntPtr]::Zero, $dc)
-$scale = [math]::Round($dpi / 96.0, 2)
-$result = @()
-$idx = 0
-foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
-  $result += "$($s.Bounds.Width),$($s.Bounds.Height),$idx,$($s.Bounds.X),$($s.Bounds.Y),$($s.Primary),$scale"
-  $idx++
-}
-$result -join "|"
-`)
-      return parseDisplayEntries(raw)
-    } catch (error) {
-      throw new Error(`Failed to enumerate Windows displays: ${error instanceof Error ? error.message : String(error)}`)
-    }
+    return enumerateDisplays().map(({ handle: _handle, ...monitor }) => monitor)
   },
 
   getSize(displayId): DisplayInfo {
@@ -1638,88 +1462,13 @@ $result -join "|"
       if (found) return found
     }
     if (all.length === 0) throw new Error('No Windows displays were enumerated')
-    return all[0]!
+    return all.find(item => item.isPrimary) ?? all[0]!
   },
 }
 
 // ---------------------------------------------------------------------------
 // Apps — EnumWindows + registry + AppxPackage
 // ---------------------------------------------------------------------------
-
-function readWindowTarget(hwndExpression: string, prelude = ''): FrontmostAppInfo {
-  const out = runPowerShellSync(`${WIN32_TYPES}
-${PROCESS_IMAGE_PS}
-${prelude}
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class CuTargetWindow {
-    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr window, uint flags);
-    public static IntPtr HostWindow(IntPtr window) {
-        IntPtr host = GetAncestor(window, 2); // GA_ROOT; owned windows are not included
-        return host == IntPtr.Zero ? window : host;
-    }
-}
-'@
-function Read-CuTargetIdentity([uint32]$processId) {
-    $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
-    $exePath = [CuProcessImage]::Get($processId)
-    $appName = if ($proc) { $proc.ProcessName } elseif ($exePath) { [IO.Path]::GetFileNameWithoutExtension($exePath) } else { '' }
-    $startedAt = 0
-    if ($proc) {
-        try { $startedAt = [DateTimeOffset]::new($proc.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds() } catch {}
-    }
-    "$exePath|$appName|$processId|$startedAt"
-}
-[CuWin32]::SetProcessDPIAware() | Out-Null
-$hwnd = ${hwndExpression}
-if ($hwnd -eq [IntPtr]::Zero) { throw 'The input target returned no window' }
-$processId = [uint32]0
-if ([CuWin32]::GetWindowThreadProcessId($hwnd, [ref]$processId) -eq 0 -or $processId -eq 0) { throw 'The input target window has no process' }
-$hostHwnd = [CuTargetWindow]::HostWindow($hwnd)
-$hostProcessId = [uint32]0
-if ($hostHwnd -ne [IntPtr]::Zero -and [CuWin32]::GetWindowThreadProcessId($hostHwnd, [ref]$hostProcessId) -eq 0) {
-    throw 'The root window process could not be identified'
-}
-if ($hostHwnd -eq [IntPtr]::Zero) { $hostProcessId = $processId }
-if ($hostProcessId -eq 0) { throw 'The root window returned an empty process ID' }
-[int]$hostTrusted = [int]($hostProcessId -eq $processId)
-if ($hostProcessId -ne $processId) {
-    $processes = @{}
-    Get-CimInstance Win32_Process | ForEach-Object { $processes[[uint32]$_.ProcessId] = $_ }
-    $cursor = $processes[$processId]
-    for ($i = 0; $i -lt 32 -and $cursor; $i++) {
-        $parentId = [uint32]$cursor.ParentProcessId
-        if (-not $processes.ContainsKey($parentId)) { break }
-        $parent = $processes[$parentId]
-        if ($parent.CreationDate -gt $cursor.CreationDate) { break }
-        if ($parentId -eq $hostProcessId) { $hostTrusted = 1; break }
-        $cursor = $parent
-    }
-}
-$actual = Read-CuTargetIdentity $processId
-$hostIdentity = if ($hostProcessId -eq $processId) { $actual } else { Read-CuTargetIdentity $hostProcessId }
-"$actual|$hostIdentity|$hostTrusted"`)
-  const [exePath, appName, pid, startedAt, hostExe, hostName, hostPid, hostStartedAt, trusted] = out.split('|')
-  const id = exePath || appName
-  if (!id || !/^\d+$/.test(pid ?? '') || !/^\d+$/.test(hostPid ?? '') || !/^\d+$/.test(startedAt ?? '') || !/^\d+$/.test(hostStartedAt ?? '') || !/^[01]$/.test(trusted ?? '')) {
-    throw new Error(`Invalid window identity response: ${JSON.stringify(out).slice(0, 200)}`)
-  }
-  const hostId = hostExe || hostName
-  return {
-    id,
-    appName: appName || id,
-    pid: Number(pid),
-    startedAt: Number(startedAt),
-    ...(hostId && hostId !== id ? {
-      hostId,
-      hostName: hostName || hostId,
-      hostPid: Number(hostPid),
-      hostStartedAt: Number(hostStartedAt),
-      hostTrusted: trusted === '1',
-    } : {}),
-  }
-}
 
 function isAbsoluteExe(path: string | null): boolean {
   return path !== null && windowsPath.isAbsolute(path) && /\.exe$/i.test(path)
@@ -1741,14 +1490,14 @@ export function listWindowsWithIdentity(visibleOnly = true): WindowsWindow[] {
   }))
 }
 
-export function activateWindowsWindow(window: WindowsWindow, signal?: AbortSignal): boolean {
+export async function activateWindowsWindow(window: WindowsWindow, signal?: AbortSignal): Promise<boolean> {
   signal?.throwIfAborted()
   const candidate = listWindowDetails(false).find(item => item.hwnd === window.hwnd && item.pid === window.pid)
   if (!candidate?.path || comparableExePath(candidate.path) !== comparableExePath(window.bundleId)) {
     throw new Error('The selected window changed. Refresh list_windows before activating it.')
   }
   signal?.throwIfAborted()
-  const activated = activateObservedWindow(candidate.hwnd, candidate.pid)
+  const activated = await activateObservedWindow(candidate.hwnd, candidate.pid, signal)
   if (activated) explicitlyActivatedPid = candidate.pid
   return activated
 }
@@ -1799,10 +1548,7 @@ const apps: AppsPlatform = {
     }
     if (candidate) {
       bindWindow(candidate.hwnd, candidate.pid, base, name)
-      const activation = ensureWindow(candidate.hwnd, true, candidate.pid)
-      if (activation.status !== 'ok') {
-        throw new Error(`"${name}" was found and bound, but could not be brought to the foreground. The binding remains active; take a screenshot before deciding whether to retry.`)
-      }
+      await activateObservedWindow(candidate.hwnd, candidate.pid, signal)
       await prepareWindowsTarget(signal)
       return
     }
@@ -1985,41 +1731,14 @@ Write-Host "$hwnd|$hwndPid|$exePath"
         ? exePath.split(/[\\/]/).pop()!.replace(/\.exe$/i, '').trim()
         : base
       bindWindow(hwnd, pid, exeBase || undefined, name)
-      const activation = ensureWindow(hwnd, true, pid)
-      if (activation.status !== 'ok') {
-        throw new Error(`"${name}" launched and was bound, but could not be brought to the foreground. The binding remains active; take a screenshot before deciding whether to retry.`)
-      }
+      await activateObservedWindow(hwnd, pid, signal)
       await prepareWindowsTarget(signal)
     }
   },
 
-  getAppAtPoint(x, y): FrontmostAppInfo | null {
-    try {
-      return readWindowTarget('[CuHitTest]::WindowFromPoint($point)', `
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class CuHitTest {
-    [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
-    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
-}
-'@
-$point = New-Object CuHitTest+Point
-$point.X = ${Math.round(x)}
-$point.Y = ${Math.round(y)}
-`)
-    } catch (error) {
-      throw new Error(`Windows hit-test failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  },
+  getAppAtPoint: targetAtPoint,
 
-  getFrontmostApp(): FrontmostAppInfo | null {
-    try {
-      return readWindowTarget('[CuWin32]::GetForegroundWindow()')
-    } catch {
-      return null
-    }
-  },
+  getFrontmostApp: foregroundTarget,
 
   findWindowByTitle(title): WindowHandle | null {
     const windows = listWindows()
@@ -2038,7 +1757,6 @@ export const platform: Platform = { input, screenshot, display, apps }
 export const _test = {
   planKeyChord,
   fitCaptureDimensions,
-  parseDisplayEntries,
   clickPowerShellScript,
   unicodePowerShellScript,
   wheelDelta,

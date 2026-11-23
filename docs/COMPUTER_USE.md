@@ -23,7 +23,7 @@ Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWM
 
 **申请与 tier**：模型先调 `request_access({ apps, reason, clipboardRead?, clipboardWrite?, systemKeyCombos? })`，授权仅本会话有效。tier：`read`（截图/定位）< `click`（+普通左键/滚动）< `full`（+键盘/右键/中键/修饰点击/拖放），未按住的 `mouse_move` 属定位；敏感只读应用（浏览器）倾向 `read`，终端/IDE 倾向 `click`。拒绝语义 `denied/policyDenied/userDenied/tierGuidance`，拒绝后不要重复弹框；未接 `onPermissionRequest`（默认 headless）返回 `feature_unavailable`；Auto/bypass 自动放行仍保留 macOS TCC；后台 AgentTool 子代理不能直接用 CU。
 
-**目标身份**：Windows 不凭标题授权——候选窗口须匹配目标进程，输入前查 HWND 当前 PID，SendMessage/PrintWindow 前复核 expected PID，HWND 复用后旧授权失效；完整 exe 路径绑定必须经 `open_application`。全局输入鼠标用真实 `WindowFromPoint`、键盘用前台目标，命中失败/空目标拒绝；allow/deny 用同一身份集合、deny 优先、未知前台 fail-closed。可信宿主仅当内嵌内容存在真实父/根窗口关系且宿主在进程祖先链（≤32 层、父创建不晚于子），窗口 owner 不是安全边界。
+**目标身份**：Windows 不凭标题授权——候选窗口须匹配目标进程，输入前查 HWND 当前 PID，SendMessage/PrintWindow 前复核 expected PID，HWND 复用后旧授权失效；完整 exe 路径绑定必须经 `open_application`。窗口枚举、显示器、前台和命中查询通过 Bun FFI 调用 Win32。全局鼠标用 per-monitor-v2 的 `WindowFromPoint`，键盘用前台目标，命中失败或目标为空时拒绝派发；allow/deny 用同一身份集合、deny 优先、未知前台 fail-closed。可信宿主仅当内嵌内容存在真实父/根窗口关系且宿主在进程祖先链（≤32 层、父创建不晚于子），窗口 owner 不是安全边界。
 
 **UAC 与管理员助手**：授权 ≠ 提权，UAC 提权不提升 tier。普通目标用普通 PowerShell；High 目标且本地更低才请求管理员 PowerShell 助手（命名管道 + 属主校验），普通目标切回本地。默认仍在每个 CLI 会话首次需要时通过 `RunAs` 单次提权；App「设置 → MCP → Computer Use」的**永久授权**则由用户显式完成一次 UAC，注册当前用户 + 当前 `CLAUDE_CONFIG_DIR` 专属的最高权限交互式计划任务。之后 CLI 按需启动并重连永久代理，不再重复弹 UAC；代理闲置 15 分钟退出，授权仍保留，CLI 会话结束只断开、不停止永久代理。永久通道以当前 Windows 用户为信任边界，命名管道 ACL 不允许其他用户使用，但同一账户下的软件也在该信任域内。每个动作进入带 `KILL_ON_JOB_CLOSE` 的 Job Object，代理正常取消或被强杀都会终止动作进程树。撤销需再次 UAC，并在确认代理不可连接后删除任务与持久化脚本。标准账户不能永久化管理员能力，仍走单次 UAC 凭据流程。UAC 安全桌面由用户处理：检测到即暂停并等 30 秒（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报；提示后必须重新截图。完整性 RID 读令牌 SID；System/安全桌面/应用反作弊不属于绕过目标。
 
@@ -47,15 +47,15 @@ Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWM
 
 **Unicode 与点击**：`SendInput + KEYEVENTF_UNICODE`（40 字节 INPUT、UTF-16 code unit、覆盖代理对），文本先 UTF-8 base64 经 stdin 传入；事件数必须完整，部分成功报错并反向释放；`type` 非剪贴板路径把 LF/CRLF/CR 各派发一次 Return、Tab 派发真实键。双/三击同一脚本内完成；分解 mouse-down/up 记录实际通道。
 
-**computer_batch**：最多 100 动作、最多 4 张截图、图片 ≤20MiB、单次 `type` ≤100,000 UTF-16 code unit；首个副作用前统一校验参数/键名/组合键授权/截图能力；顺序执行、首错停止、每动作前复核身份/tier/命中。返回 `completed[]`/`failed{action,code,output}`/`remaining`/`recovery` 与图片；**顶层 `isError=true` 时仍保留结构化 JSON，图片作为顶层 sibling（不要塞进纯文本错误 tool_result）**；门禁取消返回 `aborted`（未派发），执行中途 `AbortError` 按结果未知 `failed`；批次内截图仅供检查、不重定坐标锚点。
+**computer_batch**：最多 100 动作、最多 4 张截图、图片 ≤20MiB、单次 `type` ≤100,000 UTF-16 code unit；首个副作用前统一校验参数/键名/组合键授权/截图能力；顺序执行、首错停止、每动作前复核身份/tier/命中。返回 `completed[]`/`failed{action,code,output}`/`remaining`/`recovery` 与图片；**顶层 `isError=true` 时仍保留结构化 JSON，图片作为顶层 sibling（不要塞进纯文本错误 tool_result）**；门禁取消返回 `aborted`（未派发），执行中途的输入取消按结果未知 `failed`。批次内输入始终使用调用前的截图。Windows 批次成功时，末尾的 `screenshot` 成为下一次调用的坐标基准。
 
 ## 5. 模型使用流程
 
-`request_access` → `open_application` 绑定或 `switch_display("auto")` 全屏 → `screenshot` 建立坐标基准 → 操作后**再次截图验证**（绑定窗口独立点击复查几何与 9×9 邻域，内容变化返回 `state_conflict`）→ 失败先读错误：权限不足调 grant，坐标陈旧重截图/zoom，窗口死亡重开，部分执行只补缺失步骤，超时不重放整个批次。`Click dispatched` 只代表已派发。
+Windows 调用 `request_access` 后可用 `open_application` 绑定授权窗口并直接得到首张截图。用 `computer_batch` 派发可预测的操作，并在末尾加 `screenshot` 查看结果。全屏模式可用 `switch_display("auto")` 后截图。模型主动截图时，PrintWindow 失败会在释放业务输入并解除绑定后返回目标所在显示器的全屏图，附带模式和新坐标范围。点击的独立像素校验保持当次绑定与坐标空间。权限不足时申请对应应用授权，坐标陈旧时重新截图，部分执行时根据画面只补缺失步骤。`Click dispatched` 表示输入已派发。
 
 超时/取消：默认 idle 120s、total 600s，`MCP_TOOL_TIMEOUT`/`MCP_TOOL_IDLE_TIMEOUT` 可覆盖；超时明确「结果未知，不要盲目重试副作用」。ESC hook 触发宿主 AbortController（失败提示 Ctrl+C），取消传播到权限对话框、批次动作之间、文本 run、最终输入前与截图写回前；同步原生调用不一定立即中断，统一超时是最后防线。
 
-**Windows ESC 生命周期**：hook 位于 PowerShell helper（`WH_KEYBOARD_LL`），回调只入队，独立 sender 线程连接命名管道并重试；不在 hook 线程做阻塞 I/O，避免 `LowLevelHooksTimeout` 与 CLI 主线程同步 PowerShell 动作期间丢 Esc。不再用 `LLKHF_INJECTED` 全量过滤：IME/键盘映射/远程桌面合成的用户 Esc 也应生效；只有 CLI 模型自身的 `key("escape")` 由真实输入注入脚本在 `keybd_event` 前写入期望时间戳，sender 在 3s 内一次性消费并抑制（含 `shift+escape` 等 Escape 组合键）。握手在消息泵开始后才发出，避免 hook 已装但未泵消息的窗口。每次 CU 动作前 `ensureEscHotkey` 复查 helper 存活，死亡则重注册；PowerShell 使用绝对路径，握手 10s，helper 失败有 15s 退避。
+**Windows Esc 生命周期**：桌面版按 Esc 取消本回合 Computer Use，清理输入、截图坐标和会话锁后继续生成。收到下一条用户消息后可重新使用。hook 位于 PowerShell helper（`WH_KEYBOARD_LL`），回调只入队，独立 sender 线程连接命名管道并重试；不在 hook 线程做阻塞 I/O，避免 `LowLevelHooksTimeout` 与 CLI 主线程同步 PowerShell 动作期间丢 Esc。不再用 `LLKHF_INJECTED` 全量过滤：IME/键盘映射/远程桌面合成的用户 Esc 也应生效；只有 CLI 模型自身的 `key("escape")` 由真实输入注入脚本在 `keybd_event` 前写入期望时间戳，sender 在 3s 内一次性消费并抑制（含 `shift+escape` 等 Escape 组合键）。握手在消息泵开始后才发出，避免 hook 已装但未泵消息的窗口。每次 CU 动作前 `ensureEscHotkey` 复查 helper 存活，死亡则重注册；PowerShell 使用绝对路径，握手 10s，helper 失败有 15s 退避。
 
 ## 6. 测试与实机验证
 
@@ -63,7 +63,7 @@ Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWM
 
 可复用脚本（`tools/`）：`computer-use-e2e.ts`（只读）、`e2e-cu-input-guard.ts`（同名 exe/窗口绑定/真实点击）、`computer-use-input-fixture-e2e.ts`（WinForms fixture）、`computer-use-win32-unicode-e2e.ts`/`computer-use-chromium-unicode-e2e.ts`（Unicode 输入）、`computer-use-host-target-e2e.ts`、`computer-use-uac.test.ts`；package 内 `toolContract.test.ts` 校验字段契约。定向命令示例：`bun tools/check-computer-use-win32-performance.ts`（性能门禁）、`bun test tools/computer-use-uac.test.ts src/utils/computerUse/win32/{elevatedPowerShell,permanentElevation}.test.ts`（UAC/单次与永久管理员助手）。管理员场景用 `CU_FIXTURE_ELEVATED=1` 跑 input-fixture e2e；CLI `tools/computer-use-permanent-elevation-e2e.ts` 覆盖真实启用、管理员令牌、原进程首次重连、属主强杀取消、持续重连中的并发撤销与清理；App 侧 `tools/verify-computer-use-elevation-settings.mjs` 默认只测隔离状态，显式 `CU_PERMANENT_ELEVATION_E2E=1` 才执行真实启用/撤销（各需一次 UAC）。
 
-平台限制：Windows 走 `src/utils/computerUse/platforms/win32.ts`（PowerShell + Add-Type C# + Win32），混合 DPI 多屏仍需真实硬件；macOS 见 §2。Linux X11 验收可在隔离显示中运行 `xvfb-run -a sh -c 'openbox & bun tools/computer-use-linux-x11-e2e.ts'`，验收另需 `xauth xvfb openbox xdotool`。SendInput 全注入不等于业务完成；PrintWindow 返回 true 仍可能黑图；UAC/助手/自动解绑实机结果见 `../development_logs.md` §1。
+平台限制：Windows 走 `src/utils/computerUse/platforms/win32.ts`。高频查询走 Win32 FFI，PrintWindow、截图编码和部分输入仍走 PowerShell 与 Win32，混合 DPI 多屏仍需真实硬件；macOS 见 §2。Linux X11 验收可在隔离显示中运行 `xvfb-run -a sh -c 'openbox & bun tools/computer-use-linux-x11-e2e.ts'`，验收另需 `xauth xvfb openbox xdotool`。SendInput 全注入不等于业务完成；PrintWindow 返回 true 仍可能黑图；UAC/助手/自动解绑实机结果见 `../development_logs.md` §1。
 
 ## 7. 关键代码入口
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { _test as inputSemantics, captureScreenForApi, platform, unbindWindow } from './platforms/win32.js'
+import { _test as inputSemantics, bindWindow, captureScreenForApi, getBindingRelease, getBoundHwnd, platform, unbindWindow } from './platforms/win32.js'
 import { _test as messageSemantics } from './win32/windowMessage.js'
 
 describe('Windows input planning', () => {
@@ -47,8 +47,8 @@ describe('Windows input planning', () => {
     expect(script).toContain('mouse_event(0x0040')
     expect(script).toContain('if (-not [CuClickRect]::GetWindowRect')
     expect(script).toContain('if (-not [CuWin32]::SetCursorPos')
-    expect(messageSemantics.clickMessages('middle')).toEqual({ down: '0x0207', up: '0x0208' })
-    expect(messageSemantics.clickMessages('right')).toEqual({ down: '0x0204', up: '0x0205' })
+    expect(messageSemantics.clickMessages('middle')).toEqual({ down: '0x0207', up: '0x0208', buttons: 16 })
+    expect(messageSemantics.clickMessages('right')).toEqual({ down: '0x0204', up: '0x0205', buttons: 2 })
     expect(messageSemantics.requireProcess(123, 456)).toBe('[WinMsg]::RequireProcess([IntPtr]123, 456)')
   })
 
@@ -66,13 +66,7 @@ describe('Windows geometry', () => {
     expect(inputSemantics.fitCaptureDimensions(800, 400, 1600, 900)).toEqual([800, 400])
   })
 
-  test('display parsing retains negative virtual-screen origins', () => {
-    expect(inputSemantics.parseDisplayEntries('1920,1080,0,-1920,-100,False,1.5|1280,720,1,0,0,True,1')).toEqual([
-      { width: 1920, height: 1080, displayId: 0, originX: -1920, originY: -100, scaleFactor: 1, isPrimary: false },
-      { width: 1280, height: 720, displayId: 1, originX: 0, originY: 0, scaleFactor: 1, isPrimary: true },
-    ])
-    expect(() => inputSemantics.parseDisplayEntries('bad-entry')).toThrow('Invalid display metadata entry')
-  })
+
 })
 
 
@@ -112,6 +106,26 @@ describe('Windows bound-target transitions', () => {
 
 
 describe('Windows capture revisions', () => {
+  test.skipIf(process.platform !== 'win32')('only visible screenshots fall back after a bound window fails capture', async () => {
+    const original = platform.screenshot.captureScreen
+    platform.screenshot.captureScreen = async displayId => {
+      if (getBoundHwnd()) throw new Error('the window did not render')
+      return { base64: 'capture', width: 100, height: 100, displayId, captureMode: 'full_display' }
+    }
+    try {
+      bindWindow(1, process.pid, undefined, 'fixture')
+      await expect(captureScreenForApi()).rejects.toThrow('the window did not render')
+      expect(getBoundHwnd()).toBe(1)
+      const shot = await captureScreenForApi(undefined, true)
+      expect(shot.captureMode).toBe('full_display')
+      expect(getBoundHwnd()).toBeNull()
+      expect(getBindingRelease()?.reason).toBe('capture_unavailable')
+    } finally {
+      platform.screenshot.captureScreen = original
+      unbindWindow()
+    }
+  })
+
   test('a capture is discarded if the binding changes while it is pending', async () => {
     const original = platform.screenshot.captureScreen
     let finish!: () => void

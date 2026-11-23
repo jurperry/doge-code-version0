@@ -8,7 +8,8 @@
  * for the receiving window's DPI awareness, so no second manual scale is applied.
  */
 
-import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
+import { runComputerUsePowerShell } from './elevatedPowerShell.js'
+import { windowsActionSignal } from './powerShell.js'
 
 const WINMSG_TYPE = `
 Add-Type @'
@@ -26,8 +27,18 @@ public class WinMsg {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
 
-    [DllImport("user32.dll")]
-    public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
+    static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+
+    public static IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam) {
+        const uint Flags = 0x23; // SMTO_BLOCK | SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT
+        IntPtr result;
+        if (SendMessageTimeout(hWnd, msg, wParam, lParam, Flags, 750, out result) == IntPtr.Zero) {
+            int error = Marshal.GetLastWin32Error();
+            throw new InvalidOperationException("The target did not acknowledge window message 0x" + msg.ToString("X") + " (Win32 error " + error + ").");
+        }
+        return result;
+    }
 
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
@@ -40,6 +51,9 @@ public class WinMsg {
 
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    static extern bool IsChild(IntPtr parent, IntPtr child);
 
     [DllImport("user32.dll")]
     static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
@@ -72,6 +86,14 @@ public class WinMsg {
         if (actualPid != expectedPid) {
             throw new System.Exception("Window identity changed: expected PID " + expectedPid + ", actual PID " + actualPid);
         }
+    }
+
+    public static void RequireChild(IntPtr parent, IntPtr child) {
+        uint parentPid;
+        if (!IsChild(parent, child) || GetWindowThreadProcessId(parent, out parentPid) == 0) {
+            throw new InvalidOperationException("The edit control no longer belongs to the selected window.");
+        }
+        RequireProcess(child, parentPid);
     }
 
     public static IntPtr MakeClientLParam(IntPtr hwnd, int x, int y) {
@@ -149,8 +171,10 @@ const VK_MAP: Record<string, number> = {
   f9: 0x78, f10: 0x79, f11: 0x7a, f12: 0x7b,
 }
 
-function runPs(script: string): string {
-  return runPowerShellSync(script, 8000)
+async function runPs(script: string): Promise<string> {
+  windowsActionSignal.getStore()?.throwIfAborted()
+  // Keep an already dispatched press/release pair together when Esc arrives.
+  return windowsActionSignal.exit(() => runComputerUsePowerShell(script, 8000))
 }
 
 function requireProcess(hwnd: number, expectedPid?: number): string {
@@ -161,13 +185,13 @@ function requireProcess(hwnd: number, expectedPid?: number): string {
  * Find the first edit-capable child window of a parent HWND.
  * Searches for known edit control class names in priority order.
  */
-export function findEditChild(parentHwnd: number, expectedPid?: number): number | null {
+export async function findEditChild(parentHwnd: number, expectedPid?: number): Promise<number | null> {
   const script = `${WINMSG_TYPE}
 ${requireProcess(parentHwnd, expectedPid)}
 [WinMsg]::FindChildren([IntPtr]${parentHwnd})
 [WinMsg]::childResults | ForEach-Object { $_ }
 `
-  const raw = runPs(script)
+  const raw = await runPs(script)
   if (!raw) return null
 
   const children = raw
@@ -196,20 +220,21 @@ ${requireProcess(parentHwnd, expectedPid)}
 /**
  * Send a single character to a window via WM_CHAR.
  */
-export function sendChar(hwnd: number, char: string, expectedPid?: number): boolean {
+export async function sendChar(hwnd: number, char: string, expectedPid?: number): Promise<boolean> {
   const code = char.charCodeAt(0)
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
 [WinMsg]::SendMessage([IntPtr]${hwnd}, [WinMsg]::WM_CHAR, [IntPtr]${code}, [IntPtr]0)
 `
-  return runPs(script) !== null
+  await runPs(script)
+  return true
 }
 
 /**
  * Send a string of text to a window by finding its edit child and sending WM_CHAR for each character.
  */
-export function sendText(hwnd: number, text: string, expectedPid?: number): boolean {
-  const editHwnd = findEditChild(hwnd, expectedPid)
+export async function sendText(hwnd: number, text: string, expectedPid?: number): Promise<boolean> {
+  const editHwnd = await findEditChild(hwnd, expectedPid)
   if (editHwnd === null) return false
 
   // Build a single PowerShell script that sends every UTF-16 code unit,
@@ -221,28 +246,31 @@ export function sendText(hwnd: number, text: string, expectedPid?: number): bool
 
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
+[WinMsg]::RequireChild([IntPtr]${hwnd}, [IntPtr]${editHwnd})
 ${charLines}
 `
-  return runPs(script) !== null
+  await runPs(script)
+  return true
 }
 
 /**
  * Send a key down or key up event via WM_KEYDOWN / WM_KEYUP.
  */
-export function sendKey(hwnd: number, vk: number, action: 'down' | 'up', expectedPid?: number): boolean {
+export async function sendKey(hwnd: number, vk: number, action: 'down' | 'up', expectedPid?: number): Promise<boolean> {
   const msg = action === 'down' ? '0x0100' : '0x0101'
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
 [WinMsg]::SendMessage([IntPtr]${hwnd}, ${msg}, [IntPtr]${vk}, [IntPtr]0)
 `
-  return runPs(script) !== null
+  await runPs(script)
+  return true
 }
 
 /**
  * Send a key combination (e.g. ['ctrl', 'a']).
  * Holds modifiers via WM_KEYDOWN, presses the key, then releases modifiers in reverse order.
  */
-export function sendKeys(hwnd: number, combo: string[], expectedPid?: number): boolean {
+export async function sendKeys(hwnd: number, combo: string[], expectedPid?: number): Promise<boolean> {
   if (combo.length === 0) return false
 
   const MODIFIER_NAMES = new Set(['shift', 'ctrl', 'control', 'alt', 'menu'])
@@ -269,82 +297,109 @@ export function sendKeys(hwnd: number, combo: string[], expectedPid?: number): b
 
   if (mainKey === undefined) return false
 
-  // Build script: modifiers down, key down, key up, modifiers up (reverse)
-  const lines: string[] = []
-  for (const mod of modifiers) {
-    lines.push(`[WinMsg]::SendMessage([IntPtr]${hwnd}, [WinMsg]::WM_KEYDOWN, [IntPtr]${mod}, [IntPtr]0)`)
-  }
-  lines.push(`[WinMsg]::SendMessage([IntPtr]${hwnd}, [WinMsg]::WM_KEYDOWN, [IntPtr]${mainKey}, [IntPtr]0)`)
-  lines.push(`[WinMsg]::SendMessage([IntPtr]${hwnd}, [WinMsg]::WM_KEYUP, [IntPtr]${mainKey}, [IntPtr]0)`)
-  for (const mod of [...modifiers].reverse()) {
-    lines.push(`[WinMsg]::SendMessage([IntPtr]${hwnd}, [WinMsg]::WM_KEYUP, [IntPtr]${mod}, [IntPtr]0)`)
-  }
-
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
-${lines.join('\n')}
+$pressed = New-Object 'System.Collections.Generic.List[int]'
+try {
+    foreach ($key in @(${[...modifiers, mainKey].join(', ')})) {
+        ${requireProcess(hwnd, expectedPid)}
+        $pressed.Add($key)
+        [WinMsg]::SendMessage([IntPtr]${hwnd}, [WinMsg]::WM_KEYDOWN, [IntPtr]$key, [IntPtr]0)
+    }
+} finally {
+    $releaseError = $null
+    for ($i = $pressed.Count - 1; $i -ge 0; $i--) {
+        try {
+            ${requireProcess(hwnd, expectedPid)}
+            [WinMsg]::SendMessage([IntPtr]${hwnd}, [WinMsg]::WM_KEYUP, [IntPtr]($pressed[$i]), [IntPtr]0)
+        } catch { $releaseError = $_ }
+    }
+    if ($releaseError) { throw $releaseError }
+}
 `
-  return runPs(script) !== null
+  await runPs(script)
+  return true
 }
 
 /**
  * Send a WM_MOUSEMOVE message to move the cursor within a window's client area.
  * Coordinates are window-relative (from screenshot) and adjusted to client-area-relative.
  */
-export function sendMouseMove(hwnd: number, x: number, y: number, expectedPid?: number): boolean {
+export async function sendMouseMove(hwnd: number, x: number, y: number, expectedPid?: number): Promise<boolean> {
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
 $lp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(x)}, ${Math.round(y)})
 [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]0, $lp)
 `
-  return runPs(script) !== null
+  await runPs(script)
+  return true
 }
 
 /**
  * Send a mouse click at window-relative coordinates.
  * Coordinates are adjusted to client-area-relative to account for title bar and borders.
  */
-function clickMessages(button: 'left' | 'right' | 'middle'): { down: string; up: string } {
+function clickMessages(button: 'left' | 'right' | 'middle'): { down: string; up: string; buttons: number } {
   return {
     down: button === 'left' ? '0x0201' : button === 'right' ? '0x0204' : '0x0207',
     up: button === 'left' ? '0x0202' : button === 'right' ? '0x0205' : '0x0208',
+    buttons: button === 'left' ? 1 : button === 'right' ? 2 : 0x10,
   }
 }
 
-export function sendClick(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', expectedPid?: number): boolean {
-  const { down: downMsg, up: upMsg } = clickMessages(button)
+export async function sendClick(hwnd: number, x: number, y: number, button: 'left' | 'right' | 'middle', expectedPid?: number): Promise<boolean> {
+  const { down: downMsg, up: upMsg, buttons } = clickMessages(button)
 
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
 $lp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(x)}, ${Math.round(y)})
 [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]0, $lp)
-[WinMsg]::SendMessage([IntPtr]${hwnd}, ${downMsg}, [IntPtr]0, $lp)
-[WinMsg]::SendMessage([IntPtr]${hwnd}, ${upMsg}, [IntPtr]0, $lp)
+${requireProcess(hwnd, expectedPid)}
+try {
+    [WinMsg]::SendMessage([IntPtr]${hwnd}, ${downMsg}, [IntPtr]${buttons}, $lp)
+} finally {
+    ${requireProcess(hwnd, expectedPid)}
+    [WinMsg]::SendMessage([IntPtr]${hwnd}, ${upMsg}, [IntPtr]0, $lp)
+}
 `
-  return runPs(script) !== null
+  await runPs(script)
+  return true
 }
 
 /**
  * Send ONLY a button press or release (no move, no full click) — the phase
  * primitive for drag composition on windows where SendMessage input works.
  */
-export function sendMouseButton(
+export async function sendMouseButton(
   hwnd: number,
   x: number,
   y: number,
   button: 'left' | 'right',
   phase: 'down' | 'up',
   expectedPid?: number,
-): boolean {
+): Promise<boolean> {
   const msg = phase === 'down'
     ? (button === 'left' ? '0x0201' : '0x0204')
     : (button === 'left' ? '0x0202' : '0x0205')
+  const buttons = phase === 'up' ? 0 : button === 'left' ? 1 : 2
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
 $lp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(x)}, ${Math.round(y)})
-[WinMsg]::SendMessage([IntPtr]${hwnd}, ${msg}, [IntPtr]0, $lp)
+[WinMsg]::SendMessage([IntPtr]${hwnd}, ${msg}, [IntPtr]${buttons}, $lp)
 `
-  return runPs(script) !== null
+  await runPs(script)
+  return true
+}
+
+export async function sendScroll(hwnd: number, amount: number, direction: 'vertical' | 'horizontal', expectedPid?: number): Promise<void> {
+  const message = direction === 'vertical' ? '0x0115' : '0x0114'
+  const wParam = amount > 0 ? 1 : 0
+  await runPs(`${WINMSG_TYPE}
+for ($i = 0; $i -lt ${Math.abs(Math.round(amount))}; $i++) {
+    ${requireProcess(hwnd, expectedPid)}
+    [WinMsg]::SendMessage([IntPtr]${hwnd}, ${message}, [IntPtr]${wParam}, [IntPtr]::Zero)
+}
+`)
 }
 
 /**
@@ -354,7 +409,7 @@ $lp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(x)}, ${Math.round
  * whole gesture — the old executor-composed path spawned a PowerShell per
  * animation frame.
  */
-export function sendDrag(
+export async function sendDrag(
   hwnd: number,
   fromX: number,
   fromY: number,
@@ -362,7 +417,7 @@ export function sendDrag(
   toY: number,
   durationMs: number,
   expectedPid?: number,
-): boolean {
+): Promise<boolean> {
   const frames = Math.max(2, Math.min(40, Math.round(durationMs / 25)))
   const frameMs = Math.max(10, Math.round(durationMs / frames))
   const script = `${WINMSG_TYPE}
@@ -370,36 +425,41 @@ ${requireProcess(hwnd, expectedPid)}
 $lpDown = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(fromX)}, ${Math.round(fromY)})
 [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]0, $lpDown)
 Start-Sleep -Milliseconds 20
-[WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0201, [IntPtr]1, $lpDown)
-Start-Sleep -Milliseconds 40
+${requireProcess(hwnd, expectedPid)}
 try {
+    [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0201, [IntPtr]1, $lpDown)
+    Start-Sleep -Milliseconds 40
     $frames = ${frames}
     for ($i = 1; $i -le $frames; $i++) {
         $t = $i / $frames
         $eased = 1 - [math]::Pow(1 - $t, 3)
         $x = [math]::Round(${Math.round(fromX)} + (${Math.round(toX)} - ${Math.round(fromX)}) * $eased)
         $y = [math]::Round(${Math.round(fromY)} + (${Math.round(toY)} - ${Math.round(fromY)}) * $eased)
+        ${requireProcess(hwnd, expectedPid)}
         $lp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, $x, $y)
         [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0200, [IntPtr]1, $lp)
         Start-Sleep -Milliseconds ${frameMs}
     }
 } finally {
+    ${requireProcess(hwnd, expectedPid)}
     $lpUp = [WinMsg]::MakeClientLParam([IntPtr]${hwnd}, ${Math.round(toX)}, ${Math.round(toY)})
     [WinMsg]::SendMessage([IntPtr]${hwnd}, 0x0202, [IntPtr]0, $lpUp)
 }
 `
-  return runPs(script) !== null
+  await runPs(script)
+  return true
 }
 
 /**
  * Send an Enter key (carriage return) via WM_CHAR.
  */
-export function sendEnter(hwnd: number, expectedPid?: number): boolean {
+export async function sendEnter(hwnd: number, expectedPid?: number): Promise<boolean> {
   const script = `${WINMSG_TYPE}
 ${requireProcess(hwnd, expectedPid)}
 [WinMsg]::SendMessage([IntPtr]${hwnd}, [WinMsg]::WM_CHAR, [IntPtr]13, [IntPtr]0)
 `
-  return runPs(script) !== null
+  await runPs(script)
+  return true
 }
 
 export const _test = { clickMessages, requireProcess }

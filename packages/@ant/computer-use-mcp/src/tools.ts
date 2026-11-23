@@ -420,7 +420,8 @@ export function buildComputerUseTools(
     {
       name: "open_application",
       description:
-        "Bring an application to the front, launching it if necessary. The target application must already be in the session allowlist — call request_access first.",
+        "Bring an application to the front, launching it if necessary. The target application must already be in the session allowlist — call request_access first." +
+        (caps.platform === "win32" ? " Returns a fresh screenshot by default. Use its coordinates directly and inspect captured content before choosing input." : ""),
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -429,10 +430,13 @@ export function buildComputerUseTools(
             description:
               "Display name (e.g. \"Slack\") or bundle identifier (e.g. \"com.tinyspeck.slackmacgap\").",
           },
-          ...(caps.platform === "win32" ? { window_id: {
-            type: "string" as const,
-            description: "Optional Windows window ID from list_windows or list_granted_applications. Pass its exact granted executable as app.",
-          } } : {}),
+          ...(caps.platform === "win32" ? {
+            window_id: {
+              type: "string" as const,
+              description: "Optional Windows window ID from list_windows or list_granted_applications. Pass its exact granted executable as app.",
+            },
+            screenshot: { type: "boolean" as const, default: true, description: "Return an image of the current target after opening it." },
+          } : {}),
         },
         required: ["app"],
       },
@@ -576,7 +580,8 @@ export function buildComputerUseTools(
         "batching a predictable sequence eliminates all but one. Use this whenever you can predict the outcome of several actions ahead — " +
         "e.g. click a field, type into it, press Return. Arguments and system-shortcut grants are checked before any action. Actions execute sequentially and stop on the first runtime error. " +
         `${FRONTMOST_GATE_DESC} The frontmost check runs before EACH action inside the batch — if an action opens a non-allowed app, the next action's gate fires and the batch stops there. ` +
-        "Mid-batch screenshot actions are allowed for inspection but coordinates in subsequent clicks always refer to the PRE-BATCH full-screen screenshot.",
+        "Coordinates for every action in the batch refer to the pre-batch screenshot. " +
+        (caps.platform === "win32" ? "End the batch with a screenshot to get the next coordinate reference without making a separate call." : "Mid-batch screenshots are for inspection."),
       inputSchema: {
         type: "object" as const,
         properties: {

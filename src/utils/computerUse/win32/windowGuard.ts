@@ -18,8 +18,9 @@
  */
 
 import { listWindows } from './windowEnum.js'
-import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
-import { runPowerShellSync as runLocalPowerShellSync } from './powerShell.js'
+import { runComputerUsePowerShell, runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
+import { runPowerShell } from './powerShell.js'
+import { foregroundWindow, windowProcessId } from './nativeWindows.js'
 import { INPUT_INTEGRITY_TYPES } from './elevation.js'
 
 // ── C# P/Invoke helper ──────────────────────────────────────────────────────
@@ -208,9 +209,20 @@ export function ensureWindow(
 }
 
 /** Foreground an observed window using only local window-manager operations. */
-export function activateObservedWindow(hwnd: number, pid: number): boolean {
+export async function activateObservedWindow(hwnd: number, pid: number, signal?: AbortSignal): Promise<boolean> {
   if (!Number.isSafeInteger(hwnd) || hwnd <= 0 || !Number.isSafeInteger(pid) || pid <= 0) return false
-  return parseEnsureOutput(runLocalPowerShellSync(buildEnsureWindowScript(hwnd, true, pid, false, false))).status === 'ok'
+  signal?.throwIfAborted()
+  if (windowProcessId(hwnd) !== pid) return false
+  if (foregroundWindow() === hwnd) return true
+  const result = await runPowerShell(buildEnsureWindowScript(hwnd, true, pid, false, false), 4000, undefined, signal)
+  return parseEnsureOutput(result).status === 'ok'
+}
+
+export async function ensureInputWindow(hwnd: number, needForeground: boolean, expectedPid?: number): Promise<EnsureWindowResult> {
+  const pid = windowProcessId(hwnd)
+  if (!pid) return { status: 'dead' }
+  if (expectedPid !== undefined && pid !== expectedPid) return { status: 'identity_mismatch', actualPid: pid }
+  return parseEnsureOutput(await runComputerUsePowerShell(buildEnsureWindowScript(hwnd, needForeground, expectedPid, true), 5000))
 }
 
 // ── Replacement-window lookup (window died → app may have another window) ──

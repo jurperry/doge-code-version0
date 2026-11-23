@@ -28,24 +28,27 @@ import { logForDebugging } from '../debug.js';
 import { createSystemMessage } from '../messages.js';
 import { isAutoBypassActive } from '../permissions/autoBypass.js';
 import { buildAutoGrantResponse } from './autoGrant.js';
+import { cleanupComputerUseAfterTurn } from './cleanup.js';
 import { checkComputerUseLock, isLockHeldLocally, tryAcquireComputerUseLock } from './computerUseLock.js';
 import { COMPUTER_USE_MCP_SERVER_NAME } from './common.js';
 import { ensureEscHotkey } from './escHotkey.js';
 import { getChicagoCoordinateMode } from './gates.js';
 import { getComputerUseHostAdapter } from './hostAdapter.js';
 import { getComputerUseMCPRenderingOverrides } from './toolRendering.js';
+import { windowsActionSignal } from './win32/powerShell.js';
 import { getTurnUacGuard, runWithUacGuard, UAC_FRESH_SCREENSHOT, UAC_WAIT_MESSAGE, UacTimeoutError } from './win32/uacWait.js';
 type CallOverride = Pick<Tool, 'call'>['call'];
 type Binding = {
   ctx: ComputerUseSessionContext;
-  dispatch: (
+  dispatch: ReturnType<typeof bindSessionContext>;
+};
+type DispatchComputerUse = (
     name: string,
     args: unknown,
     requestSignal?: AbortSignal,
     reportProgress?: (progress: CuToolProgress) => void,
     beforeAction?: (action: string) => Promise<void>,
   ) => Promise<CuCallToolResult>;
-};
 
 /**
  * Cached binding — built on first `.call()`, reused for process lifetime.
@@ -62,6 +65,36 @@ type Binding = {
  */
 let binding: Binding | undefined;
 let currentToolUseContext: ToolUseContext | undefined;
+type WindowsComputerUseTurn = {
+  stop: AbortController;
+  dispatchTail?: Promise<void>;
+  cleanup?: Promise<void>;
+};
+const windowsTurns = new WeakMap<AbortSignal, WindowsComputerUseTurn>();
+const STOPPED_BY_ESCAPE = 'The user stopped Computer Use with Esc. Continue the conversation without computer actions in this turn. Computer Use can resume after the next user message.';
+
+function getWindowsComputerUseTurn(context: ToolUseContext): WindowsComputerUseTurn {
+  const signal = (context.mainTurnAbortController ?? context.abortController).signal;
+  let turn = windowsTurns.get(signal);
+  if (!turn) {
+    turn = { stop: new AbortController() };
+    windowsTurns.set(signal, turn);
+  }
+  return turn;
+}
+
+function stopWindowsComputerUse(context: ToolUseContext): void {
+  const turn = getWindowsComputerUseTurn(context);
+  if (turn.stop.signal.aborted) return;
+  turn.stop.abort(new DOMException(STOPPED_BY_ESCAPE, 'AbortError'));
+  // Wait for a dispatched action to unwind before releasing its input and lock.
+  turn.cleanup = windowsActionSignal.exit(() => (turn.dispatchTail ?? Promise.resolve()).then(async () => {
+    await cleanupComputerUseAfterTurn(context);
+    const { clearWindowsTargetAfterStop } = await import('./platforms/win32.js');
+    clearWindowsTargetAfterStop();
+    binding?.dispatch.clearScreenshot();
+  })).catch(error => logForDebugging(`[cu-esc] cleanup failed: ${error}`, { level: 'warn' }));
+}
 // The dispatcher keeps its screenshot across turn boundaries. UAC invalidates
 // those coordinates until a new standalone screenshot has finished.
 let needsScreenshotAfterUac = false;
@@ -75,7 +108,10 @@ function handleUserEscape(): void {
   // A stale helper can outlive its lock by a few milliseconds during cleanup;
   // never abort a later non-CU turn from that signal.
   if (!isLockHeldLocally()) return;
-  logForDebugging('[cu-esc] user escape, aborting turn');
+  if (process.platform === 'win32') {
+    stopWindowsComputerUse(tuc());
+    return;
+  }
   tuc().abortController.abort();
 }
 function formatLockHeld(holder: string): string {
@@ -258,7 +294,7 @@ export function buildSessionContext(): ComputerUseSessionContext {
         // processed by the drainRunLoop pump on macOS; the Windows hook lives
         // in a PowerShell helper. Either way the registration is held until
         // unregisterEscHotkey() in cleanup.ts.
-        const escRegistered = await ensureEscHotkey(handleUserEscape);
+        const escRegistered = await windowsActionSignal.exit(() => ensureEscHotkey(handleUserEscape));
         tuc().sendOSNotification?.({
           message: escRegistered ? 'Claude is using your computer · press Esc to stop' : 'Claude is using your computer · press Ctrl+C to stop',
           notificationType: 'computer_use_enter'
@@ -287,7 +323,7 @@ type ComputerUseMCPToolOverrides = ReturnType<typeof getComputerUseMCPRenderingO
   call: CallOverride;
 };
 type CallComputerUseToolOptions = {
-  dispatch: Binding['dispatch'];
+  dispatch: DispatchComputerUse;
   toolName: string;
   args: Record<string, unknown>;
   context: ToolUseContext;
@@ -313,12 +349,15 @@ async function callComputerUseTool({
   limits,
   uacGuard,
 }: CallComputerUseToolOptions) {
-  currentToolUseContext = context;
+  const windowsTurn = process.platform === 'win32' ? getWindowsComputerUseTurn(context) : undefined;
+  const signal = windowsTurn
+    ? AbortSignal.any([context.abortController.signal, windowsTurn.stop.signal])
+    : context.abortController.signal;
   // The lock is process-wide and the hook is registered once at acquire time.
   // Re-check before each action so a helper that died (PowerShell crash,
   // antivirus kill, secure-desktop switch) is re-registered instead of
   // silently leaving the user without Esc for the rest of the session.
-  if (isLockHeldLocally()) {
+  if (!signal.aborted && isLockHeldLocally()) {
     void ensureEscHotkey(handleUserEscape).catch(error => {
       logForDebugging(`[cu-esc] re-register failed: ${error}`, { level: 'warn' });
     });
@@ -336,41 +375,23 @@ async function callComputerUseTool({
   };
   try {
     const { telemetry, ...result } = await runMcpToolCall({
-      signal: context.abortController.signal,
+      signal,
       serverName: COMPUTER_USE_MCP_SERVER_NAME,
       toolName,
       limits,
-      invoke: async (requestSignal, reportProgress) => {
-        if (!uacGuard) return dispatch(toolName, args, requestSignal, reportProgress);
-        const turn = context.mainTurnAbortController;
-        if (!turn) {
-          return runWithUacGuard(requestSignal, showUacWaiting,
-            (beforeAction, signal) => dispatch(toolName, args, signal, reportProgress, beforeAction), uacGuard);
-        }
-        const guard = getTurnUacGuard(turn, showUacWaiting, uacGuard);
-        let captureGeneration: number | undefined;
-        let result: CuCallToolResult;
-        try {
-          result = await dispatch(toolName, args, requestSignal, reportProgress, async action => {
-            const canRunBeforeRefresh = action === 'screenshot' || action === 'open_application' || action === 'switch_display' ||
-              action === 'list_windows' || action === 'get_window' || action === 'list_granted_applications';
-            await guard.beforeAction(requestSignal);
-            if (process.platform === 'win32') {
-              const { releaseWindowsInputBeforeAction } = await import('./platforms/win32.js');
-              await releaseWindowsInputBeforeAction(needsScreenshotAfterUac);
-            }
-            if (needsScreenshotAfterUac && !canRunBeforeRefresh) {
-              throw new Error(UAC_FRESH_SCREENSHOT);
-            }
-            if (toolName === 'screenshot') captureGeneration = guard.generation;
-          });
-        } finally {
-          await guard.afterAction(requestSignal);
-        }
-        if (captureGeneration !== undefined && captureGeneration === guard.generation && !result.isError) {
-          needsScreenshotAfterUac = false;
-        }
-        return result;
+      invoke: (requestSignal, reportProgress) => {
+        const run = async () => {
+          requestSignal.throwIfAborted();
+          currentToolUseContext = context;
+          return invokeComputerUse(requestSignal, reportProgress);
+        };
+        if (!windowsTurn) return run();
+        const start = () => windowsActionSignal.run(requestSignal, run);
+        const operation = windowsTurn.dispatchTail ? windowsTurn.dispatchTail.then(start) : start();
+        const tail = operation.then(() => undefined, () => undefined);
+        windowsTurn.dispatchTail = tail;
+        void tail.then(() => { if (windowsTurn.dispatchTail === tail) windowsTurn.dispatchTail = undefined; });
+        return operation;
       },
       onProgress: progress => emit({
         type: 'mcp_progress',
@@ -393,6 +414,38 @@ async function callComputerUseTool({
         });
       },
     });
+    async function invokeComputerUse(requestSignal: AbortSignal, reportProgress: (progress: CuToolProgress) => void) {
+        if (!uacGuard) return dispatch(toolName, args, requestSignal, reportProgress);
+        const turn = context.mainTurnAbortController;
+        if (!turn) {
+          return runWithUacGuard(requestSignal, showUacWaiting,
+            (beforeAction, signal) => dispatch(toolName, args, signal, reportProgress, beforeAction), uacGuard);
+        }
+        const guard = getTurnUacGuard(turn, showUacWaiting, uacGuard);
+        let captureGeneration: number | undefined;
+        let result: CuCallToolResult;
+        try {
+          result = await dispatch(toolName, args, requestSignal, reportProgress, async action => {
+            const canRunBeforeRefresh = action === 'screenshot' || action === 'open_application' || action === 'switch_display' ||
+              action === 'list_windows' || action === 'get_window' || action === 'list_granted_applications';
+            await guard.beforeAction(requestSignal);
+            if (process.platform === 'win32') {
+              const { releaseWindowsInputBeforeAction } = await import('./platforms/win32.js');
+              await releaseWindowsInputBeforeAction(needsScreenshotAfterUac);
+            }
+            if (needsScreenshotAfterUac && !canRunBeforeRefresh) {
+              throw new Error(UAC_FRESH_SCREENSHOT);
+            }
+            if (action === 'screenshot' || action === 'open_application') captureGeneration = guard.generation;
+          });
+        } finally {
+          await guard.afterAction(requestSignal);
+        }
+        if (captureGeneration !== undefined && captureGeneration === guard.generation && result.screenshot && !result.isError) {
+          needsScreenshotAfterUac = false;
+        }
+        return result;
+    }
     if (telemetry?.error_kind) {
       logForDebugging(`[Computer Use MCP] ${toolName} error_kind=${telemetry.error_kind}`);
     }
@@ -424,6 +477,10 @@ async function callComputerUseTool({
 
     return { data };
   } catch (error) {
+    if (windowsTurn?.stop.signal.aborted && !context.abortController.signal.aborted) {
+      await windowsTurn.cleanup;
+      throw new McpToolCallError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS(STOPPED_BY_ESCAPE, 'Computer Use stopped by user');
+    }
     if (error instanceof UacTimeoutError) {
       context.abortController.abort(error);
       return { data: undefined };

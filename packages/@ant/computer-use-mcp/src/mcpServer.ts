@@ -95,13 +95,13 @@ export function bindSessionContext(
   adapter: ComputerUseHostAdapter,
   coordinateMode: CoordinateMode,
   ctx: ComputerUseSessionContext,
-): (
+): ((
   name: string,
   args: unknown,
   requestSignal?: AbortSignal,
   reportProgress?: (progress: CuToolProgress) => void,
   beforeAction?: (action: string) => Promise<void>,
-) => Promise<CuCallToolResult> {
+) => Promise<CuCallToolResult>) & { clearScreenshot(): void } {
   const { logger, serverName } = adapter;
 
   // Screenshot blob persists here across calls — NOT on `ctx`. Hosts hold
@@ -113,6 +113,11 @@ export function bindSessionContext(
   let lastHandledBoundRevision = 0;
   let targetChangesPending = 0;
   let activeCalls = 0;
+  const clearScreenshot = () => {
+    lastScreenshot = undefined;
+    screenshotAt = undefined;
+    ctx.onScreenshotCleared?.();
+  };
 
   const wrapPermission = ctx.onPermissionRequest
     ? async (
@@ -162,7 +167,8 @@ export function bindSessionContext(
       }
     : undefined;
 
-  return async (name, args, requestSignal, reportProgress, beforeAction) => {
+  const dispatch = async (name: string, args: unknown, requestSignal?: AbortSignal,
+    reportProgress?: (progress: CuToolProgress) => void, beforeAction?: (action: string) => Promise<void>) => {
     const isLinux = adapter.executor.capabilities.platform === "linux";
     let ticket = isLinux ? 0 : ++callGeneration;
     const boundRevision = adapter.executor.getBoundRevision?.();
@@ -285,6 +291,7 @@ export function bindSessionContext(
     let callTargetGeneration = targetGeneration;
     activeCalls++;
     try {
+      if (changesTarget) clearScreenshot();
       throwIfAborted();
       const result = await handleToolCall(adapter, name, args, overrides);
       const currentBoundRevision = adapter.executor.getBoundRevision?.();
@@ -293,12 +300,10 @@ export function bindSessionContext(
         lastHandledBoundRevision = currentBoundRevision;
         targetGeneration++;
         callTargetGeneration = targetGeneration;
-        lastScreenshot = undefined;
-        screenshotAt = undefined;
-        ctx.onScreenshotCleared?.();
+        clearScreenshot();
       }
 
-      if (result.screenshot && (result.screenshot.targetRevision === undefined || result.screenshot.targetRevision === adapter.executor.getBoundRevision?.()) && ticket === callGeneration && callTargetGeneration === targetGeneration && targetChangesPending === 0 && !requestSignal?.aborted && !ctx.isAborted?.()) {
+      if (result.screenshot && (result.screenshot.targetRevision === undefined || result.screenshot.targetRevision === adapter.executor.getBoundRevision?.()) && ticket === callGeneration && callTargetGeneration === targetGeneration && targetChangesPending === (changesFocus ? 1 : 0) && !requestSignal?.aborted && !ctx.isAborted?.()) {
         lastScreenshot = result.screenshot;
         screenshotAt = performance.now();
         const { base64: _blob, ...dims } = result.screenshot;
@@ -308,21 +313,14 @@ export function bindSessionContext(
 
       return result;
     } finally {
-      try {
-        if (changesTarget) {
-          lastScreenshot = undefined;
-          screenshotAt = undefined;
-          ctx.onScreenshotCleared?.();
-        }
-      } finally {
-        if (changesFocus) targetChangesPending--;
-        activeCalls--;
-        if (isLinux) activeLinuxExecutors.delete(adapter.executor);
-        requestSignal?.removeEventListener("abort", abortDialog);
-        dialogAbort.abort();
-      }
+      if (changesFocus) targetChangesPending--;
+      activeCalls--;
+      if (isLinux) activeLinuxExecutors.delete(adapter.executor);
+      requestSignal?.removeEventListener("abort", abortDialog);
+      dialogAbort.abort();
     }
   };
+  return Object.assign(dispatch, { clearScreenshot });
 }
 
 export function createComputerUseMcpServer(

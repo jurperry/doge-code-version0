@@ -13,7 +13,7 @@ export interface DisplayGeometry {
 export type CaptureMode = 'bound_window' | 'full_display'
 
 /** Why the previous window anchor was released. */
-export type BindingReleaseReason = 'switch_display' | 'new_foreground' | 'explicit'
+export type BindingReleaseReason = 'switch_display' | 'new_foreground' | 'capture_unavailable' | 'explicit'
 
 export interface BindingReleaseInfo {
   reason: BindingReleaseReason
@@ -123,6 +123,8 @@ export interface ComputerExecutor {
   screenshot(opts: {
     allowedBundleIds: string[]
     displayId?: number
+    /** Windows can change capture mode only when returning a new image to the model. */
+    allowDisplayFallback?: boolean
   }): Promise<ScreenshotResult>
   zoom(
     regionLogical: { x: number; y: number; w: number; h: number },

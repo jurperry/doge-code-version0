@@ -23,6 +23,7 @@ const windowsTest = process.platform === 'win32' ? test : test.skip
 
 windowsTest('real sync and async runners enforce timeout and carry stdin', async () => {
   expect(() => runPowerShellSync('Start-Sleep -Seconds 2', 30)).toThrow(/outcome is unknown/i)
+  expect(runPowerShellSync('[Console]::Out.Write([Console]::In.ReadToEnd())', 1000, 'sync-stdin')).toBe('sync-stdin')
   await expect(runPowerShell('Start-Sleep -Seconds 2', 30)).rejects.toThrow(/timed out.*outcome is unknown/i)
   expect(await runPowerShell('[Console]::Out.Write([Console]::In.ReadToEnd())', 1000, 'stdin-ok')).toBe('stdin-ok')
 })

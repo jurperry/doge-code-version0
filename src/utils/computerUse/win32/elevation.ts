@@ -10,8 +10,8 @@
  * mismatches and recommends elevation when needed.
  */
 
-import { runPowerShellSync } from './powerShell.js'
-import { runComputerUsePowerShellSync } from './elevatedPowerShell.js'
+import { processIntegrityRid } from './nativeWindows.js'
+import { runComputerUsePowerShell } from './elevatedPowerShell.js'
 
 export const INPUT_INTEGRITY_TYPES = `
 Add-Type @'
@@ -120,48 +120,42 @@ export function parseIntegrityLevel(value: string): IntegrityLevel {
   return 'low'
 }
 
-function queryIntegrity(expression: string): IntegrityLevel {
-  try {
-    return parseIntegrityLevel(runPowerShellSync(`${INPUT_INTEGRITY_TYPES}\n${expression}`, 8000))
-  } catch {
-    return 'unknown'
-  }
-}
-
 export function getCurrentProcessIL(): IntegrityLevel {
   if (cachedIL !== undefined) return cachedIL
-  const integrity = queryIntegrity('[CuInputIntegrity]::Current()')
+  const integrity = getProcessIL(process.pid)
   if (integrity !== 'unknown' && integrity !== 'restricted') cachedIL = integrity
   return integrity
 }
 
 export function getProcessIL(pid: number): IntegrityLevel {
   if (!Number.isInteger(pid) || pid <= 0 || pid > 0xffffffff) return 'unknown'
-  return queryIntegrity(`[CuInputIntegrity]::ForProcess(${pid})`)
+  return parseIntegrityLevel(String(processIntegrityRid(pid)))
 }
 
 // WM_NULL probes delivery only. Every action still checks the live input target.
-export function testSendMessage(hwnd: number): boolean {
+export async function testSendMessage(hwnd: number): Promise<boolean> {
   if (!Number.isInteger(hwnd) || hwnd <= 0) return false
   const script = `
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public class MsgTest {
-    [DllImport("user32.dll", SetLastError=true)]
-    public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
+    static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
     [DllImport("kernel32.dll")]
     public static extern void SetLastError(uint dwErrCode);
     public static int Probe(IntPtr hwnd) {
         SetLastError(0);
-        SendMessage(hwnd, 0, IntPtr.Zero, IntPtr.Zero);
-        return Marshal.GetLastWin32Error();
+        IntPtr result;
+        if (SendMessageTimeout(hwnd, 0, IntPtr.Zero, IntPtr.Zero, 0x23, 750, out result) != IntPtr.Zero) return 0;
+        int error = Marshal.GetLastWin32Error();
+        return error == 0 ? 1460 : error;
     }
 }
 '@
 [MsgTest]::Probe([IntPtr]${hwnd})
 `
-  const result = runComputerUsePowerShellSync(script, 8000)
+  const result = await runComputerUsePowerShell(script, 3000)
   if (result === '') {
     throw new Error('WM_NULL probe returned no result; message accessibility is unknown.')
   }

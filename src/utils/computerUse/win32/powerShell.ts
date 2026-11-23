@@ -1,4 +1,14 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { spawnSync as nodeSpawnSync } from 'node:child_process'
+import { join } from 'node:path'
+
+// Scope the cancellable helpers to one Windows Computer Use dispatch.
+export const windowsActionSignal = new AsyncLocalStorage<AbortSignal>()
+
+function powershellPath(): string {
+  if (process.platform !== 'win32') return 'powershell'
+  return join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+}
 
 let observeSpawn: (() => void) | undefined
 
@@ -32,17 +42,14 @@ export function runPowerShellSync(script: string, timeoutMs = 10_000, stdin?: st
   try {
     observeSpawn?.()
     const completed = nodeSpawnSync(
-      'powershell',
+      powershellPath(),
       ['-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
-      {
-        encoding: 'utf8',
-        input: stdin,
-        timeout: timeoutMs,
-        killSignal: 'SIGTERM',
-        windowsHide: true,
-      },
+      { encoding: 'utf8', input: stdin, timeout: timeoutMs, killSignal: 'SIGTERM', windowsHide: true },
     )
-    timedOut = (completed.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+    if (completed.error) {
+      timedOut = (completed.error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
+      if (!timedOut) throw completed.error
+    }
     result = {
       exitCode: completed.status,
       stdout: completed.stdout ?? '',
@@ -55,10 +62,11 @@ export function runPowerShellSync(script: string, timeoutMs = 10_000, stdin?: st
 }
 
 export async function runPowerShell(script: string, timeoutMs = 15_000, stdin?: string, signal?: AbortSignal): Promise<string> {
+  signal ??= windowsActionSignal.getStore()
   signal?.throwIfAborted()
   observeSpawn?.()
   const proc = Bun.spawn(
-    ['powershell', '-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
+    [powershellPath(), '-NoProfile', '-NonInteractive', '-Command', `${POWER_SHELL_PREFIX}${script}`],
     // Same visibility rule as the sync runner: helper/client PowerShell must
     // never flash or steal the foreground from the bound app.
     { stdin: stdin === undefined ? 'ignore' : 'pipe', stdout: 'pipe', stderr: 'pipe', windowsHide: true },

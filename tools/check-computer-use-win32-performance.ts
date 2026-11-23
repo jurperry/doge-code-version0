@@ -38,8 +38,9 @@ try {
   assert.ok(primary, 'primary display was resolved')
   console.log(JSON.stringify({ desktop: { width: primary.width, height: primary.height, integrity: getCurrentProcessIL() } }))
   _test.observeSpawns(() => { launches++ })
-  await measure('window enumeration', 2500, 1, () => listWindowDetails())
-  await measure('full-display screenshot', 4000, 2, () => captureScreenForApi())
+  await measure('window enumeration', 250, 0, () => listWindowDetails())
+  await measure('foreground identity', 250, 0, () => platform.apps.getFrontmostApp())
+  await measure('full-display screenshot', 4000, 1, () => captureScreenForApi())
   await measure('PowerShell startup', 1200, 1, () => runPowerShellSync("'ready'"))
 } finally {
   _test.observeSpawns()

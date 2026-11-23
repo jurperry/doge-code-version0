@@ -67,6 +67,7 @@ $form = New-Object System.Windows.Forms.Form
 $form.Text = $env:CU_HOST_TITLE
 $form.Width = 640
 $form.Height = 480
+$form.TopMost = $true
 $form.StartPosition = 'Manual'
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen
 $hostX = $screen.WorkingArea.Right - 640
@@ -84,8 +85,14 @@ $childHwnd = [IntPtr]::new([long](Get-Content -LiteralPath $env:CU_CHILD_HWND -R
 [CuHostNative]::SetParent($childHwnd, $form.Handle) | Out-Null
 [CuHostNative]::MoveWindow($childHwnd, 0, 0, $form.ClientSize.Width, $form.ClientSize.Height, $true) | Out-Null
 [CuHostNative]::ShowWindow($childHwnd, 5) | Out-Null
-[CuHostNative]::SetForegroundWindow($form.Handle) | Out-Null
-[System.IO.File]::WriteAllText($env:CU_EMBEDDED_FILE, 'ready')
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 50
+$timer.Add_Tick({
+    $timer.Stop()
+    [CuHostNative]::SetForegroundWindow($form.Handle) | Out-Null
+    [System.IO.File]::WriteAllText($env:CU_EMBEDDED_FILE, 'ready')
+})
+$timer.Start()
 [System.Windows.Forms.Application]::Run($form)
 `
 
@@ -123,7 +130,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile renderer fixture' }
 `, 20_000)
 
   const { platform } = await import('../src/utils/computerUse/platforms/win32.js')
-  const { ensureWindow } = await import('../src/utils/computerUse/win32/windowGuard.js')
+  const { activateObservedWindow } = await import('../src/utils/computerUse/win32/windowGuard.js')
   const { listWindows } = await import('../src/utils/computerUse/win32/windowEnum.js')
   const { createCliExecutor } = await import('../src/utils/computerUse/executor.js')
   const { getComputerUseHostAdapter } = await import('../src/utils/computerUse/hostAdapter.js')
@@ -153,7 +160,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile renderer fixture' }
     await waitFor(() => existsSync(EMBEDDED_FILE) && existsSync(CHILD_PID_FILE) && listWindows().some(window => window.title === HOST_TITLE), 'embedded host')
     childPid = Number(readFileSync(CHILD_PID_FILE, 'utf8').trim())
     const hostWindow = listWindows().find(window => window.title === HOST_TITLE)!
-    assert.equal(ensureWindow(hostWindow.hwnd, true, host.pid).status, 'ok')
+    assert.equal(await activateObservedWindow(hostWindow.hwnd, host.pid), true)
     const rect = runPowerShellSync(`
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -180,7 +187,9 @@ $r = New-Object CuHostRect+Rect
     check(`host trust requires the process tree (${hostSpawnsChild ? 'trusted' : 'untrusted'})`, target?.hostTrusted === hostSpawnsChild, JSON.stringify(target))
 
     const foregroundTarget = await executor.getFrontmostApp()
-    check(`foreground resolver shares host trust (${hostSpawnsChild ? 'trusted' : 'untrusted'})`, hostSpawnsChild ? foregroundTarget?.hostTrusted === true : foregroundTarget?.hostTrusted !== true, JSON.stringify(foregroundTarget))
+    const foregroundMatches = foregroundTarget?.pid === host.pid ||
+      (foregroundTarget?.pid === childPid && foregroundTarget.hostTrusted === hostSpawnsChild)
+    check(`foreground identifies the host or its correctly attributed renderer`, foregroundMatches, JSON.stringify(foregroundTarget))
     const shot = await executor.screenshot({ allowedBundleIds: [target!.hostId!] })
     const coordinate: [number, number] = [
       Math.round((point.x - shot.originX) * shot.width / shot.displayWidth!),
