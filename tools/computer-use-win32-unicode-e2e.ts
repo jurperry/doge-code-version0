@@ -103,7 +103,7 @@ try {
     } catch {}
   }
   if (!hwnd || !editHwnd) throw new Error('native EDIT fixture not found')
-  bindWindow(hwnd, proc.pid, undefined, 'fixture.app')
+  bindWindow(hwnd, proc.pid, 'fixture.app')
   check('fixture is not Chromium', !getBoundInputChannel().chromium)
   const executor = createCliExecutor({ getMouseAnimationEnabled: () => false, getHideBeforeActionEnabled: () => false })
   const adapter: ComputerUseHostAdapter = {

@@ -47,6 +47,14 @@ public class WinMsg {
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
+    [DllImport("user32.dll", EntryPoint="GetWindowLongW")]
+    static extern int GetWindowLong(IntPtr hwnd, int index);
+
+    [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool PhysicalToLogicalPointForPerMonitorDPI(IntPtr hwnd, ref POINT point);
+
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lp);
 
@@ -75,6 +83,14 @@ public class WinMsg {
 
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct TitleBarInfo {
+        public int Size;
+        public RECT Bounds;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst=6)] public uint[] States;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst=6)] public RECT[] Areas;
+    }
 
     public static IntPtr MakeLParam(int lo, int hi) {
         return (IntPtr)((hi << 16) | (lo & 0xFFFF));
@@ -108,6 +124,50 @@ public class WinMsg {
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         }
         return MakeLParam(x - (pt.X - wr.L), y - (pt.Y - wr.T));
+    }
+
+    static bool HitMinimizeButton(IntPtr hwnd, POINT physical) {
+        const uint WM_GETTITLEBARINFOEX = 0x033F;
+        const int MinimizeIndex = 2;
+        const uint UnavailableOrInvisible = 0x0001 | 0x8000;
+        var info = new TitleBarInfo {
+            Size = Marshal.SizeOf(typeof(TitleBarInfo)), States = new uint[6], Areas = new RECT[6]
+        };
+        IntPtr buffer = Marshal.AllocHGlobal(info.Size);
+        try {
+            Marshal.StructureToPtr(info, buffer, false);
+            SendMessage(hwnd, WM_GETTITLEBARINFOEX, IntPtr.Zero, buffer);
+            info = (TitleBarInfo)Marshal.PtrToStructure(buffer, typeof(TitleBarInfo));
+            RECT button = info.Areas[MinimizeIndex];
+            return (info.States[MinimizeIndex] & UnavailableOrInvisible) == 0 &&
+                physical.X >= button.L && physical.X < button.R && physical.Y >= button.T && physical.Y < button.B;
+        } finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    public static bool TryClickMinimize(IntPtr hwnd, uint expectedPid, int x, int y) {
+        const int GWL_STYLE = -16;
+        const int CaptionWithMinimize = 0x00C00000 | 0x00080000 | 0x00020000;
+        const uint WM_SYSCOMMAND = 0x0112;
+        const int SC_MINIMIZE = 0xF020;
+        SetProcessDPIAware();
+        RequireProcess(hwnd, expectedPid);
+        if (!IsWindowVisible(hwnd) || !IsWindowEnabled(hwnd) || IsIconic(hwnd)) return false;
+        if ((GetWindowLong(hwnd, GWL_STYLE) & CaptionWithMinimize) != CaptionWithMinimize) return false;
+        RECT rect;
+        if (!GetWindowRect(hwnd, out rect)) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        if (x < 0 || y < 0 || x >= rect.R - rect.L || y >= rect.B - rect.T) return false;
+        var screen = new POINT { X = rect.L + x, Y = rect.T + y };
+        if (!HitMinimizeButton(hwnd, screen)) return false;
+        // The caption query uses our physical coordinates. The command carries
+        // the original click position in the receiving window's DPI space.
+        if (!PhysicalToLogicalPointForPerMonitorDPI(hwnd, ref screen)) return false;
+        if (screen.X < short.MinValue || screen.X > short.MaxValue || screen.Y < short.MinValue || screen.Y > short.MaxValue) return false;
+        IntPtr point = MakeLParam(screen.X, screen.Y);
+        RequireProcess(hwnd, expectedPid);
+        SendMessage(hwnd, WM_SYSCOMMAND, (IntPtr)SC_MINIMIZE, point);
+        return true;
     }
 
     public const uint WM_CHAR = 0x0102;
@@ -172,17 +232,30 @@ const VK_MAP: Record<string, number> = {
   f9: 0x78, f10: 0x79, f11: 0x7a, f12: 0x7b,
 }
 
-async function runPs(script: string, inputHwnd?: number): Promise<string> {
+async function runPs(script: string, inputHwnd?: number, options?: { cancellable?: boolean }): Promise<string> {
   windowsActionSignal.getStore()?.throwIfAborted()
   const guard = inputHwnd === undefined ? '' : INPUT_INTEGRITY_TYPES + `
 [CuInputIntegrity]::RequireWindow([IntPtr]${inputHwnd})
 `
   // Keep an already dispatched press/release pair together when Esc arrives.
-  return windowsActionSignal.exit(() => runComputerUsePowerShell(WINMSG_TYPE + guard + script, 8000))
+  const run = () => runComputerUsePowerShell(WINMSG_TYPE + guard + script, 8000)
+  return options?.cancellable ? run() : windowsActionSignal.exit(run)
 }
 
 function requireProcess(hwnd: number, expectedPid?: number): string {
   return `[WinMsg]::RequireProcess([IntPtr]${hwnd}, ${expectedPid ?? 0})`
+}
+
+/** Deliver the command for a confirmed native minimize button without moving the pointer. */
+export async function tryClickMinimize(hwnd: number, expectedPid: number, x: number, y: number): Promise<boolean> {
+  const result = await runPs(`
+if ([WinMsg]::TryClickMinimize([IntPtr]${hwnd}, ${expectedPid}, ${Math.round(x)}, ${Math.round(y)})) {
+    'MINIMIZE_SENT'
+} else { 'NOT_MINIMIZE' }
+`, hwnd, { cancellable: true })
+  if (result === 'MINIMIZE_SENT') return true
+  if (result === 'NOT_MINIMIZE') return false
+  throw new Error('Could not determine the native minimize result. Inspect the window before retrying.')
 }
 
 /**

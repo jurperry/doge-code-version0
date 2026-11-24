@@ -9,10 +9,11 @@ function expectReal(framework: string, cls: string, childClasses: string[] = [],
   expect(r.matchedClass).toBe(matched)
 }
 
-test('the legacy game needs physical input without classifying unrelated MainWindow apps as games', () => {
-  expect(classifyWindowClasses('MainWindow', [], 'PlantsVsZombiesFood').mouseNeedsRealInput).toBeTrue()
-  expect(classifyWindowClasses('MainWindow', [], 'AnotherApp').mouseNeedsRealInput).toBeFalse()
-  expect(classifyWindowClasses('OtherWindow', [], 'PlantsVsZombiesFood').mouseNeedsRealInput).toBeFalse()
+test('a generic MainWindow keeps both input channels available in the background', () => {
+  const result = classifyWindowClasses('MainWindow', [])
+  expect(result.framework).toBe('standard')
+  expect(result.mouseNeedsRealInput).toBeFalse()
+  expect(result.keyboardNeedsRealInput).toBeFalse()
 })
 
 test('classifies Qt windows as self-drawn (Android emulator case)', () => {

@@ -43,7 +43,7 @@ import { buildPortableAppLaunchBlock, START_CU_APPLICATION } from '../win32/appL
 import { classifyWindowClasses, type WindowFramework } from '../win32/windowClassify.js'
 import { getWin32EscExpectFile, isWin32EscHotkeyRegistered } from '../win32/escHook.js'
 import { runPowerShell, windowsActionSignal } from '../win32/powerShell.js'
-import { childWindowClasses, enumerateDisplays, foregroundTarget, isWindowClientPoint, isWindowForeground, isWindowMinimized, monitorForWindow, processImage, targetAtPoint, windowProcessId, windowRectangle, windowText } from '../win32/nativeWindows.js'
+import { childWindowClasses, enumerateDisplays, foregroundTarget, isWindowClientPoint, isWindowForeground, isWindowMinimized, monitorForWindow, targetAtPoint, windowProcessId, windowRectangle, windowText } from '../win32/nativeWindows.js'
 import { ensureElevatedPowerShell, getElevatedPowerShellPid, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
 import { PROCESS_IMAGE_PS } from '../win32/processImage.js'
 import { getCurrentProcessIL, getProcessIL, INPUT_INTEGRITY_TYPES, needsElevatedHelper } from '../win32/elevation.js'
@@ -434,7 +434,7 @@ export function getBoundAppType(): string | null { return boundAppType }
 export function getBoundFilePath(): string | null { return boundFilePath }
 
 /** Bind to a window HWND — all subsequent input/screenshot operations target this handle */
-export function bindWindow(hwnd: number, pid?: number, exeBase?: string, appId: string | null = null): void {
+export function bindWindow(hwnd: number, pid?: number, appId: string | null = null): void {
   hideBoundWindowIndicator()
   boundHwnd = hwnd
   boundPid = pid ?? (windowProcessId(hwnd) || null)
@@ -450,8 +450,7 @@ export function bindWindow(hwnd: number, pid?: number, exeBase?: string, appId: 
   sendMessageOk = null
   // Framework classification decides the input channel: SendMessage
   // (background, no cursor/focus theft) vs real input (foreground guard).
-  const image = boundPid ? processImage(boundPid) : ''
-  const framework = classifyWindowClasses(windowText(hwnd, 'class'), childWindowClasses(hwnd), image ? windowsPath.basename(image).replace(/\.exe$/i, '') : exeBase)
+  const framework = classifyWindowClasses(windowText(hwnd, 'class'), childWindowClasses(hwnd))
   boundFramework = framework.framework
   mouseNeedsRealInput = framework.mouseNeedsRealInput
   keyboardNeedsRealInput = framework.keyboardNeedsRealInput
@@ -987,13 +986,19 @@ const input: InputPlatform = {
     await sendAtomicInput(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed during mouse move' }`)
   },
 
-  async click(x, y, button, count = 1) {
+  async click(x, y, button, count = 1, modifiersHeld = false) {
     if (!Number.isInteger(count) || count < 1 || count > 3) {
       throw new Error('Click count must be an integer from 1 to 3; no input was sent.')
     }
     if (boundHwnd) {
-      // Native caption buttons, resize borders and multi-click require real input.
-      const realInput = count > 1 || realMouseChannel() || !isWindowClientPoint(boundHwnd, x, y)
+      const clientPoint = isWindowClientPoint(boundHwnd, x, y)
+      if (!clientPoint && count === 1 && button === 'left' && !modifiersHeld && boundPid) {
+        const revision = bindingRevision
+        guardBoundWindow(false)
+        if (await getWm().tryClickMinimize(boundHwnd, boundPid, x, y)) return
+        if (bindingRevision !== revision) throw new Error('The bound window changed. Take a fresh screenshot before clicking.')
+      }
+      const realInput = count > 1 || realMouseChannel() || !clientPoint
       guardBoundWindow(realInput)
       if (realInput) {
         await sendInputClick(boundHwnd, x, y, button, count)
@@ -1491,7 +1496,7 @@ const apps: AppsPlatform = {
       throw new Error('The selected window no longer matches the granted executable. Refresh list_granted_applications before opening it.')
     }
     if (candidate) {
-      bindWindow(candidate.hwnd, candidate.pid, base, name)
+      bindWindow(candidate.hwnd, candidate.pid, name)
       await activateObservedWindow(candidate.hwnd, candidate.pid, signal)
       await prepareWindowsTarget(signal)
       return
@@ -1640,10 +1645,7 @@ for ($i = 0; $i -lt 50 -and $hwnd -eq 0; $i++) {
     }
 }
 if ($hwnd -eq 0) { Write-Host "HWND_NOT_FOUND|$($proc.Id)"; exit }
-$exePath = ''
-try { $exePath = (Get-Process -Id $hwndPid -ErrorAction SilentlyContinue).Path } catch {}
-if (-not $exePath) { $exePath = $launchPath }
-Write-Host "$hwnd|$hwndPid|$exePath"
+Write-Host "$hwnd|$hwndPid"
 `, 60_000, undefined, signal)
     signal?.throwIfAborted()
     if (!result || result.startsWith('LAUNCH_FAILED')) {
@@ -1668,13 +1670,9 @@ Write-Host "$hwnd|$hwndPid|$exePath"
     const parts = result.trim().split('|')
     const hwnd = Number(parts[0])
     const pid = Number(parts[1])
-    const exePath = (parts[2] ?? '').trim()
     if (hwnd > 0) {
       // Bind to the launched window — all subsequent operations target this HWND
-      const exeBase = exePath
-        ? exePath.split(/[\\/]/).pop()!.replace(/\.exe$/i, '').trim()
-        : base
-      bindWindow(hwnd, pid, exeBase || undefined, name)
+      bindWindow(hwnd, pid, name)
       await activateObservedWindow(hwnd, pid, signal)
       await prepareWindowsTarget(signal)
     }

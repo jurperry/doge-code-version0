@@ -131,7 +131,6 @@ function standardInput(): WindowFrameworkInfo {
 export function classifyWindowClasses(
   topClass: string,
   childClasses: readonly string[],
-  executableBase?: string,
 ): WindowFrameworkInfo {
   const all = [topClass, ...childClasses]
   const topLower = topClass.toLowerCase()
@@ -156,11 +155,6 @@ export function classifyWindowClasses(
   // a WindowsForms10.* child can also appear in native hosts, so keep the
   // existing top-level-only rule.
   if (topLower.startsWith('windowsforms10.')) return realInput('winforms', topClass)
-
-  // The PopCap game uses a generic Win32 class but samples foreground input.
-  if (topLower === 'mainwindow' && /^plantsvszombies(?:food)?$/i.test(executableBase ?? '')) {
-    return realInput('self-drawn', topClass)
-  }
 
   for (const cls of all) {
     const lower = cls.toLowerCase()

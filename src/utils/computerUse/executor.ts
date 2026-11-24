@@ -420,7 +420,9 @@ export function createCliExecutor(opts: {
           if (p.mouseUp) return p.mouseUp(lastMouseX, lastMouseY)
           throw new Error('Mouse-up is not supported on this platform')
         }
-        return p.click(lastMouseX, lastMouseY, btn, count ?? 1)
+        // On Windows the plain click takes the direct path below. This wrapper
+        // is used for the click inside withModifiers.
+        return p.click(lastMouseX, lastMouseY, btn, count ?? 1, true)
       },
       mouseScroll: (amount: number, dir: 'vertical' | 'horizontal') => p.scroll(amount, dir, lastMouseX, lastMouseY),
       typeText: (text: string) => p.typeText(text),

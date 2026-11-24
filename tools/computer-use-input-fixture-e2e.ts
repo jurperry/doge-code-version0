@@ -169,7 +169,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile the elevated input fixture' 
   const runPowerShell = ELEVATED ? runComputerUsePowerShell : runLocalPowerShell
   const { createCliExecutor } = await import('../src/utils/computerUse/executor.js')
   const hwnd = Number(readFileSync(HWND_FILE, 'utf8').trim())
-  bindWindow(hwnd, fixturePid, undefined, 'fixture.app')
+  bindWindow(hwnd, fixturePid, 'fixture.app')
   unbind = unbindWindow
   if (ELEVATED) await prepareWindowsTarget()
   const executor = createCliExecutor({
@@ -532,7 +532,7 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
     && events().some(e => e.kind === 'keyup' && e.detail === 'key=ControlKey;ctrl=False')
     && batch.content.some(item => item.type === 'image'), JSON.stringify({ text: batchChars, events: events(), result: batch.content[0] }))
 
-  bindWindow(hwnd, fixturePid, undefined, 'fixture.app')
+  bindWindow(hwnd, fixturePid, 'fixture.app')
   const previousBinding = getBoundHwnd()
   if (ELEVATED) {
     const secondaryPath = join(TMP_DIR, 'fixture.exe').replace(/'/g, "''")

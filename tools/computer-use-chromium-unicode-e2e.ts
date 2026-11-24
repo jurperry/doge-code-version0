@@ -83,7 +83,7 @@ try {
     hwnd = Number(runPowerShellSync(`(Get-Process -Id ${proc.pid}).MainWindowHandle`))
   }
   if (!hwnd) throw new Error('Chromium fixture window not found')
-  bindWindow(hwnd, proc.pid, undefined, 'fixture.app')
+  bindWindow(hwnd, proc.pid, 'fixture.app')
   check('fixture uses the Chromium input channel', getBoundInputChannel().chromium)
   const executor = createCliExecutor({ getMouseAnimationEnabled: () => false, getHideBeforeActionEnabled: () => false })
 

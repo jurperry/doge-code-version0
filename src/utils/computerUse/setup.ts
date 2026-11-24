@@ -35,7 +35,7 @@ Choose the coordinate space before acting:
 Guidance:
 - Use zoom to magnify a region when text is small or you need exact coordinates; it returns the cropped region at full resolution.
 - Use computer_batch to replay several already-verified steps in a single call.
-- On Windows, use left_click with screenshot: true for a click whose result determines the next step. For known multi-action sequences, end computer_batch with screenshot. Read the returned image before calling another screenshot or probing the cursor.
+- On Windows, use left_click with screenshot: true for a click whose result determines the next step. For known multi-action sequences, end computer_batch with screenshot. A background window message can reach a bound window while the physical cursor stays elsewhere. Use the returned image and foreground state to verify the effect.
 - For Windows window controls, click a visible minimize button or other caption control using the current image. If you inspected it with zoom, translate the position back to the full image. A left_click with screenshot: true reports minimized=true if the window minimized, so stop there when that was the goal.
 - A bound window can go into the background while you are thinking. When the tool reports foreground=false for a window that needs foreground input, and the user wants you to resume there, call activate_window with the reported hwnd and screenshot: true. Use the returned image for the next action.
 - Do not guess coordinates: re-screenshot or zoom instead. If a click misses, zoom into the target and correct the coordinates before retrying.

@@ -127,7 +127,7 @@ try {
       emuWin.hwnd > 0,
       `hwnd=${emuWin.hwnd} pid=${emuWin.pid} title="${emuWin.title.slice(0, 50)}"`,
     )
-    bindWindow(emuWin.hwnd, emuWin.pid, 'qemu-system-x86_64')
+    bindWindow(emuWin.hwnd, emuWin.pid)
 
     // ── 2. 框架分类：Qt → selfDrawn → 真实输入通道 ────────────────────
     const channel = getBoundInputChannel()

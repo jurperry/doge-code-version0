@@ -113,7 +113,7 @@ describe('Windows capture revisions', () => {
       return { base64: 'capture', width: 100, height: 100, displayId, captureMode: 'full_display' }
     }
     try {
-      bindWindow(1, process.pid, undefined, 'fixture')
+      bindWindow(1, process.pid, 'fixture')
       await expect(captureScreenForApi()).rejects.toThrow('the window did not render')
       expect(getBoundHwnd()).toBe(1)
       const shot = await captureScreenForApi(undefined, true)
