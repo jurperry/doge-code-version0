@@ -23,7 +23,7 @@ Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWM
 
 **申请与 tier**：模型先调 `request_access({ apps, reason, clipboardRead?, clipboardWrite?, systemKeyCombos? })`，授权仅本会话有效。tier：`read`（截图/定位）< `click`（+普通左键/滚动）< `full`（+键盘/右键/中键/修饰点击/拖放），未按住的 `mouse_move` 属定位；敏感只读应用（浏览器）倾向 `read`，终端/IDE 倾向 `click`。拒绝语义 `denied/policyDenied/userDenied/tierGuidance`，拒绝后不要重复弹框；未接 `onPermissionRequest`（默认 headless）返回 `feature_unavailable`；Auto/bypass 自动放行仍保留 macOS TCC；后台 AgentTool 子代理不能直接用 CU。
 
-**目标身份**：Windows 不凭标题授权——候选窗口须匹配目标进程，输入前查 HWND 当前 PID，SendMessage/PrintWindow 前复核 expected PID，HWND 复用后旧授权失效；完整 exe 路径绑定必须经 `open_application`。窗口枚举、显示器、前台和命中查询通过 Bun FFI 调用 Win32。全局鼠标用 per-monitor-v2 的 `WindowFromPoint`，键盘用前台目标，命中失败或目标为空时拒绝派发；allow/deny 用同一身份集合、deny 优先、未知前台 fail-closed。可信宿主仅当内嵌内容存在真实父/根窗口关系且宿主在进程祖先链（≤32 层、父创建不晚于子），窗口 owner 不是安全边界。
+**目标身份**：Windows 不凭标题授权——候选窗口须匹配目标进程，输入前查 HWND 当前 PID，SendMessage/PrintWindow 前复核 expected PID，HWND 复用后旧授权失效；完整 exe 路径绑定必须经 `open_application`。窗口枚举、显示器、前台、命中、进程 PID/映像路径/完整性 RID、窗口几何/类名/最小化状态等高频查询通过 Bun FFI 直调 Win32（`src/utils/computerUse/win32/nativeWindows.ts`），不再为每次查询启动 PowerShell 子进程。全局鼠标用 per-monitor-v2 的 `WindowFromPoint`，键盘用前台目标，命中失败或目标为空时拒绝派发；allow/deny 用同一身份集合、deny 优先、未知前台 fail-closed。可信宿主仅当内嵌内容存在真实父/根窗口关系且宿主在进程祖先链（≤32 层、父创建不晚于子），窗口 owner 不是安全边界。
 
 **UAC 与管理员助手**：授权 ≠ 提权，UAC 提权不提升 tier。普通目标用普通 PowerShell；High 目标且本地更低才请求管理员 PowerShell 助手（命名管道 + 属主校验），普通目标切回本地。默认仍在每个 CLI 会话首次需要时通过 `RunAs` 单次提权；App「设置 → MCP → Computer Use」的**永久授权**则由用户显式完成一次 UAC，注册当前用户 + 当前 `CLAUDE_CONFIG_DIR` 专属的最高权限交互式计划任务。之后 CLI 按需启动并重连永久代理，不再重复弹 UAC；代理闲置 15 分钟退出，授权仍保留，CLI 会话结束只断开、不停止永久代理。永久通道以当前 Windows 用户为信任边界，命名管道 ACL 不允许其他用户使用，但同一账户下的软件也在该信任域内。每个动作进入带 `KILL_ON_JOB_CLOSE` 的 Job Object，代理正常取消或被强杀都会终止动作进程树。撤销需再次 UAC，并在确认代理不可连接后删除任务与持久化脚本。标准账户不能永久化管理员能力，仍走单次 UAC 凭据流程。UAC 安全桌面由用户处理：检测到即暂停并等 30 秒（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报；提示后必须重新截图。完整性 RID 读令牌 SID；System/安全桌面/应用反作弊不属于绕过目标。
 
@@ -31,13 +31,15 @@ Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWM
 
 **剪贴板与锁**：清空剪贴板前必须能保存原文，stash 存 AppState、回合结束恢复成功后才清；多行粘贴为「保存→写入→精确读回→Ctrl+V→恢复」。同一 `CLAUDE_CONFIG_DIR` 同时只允许一个 CU 会话持锁（`~/.doge/computer-use.lock`）。
 
+**绑定可视指示**：Windows 绑定窗口用 DWM 原生边框染色标记（`src/utils/computerUse/win32/windowBorder.ts`，`DwmSetWindowAttribute` + `DWMWA_BORDER_COLOR=34`，Windows 11 22000+）：绑定时 `markBound` 画绿色边框，解绑时 `unmarkBound` 恢复默认，让用户一眼识别哪个窗口正被 CU 控制。边框只是可视提示，不参与授权或身份判定。
+
 ## 3. 目标解析与坐标映射
 
-**双坐标空间**：全屏模式 origin 来自 `Screen.Bounds.Left/Top`（支持副屏负坐标），`switch_display("auto")` 显式解绑并回全局输入；绑定窗口 origin=(0,0)、窗口局部坐标，真实输入只在原生边界加一次 `GetWindowRect` 偏移；绑定截图失败不得回退全屏按窗口坐标点击。切换/解绑让旧截图失效，活动输入未结束时换目标返回 `state_conflict`。
+**双坐标空间**：全屏模式 origin 来自 `Screen.Bounds.Left/Top`（支持副屏负坐标），`switch_display("auto")` 显式解绑并回全局输入；绑定窗口 origin=(0,0)、窗口局部坐标，真实输入只在原生边界加一次 `GetWindowRect` 偏移。绑定截图失败时先 `unbindWindow('capture_unavailable')` 解绑，再回退目标显示器的全屏图（`captureScreenForApi` 的 `allowDisplayFallback`，仅 Windows 开启），结果附带显式 "Binding released" 提示与新的 display 坐标空间；禁止坐标空间已切换却仍按旧窗口坐标点击。切换/解绑让旧截图失效，活动输入未结束时换目标返回 `state_conflict`。
 
 **截图与缩放**：截图按 API 目标尺寸算法预缩放（`imageResize.ts`：28px/token、长边 ≤1568、token ≤1568、保持宽高比）。`pixels` 模式用**截图当时**的几何换算：`屏幕 x = round(图像 x × displayWidth / 图像 width) + originX`，y 同理（`toolCalls.ts` `scaleCoord`）；无截图冷启动退化 `scaleFactor` 并告警。捕获/命中/输入统一 Per-Monitor-V2 物理像素；已验证 DPI-unaware 窗口按显示器 DPI 归一化画布，其他不盲目裁剪。`zoom` 仅放大上一张完整截图区域，后续点击仍用完整截图坐标；空图/零尺寸/非法原点/连续异常 → `capture_failed`，`save_to_disk:true` 才落盘且失败不更新锚点。
 
-**代际与一致性**：窗口/元素绑定有单调 `boundRevision`（`src/utils/computerUse/platforms/win32.ts`），输入与 zoom 执行前比较 revision，截图记录捕获前 revision 并在返回前复核；迟到旧图不得覆盖新锚点。绑定后若有**绑定之后新启动**的进程接管前台，旧绑定自动解除；已有进程的普通前台切换不误判。`consent.exe`、本工具管理员助手 broker、CU 自身进程属于工具自己的提权/控制流程，不算“新应用接管”，不能因此解除绑定。解绑会记录 `reason` 与前台身份；若本次截图在 capture 前后观察到解绑（包括此前动作已解绑、本次 `prepareForTarget("capture")` 内解绑），结果必须带明确的 “Binding released …” 提示：全屏图说明坐标空间已变为 display，窗口图说明绑定已释放且需重新截图，禁止静默改变坐标空间。诊断接口把**当前** `captureMode` 与 `lastScreenshot.captureMode/ageMs`、`lastBindingRelease` 分开返回，`lastScreenshot.ageMs` 与 `anchorAgeMs` 同源，避免把旧截图锚点误读成当前模式。
+**代际与一致性**：Windows 绑定持有单调递增的内部 `bindingRevision`（`src/utils/computerUse/platforms/win32.ts`，经 `getBoundRevision()` 导出）；每张截图记录捕获时的 `targetRevision`，输入与 zoom 执行前比较二者——Windows 上鼠标坐标若 `lastScreenshot.targetRevision !== getBoundRevision()`，`runInputActionGates` 直接返回 `state_conflict`（"Take a fresh Windows screenshot before using mouse coordinates."），迟到旧图不得覆盖新锚点。绑定后若有**绑定之后新启动**的进程接管前台，旧绑定自动解除；已有进程的普通前台切换不误判。`consent.exe`、本工具管理员助手 broker、CU 自身进程属于工具自己的提权/控制流程，不算“新应用接管”，不能因此解除绑定。解绑会记录 `reason` 与前台身份；若本次截图在 capture 前后观察到解绑（包括此前动作已解绑、本次 `prepareForTarget("capture")` 内解绑），结果必须带明确的 “Binding released …” 提示：全屏图说明坐标空间已变为 display，窗口图说明绑定已释放且需重新截图，禁止静默改变坐标空间。诊断接口把**当前** `captureMode` 与 `lastScreenshot.captureMode/ageMs`、`lastBindingRelease` 分开返回，`lastScreenshot.ageMs` 与 `anchorAgeMs` 同源，避免把旧截图锚点误读成当前模式。
 
 ## 4. 输入原语与批次约束
 
@@ -68,4 +70,4 @@ Windows 调用 `request_access` 后可用 `open_application` 绑定授权窗口�
 ## 7. 关键代码入口
 
 - 工具 schema/调度/门禁：`packages/@ant/computer-use-mcp/src/{tools,toolCalls,mcpServer}.ts`；绑定/锁：`src/utils/computerUse/{wrapper.tsx,hostAdapter.ts,computerUseLock.ts}`。
-- Windows 实现：`src/utils/computerUse/platforms/win32.ts` + `win32/`；统一入口 `src/utils/computerUse/executor.ts`；注册/开关/hint：`src/utils/computerUse/{setup.ts,gates.ts}`、`src/main.tsx`。
+- Windows 实现：`src/utils/computerUse/platforms/win32.ts` + `win32/`（其中 `nativeWindows.ts` 为 Bun FFI 高频查询层，`windowBorder.ts` 为 DWM 绑定边框）；统一入口 `src/utils/computerUse/executor.ts`；注册/开关/hint：`src/utils/computerUse/{setup.ts,gates.ts}`、`src/main.tsx`。
