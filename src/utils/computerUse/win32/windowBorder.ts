@@ -1,73 +1,74 @@
-/**
- * Visual indicator for bound windows — DWM native border color.
- *
- * Uses DWMWA_BORDER_COLOR (attribute 34) on Windows 11+.
- * The border:
- * - Follows window rounded corners natively
- * - Tracks window movement/resize automatically (OS-level rendering)
- * - Persists across repaints
- * - Zero performance overhead
- * - Falls back to no-op on older Windows or Electron-style frameless windows
- */
+import { renameSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { getSessionId } from '../../../bootstrap/state.js'
+import { getClaudeConfigHomeDir } from '../../envUtils.js'
+import { isLockHeldLocally } from '../computerUseLock.js'
+import { isWindowForeground, setNativeWindowBorder, visibleWindowFrame, windowProcessId } from './nativeWindows.js'
 
-import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
+const SAMPLE_INTERVAL_MS = 80
+const GREEN = 0x0000c800 // COLORREF 0x00BBGGRR
+const SYSTEM_BORDER_COLOR = 0xffffffff
+const BINDING_FILE = 'computer-use-binding.json'
 
-function ps(script: string): string {
-  return runPowerShellSync(script, 5000)
-}
+type Target = { hwnd: number; pid: number }
+type IndicatorBounds = ReturnType<typeof visibleWindowFrame>
 
-const DWM_TYPES = `
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
+let target: Target | undefined
+let timer: ReturnType<typeof setInterval> | undefined
+let lastPayload: string | undefined
 
-public class CuDwm {
-    [DllImport("dwmapi.dll")]
-    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref uint val, int size);
-
-    // DWMWA_BORDER_COLOR = 34 (Win11 22000+)
-    // COLORREF format: 0x00BBGGRR
-    public static int SetBorderColor(IntPtr hwnd, byte r, byte g, byte b) {
-        uint color = (uint)((b << 16) | (g << 8) | r);
-        return DwmSetWindowAttribute(hwnd, 34, ref color, 4);
-    }
-
-    public static int ResetBorder(IntPtr hwnd) {
-        uint def = 0xFFFFFFFF; // DWMWA_COLOR_DEFAULT
-        return DwmSetWindowAttribute(hwnd, 34, ref def, 4);
-    }
-}
-'@
-`
-
-/**
- * Set green border on bound window via DWM.
- * Automatic: follows rounded corners, window movement, resize.
- */
-function tryBorder(command: () => string): boolean {
+function publish(bounds: IndicatorBounds): void {
+  const payload = JSON.stringify({ sessionId: getSessionId(), pid: process.pid, bounds })
+  if (payload === lastPayload) return
+  const file = join(getClaudeConfigHomeDir(), BINDING_FILE)
+  const staging = join(getClaudeConfigHomeDir(), BINDING_FILE + '.' + process.pid + '.tmp')
   try {
-    return command() === '0'
+    writeFileSync(staging, payload)
+    renameSync(staging, file)
+    lastPayload = payload
   } catch {
-    return false
+    try { rmSync(staging, { force: true }) } catch { /* best effort */ }
   }
 }
 
-export function markBound(hwnd: number): boolean {
-  return tryBorder(() => ps(`${DWM_TYPES}; [CuDwm]::SetBorderColor([IntPtr]${hwnd}, 0, 200, 0)`))
+function pollBounds(): void {
+  if (!target || !isLockHeldLocally()) return
+  try {
+    const { hwnd, pid } = target
+    const bounds = windowProcessId(hwnd) === pid && isWindowForeground(hwnd) ? visibleWindowFrame(hwnd) : null
+    publish(bounds)
+  } catch {
+    publish(null)
+  }
 }
 
-/**
- * Remove border, restore default.
- */
-export function unmarkBound(hwnd: number): boolean {
-  return tryBorder(() => ps(`${DWM_TYPES}; [CuDwm]::ResetBorder([IntPtr]${hwnd})`))
+export function showBoundWindowIndicator(hwnd: number, pid: number): void {
+  if (target?.hwnd === hwnd && target.pid === pid) return
+  hideBoundWindowIndicator()
+  target = { hwnd, pid }
+  if (process.env.DOGE_APP_COMPUTER_USE_BORDER === '1') {
+    if (!isLockHeldLocally()) {
+      target = undefined
+      return
+    }
+    pollBounds()
+    timer = setInterval(pollBounds, SAMPLE_INTERVAL_MS)
+    timer.unref()
+  } else {
+    try { if (windowProcessId(hwnd) === pid) setNativeWindowBorder(hwnd, GREEN) } catch { /* best effort */ }
+  }
 }
 
-/**
- * Set custom border color.
- */
-export function setBorderColor(hwnd: number, r: number, g: number, b: number): boolean {
-  return tryBorder(() => ps(`${DWM_TYPES}; [CuDwm]::SetBorderColor([IntPtr]${hwnd}, ${r}, ${g}, ${b})`))
+export function hideBoundWindowIndicator(): void {
+  if (!target) return
+  const { hwnd, pid } = target
+  target = undefined
+  if (timer) {
+    clearInterval(timer)
+    timer = undefined
+    if (isLockHeldLocally()) publish(null)
+    lastPayload = undefined
+  } else {
+    try { if (windowProcessId(hwnd) === pid) setNativeWindowBorder(hwnd, SYSTEM_BORDER_COLOR) } catch { /* best effort */ }
+  }
 }
-
-export const _test = { tryBorder }

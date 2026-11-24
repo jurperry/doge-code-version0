@@ -1363,6 +1363,46 @@ describe('request_access denial feedback', () => {
   })
 })
 
+describe('Windows click observation', () => {
+  test('reports focus loss before capture or input, then returns the next image or minimized status', async () => {
+    const frame = { ...shot(), captureMode: 'bound_window' as const, targetRevision: 3 }
+    const state = { hwnd: 20, minimized: false, foreground: false, requiresForeground: true }
+    let clicks = 0
+    let captures = 0
+    const adapter = makeAdapter({
+      capabilities: { platform: 'win32', screenshotFiltering: 'none' },
+      isWindowBound: () => true,
+      getBoundAppId: () => 'app.test',
+      getBoundRevision: () => 3,
+      getBoundWindowState: () => state,
+      click: async () => { if (++clicks === 2) state.minimized = true },
+      screenshot: async options => {
+        expect(options.observeBoundRevision).toBe(3)
+        expect(options.allowDisplayFallback).toBeFalse()
+        captures++
+        return frame
+      },
+    })
+    const options = makeOverrides({ lastScreenshot: frame, boundRevision: 3 })
+    const input = { coordinate: [20, 30], screenshot: true }
+    const rejected = await handleToolCall(adapter, 'left_click', input, options)
+    expect(rejected.isError).toBeTrue()
+    expect(JSON.stringify(rejected.content)).toContain('foreground=false')
+    expect(clicks).toBe(0)
+    expect(captures).toBe(0)
+    state.foreground = true
+    const observed = await handleToolCall(adapter, 'left_click', input, options)
+    expect(observed.screenshot).toEqual(frame)
+    expect(observed.content.some(item => item.type === 'image')).toBeTrue()
+    const minimized = await handleToolCall(adapter, 'left_click', input, options)
+    expect(minimized.isError).toBeUndefined()
+    expect(JSON.stringify(minimized.content)).toContain('minimized=true')
+    expect(minimized.screenshot).toBeUndefined()
+    expect(clicks).toBe(2)
+    expect(captures).toBe(1)
+  })
+})
+
 describe('Windows display and window coordinate spaces', () => {
   test('pixel input reuses capture geometry without a redundant display enumeration', async () => {
     let enumerations = 0

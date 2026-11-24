@@ -1,73 +1,98 @@
-# Computer Use：能力、调用流程与设计
+# Computer Use 能力与工具参考
 
-Computer Use（CU）是内置 MCP 工具组：在用户授权范围内截图、注入鼠标键盘、读写剪贴板、发现/绑定窗口。它不是「点击必生效」的黑盒，模型必须按 `截图 → 观察 → 操作 → 验证` 循环工作。门禁见 [DESIGN.md](DESIGN.md) §9，经验与坑见 [../development_logs.md](../development_logs.md)。
+Computer Use（CU）是内置 MCP 工具组。它可以在会话授权下截取画面、发送键鼠输入、读写文本剪贴板，也提供 Windows 窗口发现和诊断。工具结果会区分输入已派发、应用效果需观察、窗口状态已确认。
 
-## 1. 工具矩阵
+## 1. 平台与注册
 
-`packages/@ant/computer-use-mcp/src/tools.ts` 的 `buildComputerUseTools()` 注册 **Windows 27 / macOS 24 / Linux X11 18** 个工具。Windows 专属工具为 `list_windows`、`activate_window`、`get_window`。Teach 系列默认不注册（`caps.teachMode` 未启用）。
+`buildComputerUseTools()` 默认生成 **Windows 27 个、macOS 24 个、Linux X11 18 个工具**。下表按 Windows 的完整工具集编排，平台列标出注册范围。Teach 系列由 `teachMode` 能力开启，当前 CLI 未开启。
 
-| 类别 | 工具 | 用途 |
-|---|---|---|
-| 授权 | `request_access` / `list_granted_applications` | 申请应用/剪贴板/系统组合键；查询授权、flags、坐标模式 |
-| 屏幕 | `screenshot` / `zoom` | 当前目标 JPEG 与尺寸；放大上一张截图区域 |
-| 窗口(Win)/应用 | `list_windows`、`get_window`、`activate_window`、`open_application`、`switch_display` | 发现/诊断/前置授权窗口；绑定应用；退出绑定回全屏 |
-| 鼠标 | `left/right/middle_click`、`double/triple_click`、`mouse_move`、`left_click_drag`、`left_mouse_down/up`、`scroll`、`cursor_position` | 点击/移动/拖拽/分解释放/滚动；`cursor_position` 读实时光标（绑定窗口返回局部坐标） |
-| 键盘/剪贴板 | `type`、`key`、`hold_key`、`read_clipboard`、`write_clipboard` | 文本/组合键/按住；剪贴板需独立 flag |
-| 批次/等待 | `computer_batch` / `wait` | 顺序多动作与部分失败边界；有界等待 |
+`src/main.tsx` 在支持的平台交互会话注册工具。非交互会话需要 `DOGE_HEADLESS_BUILTIN_MCP=1`，桌面 App 的 Code 会话会设置该变量。`DOGE_COMPUTER_USE_MCP=0` 可关闭。内置服务通过 `mcp__computer-use__` 前缀发现工具，实际执行由 CLI 的进程内 `wrapper.tsx` 转派。
 
-注册条件（`src/main.tsx`）：平台为 macOS、Windows 或通过能力检测的 Linux X11，且为交互会话或设置了 `DOGE_HEADLESS_BUILTIN_MCP=1`。设置 `DOGE_COMPUTER_USE_MCP=0` 可关闭。`setup.ts` 注册进程内 MCP（`mcp__computer-use__*`），工具调用走进程内 dispatch（不经 stdio）。
+- **Windows** 支持绑定窗口和全显示器。全显示器截图可以包含未授权应用，输入仍要经过授权与命中检查。
+- **macOS** 的 24 个是注册契约。当前仓库使用 `shims/ant-computer-use-swift`，系统权限探测使用占位实现，实际键鼠和截图能力尚未恢复。
+- **Linux X11** 要求本地 `DISPLAY` Unix socket、原生 X11、XTEST、兼容 EWMH 的窗口管理器以及 PATH 中的 `xclip`。先由用户打开窗口并授权，再用 `open_application` 聚焦，随后单独截图。截图和输入会重验窗口的焦点、身份、几何与可见性。遮挡、形状不规则或越出屏幕的区域会导致捕获失败。Wayland 与 Xwayland 会被拒绝。
 
-Linux X11 在可连接 `DISPLAY` 对应的本机 Unix socket、有 XTEST 和 EWMH 窗口管理器，且 PATH 中有 `xclip` 时注册。X11 协议和 JPEG 编码运行在 Bun 内，无需 Python 或编译工具。先打开目标窗口，调用 `request_access` 授权，再使用 `open_application` 聚焦并截图。授权绑定已打开的窗口。焦点或窗口几何变化后重新截图。截图和 zoom 遇到遮挡、非矩形窗口或区域越出屏幕时返回错误。文本输入临时使用纯文本剪贴板，恢复前检查其中内容是否变化。剪贴板提供非纯文本格式时停止。Wayland/Xwayland、整屏、拖拽、持键、鼠标按下/抬起和批量操作不在这一版 Linux 支持范围内。
+## 2. 27 个工具
 
-## 2. 授权与安全模型
+参数以表中字段名为准。坐标工具的 `coordinate` 为 `[x, y]`，以最近一张原始截图为基准。默认坐标模式为 `pixels`，具体读法见第 4 节。
 
-**申请与 tier**：模型先调 `request_access({ apps, reason, clipboardRead?, clipboardWrite?, systemKeyCombos? })`，授权仅本会话有效。tier：`read`（截图/定位）< `click`（+普通左键/滚动）< `full`（+键盘/右键/中键/修饰点击/拖放），未按住的 `mouse_move` 属定位；敏感只读应用（浏览器）倾向 `read`，终端/IDE 倾向 `click`。拒绝语义 `denied/policyDenied/userDenied/tierGuidance`，拒绝后不要重复弹框；未接 `onPermissionRequest`（默认 headless）返回 `feature_unavailable`；Auto/bypass 自动放行仍保留 macOS TCC；后台 AgentTool 子代理不能直接用 CU。
+| 工具 | 必填参数 | 可选参数 | 功能与结果 | 平台 |
+| --- | --- | --- | --- | --- |
+| `request_access` | `apps`, `reason` | `clipboardRead`, `clipboardWrite`, `systemKeyCombos` | 为当前会话申请应用授权和独立权限。`apps` 为应用名称或标识的字符串数组，`reason` 为展示给用户的原因。Windows 也接受存在的绝对 `.exe` 路径。返回授权、拒绝及适用的权限提示，可追加申请其他应用。 | Windows、macOS、X11 |
+| `list_granted_applications` | — | Windows 的 `include_windows`, `include_desktop` | 查询会话内的应用授权、权限开关和坐标模式。`include_windows` 附带最多 40 个已授权 EXE 的可见、有标题窗口，含 `windowId`。`include_desktop` 附带显示器、捕获模式、截图基准年龄、解绑记录、CLI 完整性级别和限制。 | Windows、macOS、X11 |
+| `open_application` | `app` | Windows 的 `window_id`, `screenshot` | 打开已授权应用或将现有窗口置前。Windows 用 `window_id` 选定窗口时，`app` 须为该窗口对应的已授权 EXE 绝对路径。绑定窗口后默认尝试直接返回新图，`screenshot: false` 可跳过。X11 只聚焦已打开的授权窗口，随后单独调用 `screenshot`。 | Windows、macOS、X11 |
+| `list_windows` | — | `visible_only`, `granted_only`, `limit` | 枚举已授权 EXE 的窗口及其 `hwnd`、`windowId`、焦点和最小化状态等。默认只看可见窗口并最多返回 40 个，`limit` 接受 1–100。`granted_only: false` 额外返回 `ungrantedCount`，按完整枚举结果计算未匹配有效授权的数量。具体身份和标题仍受保护。 | Windows |
+| `get_window` | `hwnd` | — | 读取已授权窗口的 EXE、PID、标题、窗口类、焦点、最小化状态、DPI 感知、完整性级别及授权层级。需要点击坐标时以截图为准。 | Windows |
+| `activate_window` | `hwnd` | `screenshot` | 尝试把已授权窗口置前，必要时恢复最小化，返回 `activated`。仅当目标是当前绑定窗口时，`screenshot: true` 可在激活成功后尝试返回新图。需要换绑时使用 `open_application`。 | Windows |
+| `switch_display` | `display` | — | 使用截图提示中的显示器名称固定捕获目标，或传 `"auto"` 恢复自动选择。Windows 同时解除窗口绑定，进入全显示器捕获和全局输入模式。切换后单独截图建立新基准。 | Windows、macOS |
+| `screenshot` | — | `save_to_disk` | 返回 JPEG、图像尺寸和适用的捕获信息，成功结果可成为后续坐标基准。Windows 绑定图可附 `hwnd`、`foreground`、`minimized`。`save_to_disk: true` 另返回保存路径。 | Windows、macOS、X11 |
+| `zoom` | `region` | `save_to_disk` | 按最近原图的像素矩形 `[x0, y0, x1, y1]` 获取局部细节。传入四个整数，区域须在原图范围内。可保存 JPEG。后续输入继续使用原图坐标，局部图用于观察。 | Windows、macOS、X11 |
+| `left_click` | `coordinate` | `text`，Windows 的 `screenshot` | 单次左键点击，可通过 `text` 指定修饰键。Windows 已绑定窗口可用 `screenshot: true` 回传点击后截图，或在窗口最小化后直接回传 `minimized=true`。 | Windows、macOS、X11 |
+| `double_click` | `coordinate` | `text` | 在指定位置连续发出两次左击，应用决定双击效果。 | Windows、macOS、X11 |
+| `triple_click` | `coordinate` | `text` | 在指定位置连续发出三次左击，应用决定三击效果。 | Windows、macOS、X11 |
+| `right_click` | `coordinate` | `text` | 在指定位置点击右键，常用于打开上下文菜单，需要 `full`。 | Windows、macOS、X11 |
+| `middle_click` | `coordinate` | `text` | 在指定位置点击中键，需要 `full`。滚轮滚动使用 `scroll`。 | Windows、macOS、X11 |
+| `mouse_move` | `coordinate` | — | 移到指定位置以定位或触发悬停。Windows 客户区后台通道可只发送移动消息，实体鼠标保持原位。按住左键时，移动按拖动相关权限检查。 | Windows、macOS、X11 |
+| `left_click_drag` | `coordinate` | `start_coordinate` | 完成左键按下、移动到终点、释放整段手势。省略起点时，Windows 沿用工具最后设置的指针坐标，macOS 使用当前光标位置。落点需要 `full` 授权。 | Windows、macOS |
+| `left_mouse_down` | — | — | 在指针位置按住左键。Windows 派发使用工具最后设置的指针坐标，先用 `mouse_move` 定位，再与 `left_mouse_up` 配对。已经按住时返回状态冲突。 | Windows、macOS |
+| `left_mouse_up` | — | — | 释放左键。即使权限检查拒绝后续操作，也会尝试先释放鼠标按钮，避免留下持续按住的状态。 | Windows、macOS |
+| `scroll` | `coordinate`, `scroll_direction`, `scroll_amount` | — | 在指定位置向 `up`、`down`、`left` 或 `right` 滚动，请求量为 0–100 的整数。X11 单次实际输入最多 20 格。 | Windows、macOS、X11 |
+| `cursor_position` | — | — | 读取实体光标位置。有有效图像范围可换算时返回 `image_pixels`。没有截图或光标超出图像范围时返回 `logical_points`，Windows 绑定状态下底层读数以窗口左上角为原点。 | Windows、macOS、X11 |
+| `type` | `text` | — | 向当前输入焦点键入文字，最多 100,000 个 UTF-16 代码单元，需 `full`。支持换行和 Tab。满足剪贴板授权和配置时，多行文本可整段粘贴。 | Windows、macOS、X11 |
+| `key` | `text` | `repeat` | 发送单键或用 `+` 相连的组合键，如 `Return` 或 Windows 的 `Ctrl+A`。需 `full`，重复次数为 1–100，默认 1。受工具限制的系统级组合键另需 `systemKeyCombos`。 | Windows、macOS、X11 |
+| `hold_key` | `text`, `duration` | — | 按住单键或组合键 0–100 秒再释放，需 `full`。受工具限制的系统级组合键另需 `systemKeyCombos`。 | Windows、macOS |
+| `read_clipboard` | — | — | 读取文本剪贴板并返回 `{text}`，需 `clipboardRead`。应用处于 `click` 层级时，结果可能反映剪贴板保护逻辑清空后的状态。 | Windows、macOS、X11 |
+| `write_clipboard` | `text` | — | 写入文本剪贴板，需 `clipboardWrite`。剪贴板保护启用时，`click` 层级目标会触发拦截。显式写入会改变系统剪贴板。 | Windows、macOS、X11 |
+| `wait` | `duration` | — | 可取消地等待 0–100 秒。时间单位为秒，支持小数。等待结束后按任务需要观察界面。 | Windows、macOS、X11 |
+| `computer_batch` | `actions` | — | 在一次调用中顺序执行已知动作。预检失败时停止派发，运行时首错停止，返回已完成项、失败或取消的位置及已返回的图片。批次语义与限制见第 5 节。 | Windows、macOS |
 
-**目标身份**：Windows 不凭标题授权——候选窗口须匹配目标进程，输入前查 HWND 当前 PID，SendMessage/PrintWindow 前复核 expected PID，HWND 复用后旧授权失效；完整 exe 路径绑定必须经 `open_application`。窗口枚举、显示器、前台、命中、进程 PID/映像路径/完整性 RID、窗口几何/类名/最小化状态等高频查询通过 Bun FFI 直调 Win32（`src/utils/computerUse/win32/nativeWindows.ts`），不再为每次查询启动 PowerShell 子进程。全局鼠标用 per-monitor-v2 的 `WindowFromPoint`，键盘用前台目标，命中失败或目标为空时拒绝派发；allow/deny 用同一身份集合、deny 优先、未知前台 fail-closed。可信宿主仅当内嵌内容存在真实父/根窗口关系且宿主在进程祖先链（≤32 层、父创建不晚于子），窗口 owner 不是安全边界。
+五种点击工具的 `text` 用于 `shift`、`ctrl+shift` 等修饰键。带修饰键的点击需要 `full`，触发受限系统组合键时还需 `systemKeyCombos`。
 
-**UAC 与管理员助手**：授权 ≠ 提权，UAC 提权不提升 tier。普通目标用普通 PowerShell；High 目标且本地更低才请求管理员 PowerShell 助手（命名管道 + 属主校验），普通目标切回本地。默认仍在每个 CLI 会话首次需要时通过 `RunAs` 单次提权；App「设置 → MCP → Computer Use」的**永久授权**则由用户显式完成一次 UAC，注册当前用户 + 当前 `CLAUDE_CONFIG_DIR` 专属的最高权限交互式计划任务。之后 CLI 按需启动并重连永久代理，不再重复弹 UAC；代理闲置 15 分钟退出，授权仍保留，CLI 会话结束只断开、不停止永久代理。永久通道以当前 Windows 用户为信任边界，命名管道 ACL 不允许其他用户使用，但同一账户下的软件也在该信任域内。每个动作进入带 `KILL_ON_JOB_CLOSE` 的 Job Object，代理正常取消或被强杀都会终止动作进程树。撤销需再次 UAC，并在确认代理不可连接后删除任务与持久化脚本。标准账户不能永久化管理员能力，仍走单次 UAC 凭据流程。UAC 安全桌面由用户处理：检测到即暂停并等 30 秒（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报；提示后必须重新截图。完整性 RID 读令牌 SID；System/安全桌面/应用反作弊不属于绕过目标。
+Windows 操作单个窗口时，先调用 `request_access`，再用 `open_application` 的首张图定位。页面在点击后会改变时，可调用 `left_click({ coordinate, screenshot: true })` 观察下一步。需要最小化时，点击截图上可见的标题栏最小化按钮，根据 `minimized=true` 收尾。受支持的 Word 或 Excel 文件名可触发专用 COM 路径，此类文件绑定和 HWND 窗口绑定分别处理。
 
-**macOS TCC（恢复缺口）**：TCC 检查 Accessibility + Screen Recording，失败转 TCC 面板并返回 `tcc_not_granted`；但本树 `@ant/computer-use-swift` 解析到 `shims/ant-computer-use-swift`（空白 JPEG、TCC 恒 false），因此 macOS CU 不可用、实机未验证。
+## 3. 授权、焦点与安全
 
-**剪贴板与锁**：清空剪贴板前必须能保存原文，stash 存 AppState、回合结束恢复成功后才清；多行粘贴为「保存→写入→精确读回→Ctrl+V→恢复」。同一 `CLAUDE_CONFIG_DIR` 同时只允许一个 CU 会话持锁（`~/.doge/computer-use.lock`）。
+- **会话授权**。`request_access` 从已解析应用中请求授权，并独立请求剪贴板读写和系统级快捷键。在有用户确认界面的会话中，授权可按应用选择。当前权限模式允许自动授权时，CLI 可跳过确认。缺少必要的确认界面时返回 `feature_unavailable`。用户拒绝后应换用其他合适方式。授权保存在当前会话，授权查询自身也能返回空列表。
+- **授权层级**。`read` 可截图和移动指针定位。`click` 允许普通左键和滚动。`full` 增加键盘、右键、中键、修饰点击和拖拽。浏览器等敏感类别或终端与 IDE 可能按策略获得较低层级。剪贴板和系统级组合键权限分别检查。
+- **Windows 目标身份**。绑定、捕获和输入按窗口句柄与进程身份复核。窗口发现接口依据已授权的 EXE 路径筛选，标题用于辅助识别。全局鼠标检查命中窗口，键盘检查前台窗口。显式拒绝优先。高频窗口、显示器、命中、PID、完整性和几何查询经 Bun FFI 调 Win32。可信宿主还需满足窗口父子关系和进程祖先校验。
+- **Windows 输入通道**。普通 Win32 客户区支持后台 HWND 消息。原生标题栏、双击和三击、自绘应用及需要真实焦点的输入走前台通道。已识别的框架包括 Chromium、WPF、WinUI、WinForms、JavaFX、Flutter、Unreal、Tk、Qt、SDL 等。使用通用 `MainWindow` 类名的植物大战僵尸窗口还会按实际进程名识别。真实鼠标输入前复查焦点与点击命中，失焦后须显式恢复前台。
+- **Windows UAC**。应用授权和进程完整性单独检查。需要更高完整性时使用管理员助手，用户在 Windows 安全桌面亲自确认。等待超过 30 秒会中止当前回合。提示结束后应先取得新截图，再继续输入。App 的永久授权通过用户确认 UAC 后注册当前用户、当前配置目录专用的最高权限任务。后续会话可按需连接助手，助手空闲 15 分钟退出。撤销永久授权需要再次确认 UAC。标准账户保留单次凭据流程。管理员助手的命名管道以当前用户为信任边界，动作子进程随 Job Object 清理。
+- **剪贴板保护**。保护机制启用时，进入 `click` 层级会先保存原文本，再尝试清空。离开该层级或回合清理时尝试恢复，成功后清除存档。Windows 非粘贴路径按文本片段发送 Unicode，换行与 Tab 用单独键事件。X11 文本输入使用临时纯文本剪贴板，并在恢复前检查内容是否变化，遇到非纯文本剪贴板内容时停止。
+- **锁与桌面提示**。同一 `CLAUDE_CONFIG_DIR` 同时只允许一个 CU 会话持有 `computer-use.lock`。`request_access` 与 `list_granted_applications` 只检查锁。Windows App 据锁和同一会话的 `computer-use-binding.json` 显示提示与绿色描边。失焦、最小化、解绑或回合结束时撤下绿框。独立 Windows CLI 尝试使用 DWM 原生染色。CLI 主会话负责调用，后台子代理的直接调用会被拒绝。
 
-**绑定可视指示**：Windows 绑定窗口用 DWM 原生边框染色标记（`src/utils/computerUse/win32/windowBorder.ts`，`DwmSetWindowAttribute` + `DWMWA_BORDER_COLOR=34`，Windows 11 22000+）：绑定时 `markBound` 画绿色边框，解绑时 `unmarkBound` 恢复默认，让用户一眼识别哪个窗口正被 CU 控制。边框只是可视提示，不参与授权或身份判定。
+## 4. 捕获范围与坐标
 
-## 3. 目标解析与坐标映射
+- **窗口和显示器**。Windows 绑定截图从窗口左上角计坐标。全显示器截图从图像左上角计坐标，映射时考虑显示器在虚拟桌面上的位置，包括副屏负坐标。常规 Windows 截图在绑定捕获失败并完成必要清理后可解绑、返回目标显示器图像，并附 `Binding released` 提示。这张图使用新的坐标空间。
+- **坐标换算**。`pixels` 模式直接读取返回图的像素坐标。执行器按捕获时的原始宽高和 JPEG 宽高换算，并在适用时加显示器原点。Windows 在真实窗口输入处另应用窗口位置。`normalized_0_100` 按注册时确定的百分制坐标契约解释输入。X11 固定使用像素。Windows 物理坐标查询、捕获与输入使用 Per-Monitor-V2，部分 DPI-unaware 窗口的图像在捕获阶段归一化。
+- **缩放**。原图预缩放保持宽高比，长边至多 1568 像素，按 28 像素方块计算的图像 token 预算至多 1568。`zoom` 根据原图上的区域补抓局部细节，原图仍是坐标基准。保存失败的截图结果不会更新基准。
+- **目标一致性**。Windows 坐标输入要求最近截图的目标代际与当前绑定一致。主动切换目标会使旧坐标失效。原有进程切到前台时通常保留绑定，需真实输入的工具会报告失焦。绑定之后新启动的其他进程接管前台时可自动解绑。UAC 确认窗口、管理员助手和当前 CLI 本身会从这类接管判定中排除。诊断结果分别报告当前捕获模式、上次截图和上次解绑。
 
-**双坐标空间**：全屏模式 origin 来自 `Screen.Bounds.Left/Top`（支持副屏负坐标），`switch_display("auto")` 显式解绑并回全局输入；绑定窗口 origin=(0,0)、窗口局部坐标，真实输入只在原生边界加一次 `GetWindowRect` 偏移。绑定截图失败时先 `unbindWindow('capture_unavailable')` 解绑，再回退目标显示器的全屏图（`captureScreenForApi` 的 `allowDisplayFallback`，仅 Windows 开启），结果附带显式 "Binding released" 提示与新的 display 坐标空间；禁止坐标空间已切换却仍按旧窗口坐标点击。切换/解绑让旧截图失效，活动输入未结束时换目标返回 `state_conflict`。
+## 5. 批次、恢复与停止
 
-**截图与缩放**：截图按 API 目标尺寸算法预缩放（`imageResize.ts`：28px/token、长边 ≤1568、token ≤1568、保持宽高比）。`pixels` 模式用**截图当时**的几何换算：`屏幕 x = round(图像 x × displayWidth / 图像 width) + originX`，y 同理（`toolCalls.ts` `scaleCoord`）；无截图冷启动退化 `scaleFactor` 并告警。捕获/命中/输入统一 Per-Monitor-V2 物理像素；已验证 DPI-unaware 窗口按显示器 DPI 归一化画布，其他不盲目裁剪。`zoom` 仅放大上一张完整截图区域，后续点击仍用完整截图坐标；空图/零尺寸/非法原点/连续异常 → `capture_failed`，`save_to_disk:true` 才落盘且失败不更新锚点。
+`computer_batch` 接受下列 16 种动作。每项用 `action` 指定工具名，其他字段沿用对应动作的参数。
 
-**代际与一致性**：Windows 绑定持有单调递增的内部 `bindingRevision`（`src/utils/computerUse/platforms/win32.ts`，经 `getBoundRevision()` 导出）；每张截图记录捕获时的 `targetRevision`，输入与 zoom 执行前比较二者——Windows 上鼠标坐标若 `lastScreenshot.targetRevision !== getBoundRevision()`，`runInputActionGates` 直接返回 `state_conflict`（"Take a fresh Windows screenshot before using mouse coordinates."），迟到旧图不得覆盖新锚点。绑定后若有**绑定之后新启动**的进程接管前台，旧绑定自动解除；已有进程的普通前台切换不误判。`consent.exe`、本工具管理员助手 broker、CU 自身进程属于工具自己的提权/控制流程，不算“新应用接管”，不能因此解除绑定。解绑会记录 `reason` 与前台身份；若本次截图在 capture 前后观察到解绑（包括此前动作已解绑、本次 `prepareForTarget("capture")` 内解绑），结果必须带明确的 “Binding released …” 提示：全屏图说明坐标空间已变为 display，窗口图说明绑定已释放且需重新截图，禁止静默改变坐标空间。诊断接口把**当前** `captureMode` 与 `lastScreenshot.captureMode/ageMs`、`lastBindingRelease` 分开返回，`lastScreenshot.ageMs` 与 `anchorAgeMs` 同源，避免把旧截图锚点误读成当前模式。
+```text
+key, type, mouse_move, left_click, left_click_drag, right_click, middle_click,
+double_click, triple_click, scroll, hold_key, screenshot, cursor_position,
+left_mouse_down, left_mouse_up, wait
+```
 
-## 4. 输入原语与批次约束
+- 每批 1–100 个动作，最多 4 张截图，返回图片的解码后总量上限为 20 MiB。首个副作用前检查动作参数、受限快捷键授权、可校验键名和所要求的保存能力。运行中逐项检查目标、权限和命中，首错停止。
+- 批次内的输入都基于批次开始前的截图，逐次点击的像素比对在批次内关闭，目标、权限与命中检查仍逐项执行。批次内通过独立的 `screenshot` 动作取图。Windows 成功执行到最后一项 `screenshot` 时，那张图可成为下次调用的坐标基准。
+- 成功时返回 `completed[]` 和图片。运行时失败以 `isError: true` 返回 `completed[]`、`failed`、`remaining`、`recovery`，先前图片保留为与文本并列的内容块。批次运行中若在下一动作派发前捕获到取消，则返回 `aborted`。动作执行中发生错误时，部分输入可能已经发生。
+- 在 Windows 绑定模式下，可用 `left_click` 的 `screenshot: true` 观察单步结果。恢复焦点时可用 `activate_window` 的同名参数一次取得新图。后续观察只捕获原绑定，保留窗口位置。点击已经派发但捕获失败时，结果仍会说明派发情况，先观察当前界面再决定是否补做。
+- MCP 默认空闲超时 120 秒、总超时 600 秒。环境变量 `MCP_TOOL_IDLE_TIMEOUT` 与 `MCP_TOOL_TIMEOUT` 用毫秒覆盖。发生超时或部分失败时应先核实已产生的效果。
+- Windows 的原生 Esc hook 取消本回合的 Computer Use。派发退出后清理输入、截图基准与会话锁，本回合其余回复可继续生成，新用户消息可再次使用 CU。工具自己发送的 Esc 走单次抑制记录。hook 不可用时，可通过会话的中断入口停止。
 
-**Windows 两条通道**：① HWND 后台 SendMessage（普通 Win32 控件：单击/普通单键/窗口滚动/拖拽，不要求前台，用 `GetWindowRect + ClientToScreen` 修边框并检查传输结果与 expected PID；Chromium/自绘程序会忽略）；② 真实前台输入（`SetCursorPos + mouse_event/keybd_event`：bound HWND 直接文本、自绘窗口、WinForms 点击与组合键、需要焦点控件的 Return/Tab、双击/三击、修饰键与滚轮）。失败不盲目换通道；组合键顺序为修饰键 down → 主键 down/up → 修饰键逆序 up。
+## 6. 代码与验证入口
 
-**框架分类**：绑定后按顶层+子窗口类名一次分类，决定鼠标/键盘通道。Chromium（Electron/CEF/WebView2）、WPF（`HwndWrapper[...]`，AnyCast 等）、WinUI 3/UWP（`WinUIDesktopWin32WindowClass` / `ApplicationFrameWindow` / `Windows.UI.Core.CoreWindow`）、WinForms、JavaFX（`GlassWndClass-*`）、Flutter（`FLUTTERVIEW`）、Unreal（`UnrealWindow`）、Tk 与 Qt/SDL/GLFW/Unity/AWT 走真实输入；未知框架保持 SendMessage，不凭猜测抢前台。WinForms 的单击/拖拽/滚动/键盘统一走真实输入，避免同一窗口内通道不一致。
+| 路径 | 用途 |
+| --- | --- |
+| [tools.ts](../packages/@ant/computer-use-mcp/src/tools.ts) 和 [toolContract.test.ts](../packages/@ant/computer-use-mcp/src/toolContract.test.ts) | 平台工具注册、参数契约、批次动作及限制 |
+| [toolCalls.ts](../packages/@ant/computer-use-mcp/src/toolCalls.ts) 和 [mcpServer.ts](../packages/@ant/computer-use-mcp/src/mcpServer.ts) | 权限、参数解析、工具调度、批次结果与截图基准 |
+| [wrapper.tsx](../src/utils/computerUse/wrapper.tsx)、[executor.ts](../src/utils/computerUse/executor.ts) 和 [platforms/win32.ts](../src/utils/computerUse/platforms/win32.ts) | CLI 会话、取消与输入派发、Windows 绑定和捕获 |
+| [computer-use-input-fixture-e2e.ts](../tools/computer-use-input-fixture-e2e.ts)、[computer-use-wpf-fixture-e2e.ts](../tools/computer-use-wpf-fixture-e2e.ts) 和 [e2e-cu-input-guard.ts](../tools/e2e-cu-input-guard.ts) | 专用 Windows 窗口的输入效果、窗口绑定与目标校验 |
+| [check-computer-use-win32-performance.ts](../tools/check-computer-use-win32-performance.ts)、[computer-use-uac.test.ts](../tools/computer-use-uac.test.ts) 和 [computer-use-permanent-elevation-e2e.ts](../tools/computer-use-permanent-elevation-e2e.ts) | Windows 查询性能、UAC、管理员助手与永久授权 |
+| [computer-use-linux-x11-e2e.ts](../tools/computer-use-linux-x11-e2e.ts) | 可在 `xvfb-run -a sh -c 'openbox & bun tools/computer-use-linux-x11-e2e.ts'` 下验证 X11，另需 `xauth`、`xvfb`、`openbox` 和 `xdotool` |
 
-**Unicode 与点击**：`SendInput + KEYEVENTF_UNICODE`（40 字节 INPUT、UTF-16 code unit、覆盖代理对），文本先 UTF-8 base64 经 stdin 传入；事件数必须完整，部分成功报错并反向释放；`type` 非剪贴板路径把 LF/CRLF/CR 各派发一次 Return、Tab 派发真实键。双/三击同一脚本内完成；分解 mouse-down/up 记录实际通道。
-
-**computer_batch**：最多 100 动作、最多 4 张截图、图片 ≤20MiB、单次 `type` ≤100,000 UTF-16 code unit；首个副作用前统一校验参数/键名/组合键授权/截图能力；顺序执行、首错停止、每动作前复核身份/tier/命中。返回 `completed[]`/`failed{action,code,output}`/`remaining`/`recovery` 与图片；**顶层 `isError=true` 时仍保留结构化 JSON，图片作为顶层 sibling（不要塞进纯文本错误 tool_result）**；门禁取消返回 `aborted`（未派发），执行中途的输入取消按结果未知 `failed`。批次内输入始终使用调用前的截图。Windows 批次成功时，末尾的 `screenshot` 成为下一次调用的坐标基准。
-
-## 5. 模型使用流程
-
-Windows 调用 `request_access` 后可用 `open_application` 绑定授权窗口并直接得到首张截图。用 `computer_batch` 派发可预测的操作，并在末尾加 `screenshot` 查看结果。全屏模式可用 `switch_display("auto")` 后截图。模型主动截图时，PrintWindow 失败会在释放业务输入并解除绑定后返回目标所在显示器的全屏图，附带模式和新坐标范围。点击的独立像素校验保持当次绑定与坐标空间。权限不足时申请对应应用授权，坐标陈旧时重新截图，部分执行时根据画面只补缺失步骤。`Click dispatched` 表示输入已派发。
-
-超时/取消：默认 idle 120s、total 600s，`MCP_TOOL_TIMEOUT`/`MCP_TOOL_IDLE_TIMEOUT` 可覆盖；超时明确「结果未知，不要盲目重试副作用」。ESC hook 触发宿主 AbortController（失败提示 Ctrl+C），取消传播到权限对话框、批次动作之间、文本 run、最终输入前与截图写回前；同步原生调用不一定立即中断，统一超时是最后防线。
-
-**Windows Esc 生命周期**：桌面版按 Esc 取消本回合 Computer Use，清理输入、截图坐标和会话锁后继续生成。收到下一条用户消息后可重新使用。hook 位于 PowerShell helper（`WH_KEYBOARD_LL`），回调只入队，独立 sender 线程连接命名管道并重试；不在 hook 线程做阻塞 I/O，避免 `LowLevelHooksTimeout` 与 CLI 主线程同步 PowerShell 动作期间丢 Esc。不再用 `LLKHF_INJECTED` 全量过滤：IME/键盘映射/远程桌面合成的用户 Esc 也应生效；只有 CLI 模型自身的 `key("escape")` 由真实输入注入脚本在 `keybd_event` 前写入期望时间戳，sender 在 3s 内一次性消费并抑制（含 `shift+escape` 等 Escape 组合键）。握手在消息泵开始后才发出，避免 hook 已装但未泵消息的窗口。每次 CU 动作前 `ensureEscHotkey` 复查 helper 存活，死亡则重注册；PowerShell 使用绝对路径，握手 10s，helper 失败有 15s 退避。
-
-## 6. 测试与实机验证
-
-**不能只验证「有结果」**：`Clicked/Typed` 不等于应用生效；image block 不等于截图正确；`cursor_position` 只是冒烟（用独立 `GetCursorPos + GetWindowRect` 对照，绑定窗口验证局部坐标）；down/up 对数不代表双击/三击被识别；不能拿另一通道 happy path 当证明。只许专用测试应用或只读截图，不得复用用户已打开的应用、做系统级破坏或覆盖剪贴板；测试产物必须清理。
-
-可复用脚本（`tools/`）：`computer-use-e2e.ts`（只读）、`e2e-cu-input-guard.ts`（同名 exe/窗口绑定/真实点击）、`computer-use-input-fixture-e2e.ts`（WinForms fixture）、`computer-use-win32-unicode-e2e.ts`/`computer-use-chromium-unicode-e2e.ts`（Unicode 输入）、`computer-use-host-target-e2e.ts`、`computer-use-uac.test.ts`；package 内 `toolContract.test.ts` 校验字段契约。定向命令示例：`bun tools/check-computer-use-win32-performance.ts`（性能门禁）、`bun test tools/computer-use-uac.test.ts src/utils/computerUse/win32/{elevatedPowerShell,permanentElevation}.test.ts`（UAC/单次与永久管理员助手）。管理员场景用 `CU_FIXTURE_ELEVATED=1` 跑 input-fixture e2e；CLI `tools/computer-use-permanent-elevation-e2e.ts` 覆盖真实启用、管理员令牌、原进程首次重连、属主强杀取消、持续重连中的并发撤销与清理；App 侧 `tools/verify-computer-use-elevation-settings.mjs` 默认只测隔离状态，显式 `CU_PERMANENT_ELEVATION_E2E=1` 才执行真实启用/撤销（各需一次 UAC）。
-
-平台限制：Windows 走 `src/utils/computerUse/platforms/win32.ts`。高频查询走 Win32 FFI，PrintWindow、截图编码和部分输入仍走 PowerShell 与 Win32，混合 DPI 多屏仍需真实硬件；macOS 见 §2。Linux X11 验收可在隔离显示中运行 `xvfb-run -a sh -c 'openbox & bun tools/computer-use-linux-x11-e2e.ts'`，验收另需 `xauth xvfb openbox xdotool`。SendInput 全注入不等于业务完成；PrintWindow 返回 true 仍可能黑图；UAC/助手/自动解绑实机结果见 `../development_logs.md` §1。
-
-## 7. 关键代码入口
-
-- 工具 schema/调度/门禁：`packages/@ant/computer-use-mcp/src/{tools,toolCalls,mcpServer}.ts`；绑定/锁：`src/utils/computerUse/{wrapper.tsx,hostAdapter.ts,computerUseLock.ts}`。
-- Windows 实现：`src/utils/computerUse/platforms/win32.ts` + `win32/`（其中 `nativeWindows.ts` 为 Bun FFI 高频查询层，`windowBorder.ts` 为 DWM 绑定边框）；统一入口 `src/utils/computerUse/executor.ts`；注册/开关/hint：`src/utils/computerUse/{setup.ts,gates.ts}`、`src/main.tsx`。
+Windows 实机使用独立配置和专用测试窗口。验证应观察应用状态、真实焦点、输入效果或原生窗口状态。桌面 App 的 `verify-computer-use-bound-window.mjs` 另外覆盖首张绑定图、失焦拦截、显式激活、绿色描边和点击标题栏最小化。测试纪律和相关历史见 [DESIGN.md](DESIGN.md) 与 [development_logs.md](../development_logs.md)。

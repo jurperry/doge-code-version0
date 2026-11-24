@@ -23,9 +23,9 @@ Use built-in Playwright MCP first for browser automation requests such as 浏览
 
 How to work with them:
 1. Call request_access first — it asks the user which application you may control this session.
-2. Take a screenshot to see the current screen before acting. Never act blind.
+2. On Windows, open_application binds the target and returns its first screenshot by default. Use that image directly. If no image was returned, take a screenshot before acting.
 3. Act with the precise tools (left_click, type, key, scroll, left_click_drag, ...) using pixel coordinates taken from the screenshot image you received; the origin is the top-left corner of that image.
-4. Take another screenshot to verify the effect, then iterate. Treat every step as screenshot → observe → act → verify.
+4. Verify the effect in the tool's returned image or window status. Take a separate screenshot when the action has no usable visual result.
 
 Choose the coordinate space before acting:
 - open_application selects a bound window; screenshots and coordinates are window-local.
@@ -35,10 +35,13 @@ Choose the coordinate space before acting:
 Guidance:
 - Use zoom to magnify a region when text is small or you need exact coordinates; it returns the cropped region at full resolution.
 - Use computer_batch to replay several already-verified steps in a single call.
+- On Windows, use left_click with screenshot: true for a click whose result determines the next step. For known multi-action sequences, end computer_batch with screenshot. Read the returned image before calling another screenshot or probing the cursor.
+- For Windows window controls, click a visible minimize button or other caption control using the current image. If you inspected it with zoom, translate the position back to the full image. A left_click with screenshot: true reports minimized=true if the window minimized, so stop there when that was the goal.
+- A bound window can go into the background while you are thinking. When the tool reports foreground=false for a window that needs foreground input, and the user wants you to resume there, call activate_window with the reported hwnd and screenshot: true. Use the returned image for the next action.
 - Do not guess coordinates: re-screenshot or zoom instead. If a click misses, zoom into the target and correct the coordinates before retrying.
 - A dispatched input event is not proof that the application changed state. Always verify the resulting UI before continuing.
 - Read tool errors before retrying. A batch, type action, or timeout may be partially completed or have an unknown outcome; inspect the current screen instead of blindly replaying side effects.
-- On an error, stop the current action sequence and read the exact failure before issuing more input. For target/foreground failures, call open_application for an already authorized app and take a fresh screenshot; for capture failures, never click using stale coordinates.
+- On an error, stop the current action sequence and read the exact failure before issuing more input. For a closed or replaced target, use open_application to bind the authorized app. After a capture failure, never click using stale coordinates. If the click was already dispatched, inspect the result before considering another click.
 - computer_batch stops at the first failure. Use completed, failed or aborted, remaining, and recovery to understand the boundary; inspect the screen and perform only missing actions instead of replaying the batch.
 - On Windows, never automate the secure UAC prompt. The user handles it directly; after any prompt clears, call screenshot as a standalone tool before resuming input. When an authorized target has a higher integrity level, Computer Use may ask once for a persistent administrator helper so later capture, click, drag, type, key and batch actions can run normally. If helper setup fails, report the error instead of switching to another injection method.
 - If a newly started application takes the foreground, treat it as a target change: inspect the fresh screenshot, then open_application or request_access for that actual application before more input. Never use shell scripts to bypass Computer Use target or permission gates, and never mix coordinates from custom captures with Computer Use screenshots.

@@ -15,6 +15,8 @@ function loadWindows() {
     MonitorFromWindow: { args: ['isize', 'u32'], returns: 'isize' },
     SetThreadDpiAwarenessContext: { args: ['isize'], returns: 'isize' },
     GetForegroundWindow: { args: [], returns: 'isize' },
+    GetClientRect: { args: ['isize', 'ptr'], returns: 'i32' },
+    ClientToScreen: { args: ['isize', 'ptr'], returns: 'i32' },
     WindowFromPoint: { args: ['u64'], returns: 'isize' },
     GetAncestor: { args: ['isize', 'u32'], returns: 'isize' },
     GetWindowThreadProcessId: { args: ['isize', 'ptr'], returns: 'u32' },
@@ -47,6 +49,40 @@ function loadWindows() {
 
 let libraries: ReturnType<typeof loadWindows> | undefined
 const windows = () => libraries ??= loadWindows()
+
+let dwmApi: ReturnType<typeof loadDwm> | undefined
+function loadDwm() {
+  return dlopen('dwmapi.dll', {
+    DwmGetWindowAttribute: { args: ['isize', 'u32', 'ptr', 'u32'], returns: 'i32' },
+    DwmSetWindowAttribute: { args: ['isize', 'u32', 'ptr', 'u32'], returns: 'i32' },
+  }).symbols
+}
+
+export function visibleWindowFrame(hwnd: number) {
+  const { user } = windows()
+  if (!user.IsWindowVisible(hwnd) || isWindowMinimized(hwnd)) return null
+  const dwm = dwmApi ??= loadDwm()
+  const cloaked = Buffer.alloc(4)
+  if (dwm.DwmGetWindowAttribute(hwnd, 14, cloaked, cloaked.length) === 0 && cloaked.readUInt32LE() !== 0) return null
+  const rect = Buffer.alloc(16)
+  if (dwm.DwmGetWindowAttribute(hwnd, 9, rect, rect.length) !== 0) {
+    const previous = user.SetThreadDpiAwarenessContext(-4)
+    if (!previous) return null
+    try { if (!user.GetWindowRect(hwnd, rect)) return null } finally { user.SetThreadDpiAwarenessContext(previous) }
+  }
+  const x = rect.readInt32LE(0)
+  const y = rect.readInt32LE(4)
+  const width = rect.readInt32LE(8) - x
+  const height = rect.readInt32LE(12) - y
+  return width > 0 && height > 0 ? { x, y, width, height } : null
+}
+
+export function setNativeWindowBorder(hwnd: number, color: number): void {
+  const value = Buffer.alloc(4)
+  value.writeUInt32LE(color)
+  const dwm = dwmApi ??= loadDwm()
+  dwm.DwmSetWindowAttribute(hwnd, 34, value, value.length)
+}
 
 export function windowProcessId(hwnd: number): number {
   if (!hwnd) return 0
@@ -156,6 +192,11 @@ export function foregroundWindow(): number {
   return Number(windows().user.GetForegroundWindow())
 }
 
+export function isWindowForeground(hwnd: number): boolean {
+  const foreground = foregroundWindow()
+  return !!foreground && (foreground === hwnd || Number(windows().user.GetAncestor(foreground, GA_ROOT)) === hwnd)
+}
+
 export function foregroundTarget(): FrontmostAppInfo | null {
   return readTarget(foregroundWindow())
 }
@@ -202,6 +243,21 @@ export function windowDetails(hwnd: number) {
 
 export function isWindowMinimized(hwnd: number): boolean {
   return windows().user.IsIconic(hwnd) !== 0
+}
+
+export function isWindowClientPoint(hwnd: number, x: number, y: number): boolean {
+  const { user } = windows()
+  const window = Buffer.alloc(16)
+  const client = Buffer.alloc(16)
+  const origin = Buffer.alloc(8)
+  const previous = user.SetThreadDpiAwarenessContext(-4)
+  if (!previous) return false
+  try {
+    if (!user.GetWindowRect(hwnd, window) || !user.GetClientRect(hwnd, client) || !user.ClientToScreen(hwnd, origin)) return false
+    const cx = Math.round(x) + window.readInt32LE(0) - origin.readInt32LE(0)
+    const cy = Math.round(y) + window.readInt32LE(4) - origin.readInt32LE(4)
+    return cx >= 0 && cy >= 0 && cx < client.readInt32LE(8) && cy < client.readInt32LE(12)
+  } finally { user.SetThreadDpiAwarenessContext(previous) }
 }
 
 export function windowRectangle(hwnd: number): { width: number; height: number } | null {

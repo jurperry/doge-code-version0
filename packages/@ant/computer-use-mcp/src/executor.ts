@@ -125,6 +125,8 @@ export interface ComputerExecutor {
     displayId?: number
     /** Windows can change capture mode only when returning a new image to the model. */
     allowDisplayFallback?: boolean
+    /** Follow-up observation must stay in the same binding and preserve its placement. */
+    observeBoundRevision?: number
   }): Promise<ScreenshotResult>
   zoom(
     regionLogical: { x: number; y: number; w: number; h: number },
@@ -159,6 +161,7 @@ export interface ComputerExecutor {
   isWindowBound?(): boolean
   getBoundAppId?(): string | null
   getBoundRevision?(): number | undefined
+  getBoundWindowState?(): { hwnd: number; foreground: boolean; minimized: boolean; requiresForeground: boolean } | null
   /** Last automatic/explicit release; used for diagnostics and screenshot notes. */
   getBindingRelease?(): BindingReleaseInfo | null
   getFrontmostApp(): Promise<FrontmostApp | null>

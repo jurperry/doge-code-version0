@@ -386,9 +386,9 @@ export function createCliExecutor(opts: {
   }
 
   const captureWindowsForApi = !isDarwin && process.platform === 'win32'
-    ? async (displayId?: number, allowDisplayFallback?: boolean): Promise<ScreenshotResult> => {
+    ? async (displayId?: number, allowDisplayFallback?: boolean, observeBoundRevision?: number): Promise<ScreenshotResult> => {
         const { captureScreenForApi } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
-        return captureScreenForApi(displayId, allowDisplayFallback)
+        return captureScreenForApi(displayId, allowDisplayFallback, observeBoundRevision)
       }
     : null
 
@@ -584,8 +584,9 @@ export function createCliExecutor(opts: {
       allowedBundleIds: string[]
       displayId?: number
       allowDisplayFallback?: boolean
+      observeBoundRevision?: number
     }): Promise<ScreenshotResult> {
-      if (captureWindowsForApi) return captureWindowsForApi(opts.displayId, opts.allowDisplayFallback)
+      if (captureWindowsForApi) return captureWindowsForApi(opts.displayId, opts.allowDisplayFallback, opts.observeBoundRevision)
       const d = cu.display.getSize(opts.displayId)
       const [targetW, targetH] = computeTargetDims(
         d.width,
@@ -757,6 +758,12 @@ export function createCliExecutor(opts: {
       count: 1 | 2 | 3,
       modifiers?: string[],
     ): Promise<void> {
+      if (process.platform === 'win32' && !modifiers?.length) {
+        await platform!.input.click(x, y, button, count)
+        lastMouseX = x
+        lastMouseY = y
+        return
+      }
       const input = getInput()
       await moveAndSettle(input, x, y)
       if (modifiers && modifiers.length > 0) {
@@ -861,6 +868,11 @@ export function createCliExecutor(opts: {
       const { getBoundRevision } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
       return getBoundRevision()
     },
+
+    getBoundWindowState: process.platform === 'win32' ? () => {
+      const { getBoundWindowState } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      return getBoundWindowState()
+    } : undefined,
 
     getBindingRelease() {
       if (process.platform !== 'win32') return null

@@ -45,7 +45,7 @@ describe('Windows input planning', () => {
     expect(script).toContain('for ($i = 0; $i -lt 3; $i++)')
     expect(script).toContain('mouse_event(0x0020')
     expect(script).toContain('mouse_event(0x0040')
-    expect(script).toContain('if (-not [CuClickRect]::GetWindowRect')
+    expect(script).toContain('if (-not [CuWin32]::GetWindowRect')
     expect(script).toContain('if (-not [CuWin32]::SetCursorPos')
     expect(messageSemantics.clickMessages('middle')).toEqual({ down: '0x0207', up: '0x0208', buttons: 16 })
     expect(messageSemantics.clickMessages('right')).toEqual({ down: '0x0204', up: '0x0205', buttons: 2 })

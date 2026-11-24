@@ -31,12 +31,11 @@ import type {
 import { listWindowDetails, listWindows } from '../win32/windowEnum.js'
 import { captureWindowByHwnd } from '../win32/windowCapture.js'
 import { detectAppType, openWithController } from '../win32/appDispatcher.js'
-import { markBound, unmarkBound } from '../win32/windowBorder.js'
+import { showBoundWindowIndicator, hideBoundWindowIndicator } from '../win32/windowBorder.js'
 import {
   activateObservedWindow,
   ensureInputWindow,
   buildRequireWindowScript,
-  findReplacementWindow,
   getPidsForProcessName,
 } from '../win32/windowGuard.js'
 import { listInstalledAppsWin32 } from '../win32/installedApps.js'
@@ -44,7 +43,7 @@ import { buildPortableAppLaunchBlock, START_CU_APPLICATION } from '../win32/appL
 import { classifyWindowClasses, type WindowFramework } from '../win32/windowClassify.js'
 import { getWin32EscExpectFile, isWin32EscHotkeyRegistered } from '../win32/escHook.js'
 import { runPowerShell, windowsActionSignal } from '../win32/powerShell.js'
-import { childWindowClasses, enumerateDisplays, foregroundTarget, monitorForWindow, targetAtPoint, windowRectangle, windowText } from '../win32/nativeWindows.js'
+import { childWindowClasses, enumerateDisplays, foregroundTarget, isWindowClientPoint, isWindowForeground, isWindowMinimized, monitorForWindow, processImage, targetAtPoint, windowProcessId, windowRectangle, windowText } from '../win32/nativeWindows.js'
 import { ensureElevatedPowerShell, getElevatedPowerShellPid, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
 import { PROCESS_IMAGE_PS } from '../win32/processImage.js'
 import { getCurrentProcessIL, getProcessIL, INPUT_INTEGRITY_TYPES, needsElevatedHelper } from '../win32/elevation.js'
@@ -243,7 +242,6 @@ let boundAppType: import('../win32/appDispatcher.js').AppType | null = null
 let boundFilePath: string | null = null
 /** Executable base name (no .exe) of the bound window's process — used to find
  *  a replacement window when the bound HWND dies (app closed that window). */
-let boundExeBase: string | null = null
 /** Authorized application identity that produced the current binding. */
 let boundAppId: string | null = null
 let boundAt: number | null = null
@@ -343,6 +341,7 @@ export async function prepareWindowsTarget(signal?: AbortSignal, purpose: Target
       unbindWindow('new_foreground', foreground)
     }
   }
+  if (boundHwnd && boundPid) showBoundWindowIndicator(boundHwnd, boundPid)
   if (!boundPid && (purpose === 'capture' || purpose === 'hover')) {
     // Full-display capture and positioning operate on the desktop itself.
     setComputerUseTargetElevated(false)
@@ -416,6 +415,12 @@ function realKeyboardChannel(): boolean {
 /** Get the bound HWND, or null if not bound */
 export function getBoundHwnd(): number | null { return boundHwnd }
 
+export function getBoundWindowState() {
+  const hwnd = boundHwnd
+  if (hwnd === null || windowProcessId(hwnd) !== boundPid) return null
+  return { hwnd, foreground: isWindowForeground(hwnd), minimized: isWindowMinimized(hwnd), requiresForeground: realMouseChannel() }
+}
+
 /** Authorized app identity for package-level tier checks, not a guessed foreground app. */
 export function getBoundAppId(): string | null { return boundAppId }
 export function getBoundRevision(): number { return bindingRevision }
@@ -430,13 +435,11 @@ export function getBoundFilePath(): string | null { return boundFilePath }
 
 /** Bind to a window HWND — all subsequent input/screenshot operations target this handle */
 export function bindWindow(hwnd: number, pid?: number, exeBase?: string, appId: string | null = null): void {
-  // Unmark previous window if any
-  if (boundHwnd) unmarkBound(boundHwnd)
+  hideBoundWindowIndicator()
   boundHwnd = hwnd
-  boundPid = pid ?? null
+  boundPid = pid ?? (windowProcessId(hwnd) || null)
   boundAppType = 'generic'
   boundFilePath = null
-  boundExeBase = exeBase ?? null
   boundAppId = appId
   boundAt = Date.now()
   bindingRevision++
@@ -447,7 +450,8 @@ export function bindWindow(hwnd: number, pid?: number, exeBase?: string, appId: 
   sendMessageOk = null
   // Framework classification decides the input channel: SendMessage
   // (background, no cursor/focus theft) vs real input (foreground guard).
-  const framework = detectWindowFramework(hwnd)
+  const image = boundPid ? processImage(boundPid) : ''
+  const framework = classifyWindowClasses(windowText(hwnd, 'class'), childWindowClasses(hwnd), image ? windowsPath.basename(image).replace(/\.exe$/i, '') : exeBase)
   boundFramework = framework.framework
   mouseNeedsRealInput = framework.mouseNeedsRealInput
   keyboardNeedsRealInput = framework.keyboardNeedsRealInput
@@ -455,11 +459,12 @@ export function bindWindow(hwnd: number, pid?: number, exeBase?: string, appId: 
   // Invalidate screenshot cache for new window
   cachedScreenshot = null
   // Green border on the bound window
-  markBound(hwnd)
+  if (boundPid) showBoundWindowIndicator(hwnd, boundPid)
 }
 
 /** Bind to a COM-controlled file (Excel/Word — no window needed) */
 export function bindFile(filePath: string, appType: import('../win32/appDispatcher.js').AppType, appId: string | null = null): void {
+  hideBoundWindowIndicator()
   boundHwnd = null
   boundPid = null
   boundAppType = appType
@@ -494,12 +499,11 @@ export function unbindWindow(
       { level: 'debug' },
     )
   }
-  if (boundHwnd) unmarkBound(boundHwnd)
+  hideBoundWindowIndicator()
   boundHwnd = null
   boundPid = null
   boundAppType = null
   boundFilePath = null
-  boundExeBase = null
   boundAppId = null
   boundAt = null
   bindingRevision++
@@ -531,52 +535,18 @@ export function getBoundInputChannel(): {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Input guard: 检查 → 未在前台则激活 → 再校验 → 通过才输入 → 否则报错
-// ---------------------------------------------------------------------------
-
-/**
- * Pre-input precondition for the bound window. Call before every input that
- * targets `boundHwnd`.
- *
- *  - `needForeground=false`（SendMessage 传输，后台安全）: liveness only —
- *    SendMessage 到已销毁的 HWND 静默无效，必须先验证 IsWindow。
- *  - `needForeground=true`（真实输入传输：Chromium 窗口等使用的
- *    SetCursorPos+mouse_event / keybd_event）: ensureWindow 在单条 PowerShell
- *    里完成 恢复最小化 → AttachThreadInput 激活 → 重试校验；未达前台即抛错，
- *    绝不把点击/按键打进当前前台的错误应用。
- *
- * 窗口已死时先按 PID / 进程名找替身窗口重绑（应用换了窗口而非退出），
- * 找不到才抛错并指引模型重新 open_application。
- */
-async function guardBoundWindow(needForeground: boolean): Promise<void> {
-  if (!boundHwnd) return
-  let result = await ensureInputWindow(boundHwnd, needForeground, boundPid ?? undefined)
-  if (result.status === 'dead' && !isAbsoluteExe(boundAppId)) {
-    const replacement = findReplacementWindow(boundPid, boundExeBase)
-    if (replacement) {
-      bindWindow(replacement.hwnd, replacement.pid, boundExeBase ?? undefined, boundAppId)
-      result = await ensureInputWindow(boundHwnd, needForeground, boundPid ?? undefined)
-    }
-  }
+/** Fast preflight. The dispatch process checks the target again before input. */
+function guardBoundWindow(needForeground: boolean): void {
+  const hwnd = boundHwnd
+  if (hwnd === null) return
+  const result = ensureInputWindow(hwnd, needForeground, boundPid ?? undefined)
   if (result.status === 'ok') return
-  if (result.status === 'identity_mismatch') {
-    throw new Error(
-      `The target window now belongs to a different process (PID ${result.actualPid ?? 'unknown'}), so its previous authorization no longer applies. No input was sent. Call open_application for the intended app, then take a screenshot.`,
-    )
-  }
-  if (result.status === 'dead') {
-    throw new Error(
-      'The target application window no longer exists (the app was closed). ' +
-        'No input was sent. Call open_application to relaunch it, then take a ' +
-        'screenshot before retrying.',
-    )
+  if (result.status === 'identity_mismatch' || result.status === 'dead') {
+    throw new Error('The bound window closed or its identity changed. No input was sent. Use open_application to bind the intended window and get a fresh screenshot.')
   }
   throw new Error(
-    `Could not bring the target window to the foreground (current foreground: ` +
-      `${result.foregroundTitle ?? 'unknown'}). No input was sent to avoid ` +
-      'clicking or typing into the wrong application. Take a screenshot to ' +
-      'inspect the current screen state, or ask the user to restore the window.',
+    'The bound window is no longer in the foreground. No input was sent. ' +
+      `If the user wants to continue in this window, use activate_window with hwnd=${hwnd} and screenshot=true.`,
   )
 }
 
@@ -610,22 +580,6 @@ async function ensureSendAccess(): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// Window-framework detection: Chromium / WPF / WinUI / WinForms / self-drawn
-// ---------------------------------------------------------------------------
-
-/**
- * Enumerate the top-level + child window class names of an HWND, then
- * classify via windowClassify.ts (pure). One PowerShell invocation.
- *
- * The classifier returns per-framework mouse/keyboard capabilities:
- * SendMessage is preferred, and only frameworks that demonstrably ignore
- * synthetic messages get the real-input channel (foreground guard).
- */
-function detectWindowFramework(hwnd: number) {
-  return classifyWindowClasses(windowText(hwnd, 'class'), childWindowClasses(hwnd))
-}
-
-// ---------------------------------------------------------------------------
 // Window Message module (lazy loaded)
 // ---------------------------------------------------------------------------
 
@@ -643,8 +597,7 @@ function getWm() {
 //   - Chromium (Electron/CEF/WebView2)
 //   - WPF (HwndWrapper, e.g. AnyCast), WinUI 3 / UWP, WinForms
 //   - JavaFX, Flutter, Unreal, Tk, and self-drawn Qt/SDL/GLFW/Unity/AWT
-// Real input goes to the FOREGROUND window — guardBoundWindow(true) activates
-// and verifies the bound window first, or the action fails with an error.
+// Real input requires the bound window to be in the foreground.
 // ---------------------------------------------------------------------------
 
 export function getBoundWindowDimensions(): { width: number; height: number } | null {
@@ -659,19 +612,17 @@ function clickPowerShellScript(hwnd: number, x: number, y: number, button: 'left
   return `${WIN32_TYPES}
 ${requireForegroundScript(hwnd)}
 [CuWin32]::SetProcessDPIAware() | Out-Null
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class CuClickRect {
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-}
-'@
-\$r = New-Object CuClickRect+RECT
+\$r = New-Object CuWin32+RECT
+\$p = New-Object CuWin32+POINT
 for (\$i = 0; \$i -lt ${count}; \$i++) {
     if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw "Foreground changed during click sequence after \$i/${count} clicks; outcome is partial" }
-    if (-not [CuClickRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before click' }
+    if (-not [CuWin32]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before click' }
     if (-not [CuWin32]::SetCursorPos(${rx} + \$r.L, ${ry} + \$r.T)) { throw 'SetCursorPos failed before click' }
     Start-Sleep -Milliseconds 20
+    if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw "Foreground changed before click \$i/${count}" }
+    if (-not [CuWin32]::GetCursorPos([ref]\$p) -or \$p.X -ne (${rx} + \$r.L) -or \$p.Y -ne (${ry} + \$r.T)) {
+        throw "The pointer moved before click \$i/${count}; inspect the current window before continuing."
+    }
     [CuInputIntegrity]::RequireAtCursor([IntPtr]${hwnd})
     [CuWin32]::mouse_event(${downFlag}, 0, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 50
@@ -693,18 +644,10 @@ async function sendInputMove(hwnd: number, x: number, y: number): Promise<void> 
   const rx = Math.round(x)
   const ry = Math.round(y)
   await sendAtomicInput(`${WIN32_TYPES}
-${INPUT_INTEGRITY_TYPES}
-[CuInputIntegrity]::RequireWindow([IntPtr]${hwnd})
+${requireForegroundScript(hwnd)}
 [CuWin32]::SetProcessDPIAware() | Out-Null
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class CuMoveRect {
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-}
-'@
-\$r = New-Object CuMoveRect+RECT
-if (-not [CuMoveRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before mouse move' }
+$r = New-Object CuWin32+RECT
+if (-not [CuWin32]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before mouse move' }
 if (-not [CuWin32]::SetCursorPos(${rx} + \$r.L, ${ry} + \$r.T)) { throw 'SetCursorPos failed during mouse move' }
 `)
 }
@@ -1027,10 +970,9 @@ if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw 'Foreground changed immediate
 const input: InputPlatform = {
   async moveMouse(x, y) {
     if (boundHwnd) {
-      // Pure positioning — no click. Liveness only (dead binding must error
-      // instead of silently no-op'ing); a physical cursor move is harmless.
-      await guardBoundWindow(false)
-      if (realMouseChannel()) {
+      const realInput = realMouseChannel()
+      guardBoundWindow(realInput)
+      if (realInput) {
         // Chromium / self-drawn windows ignore SendMessage mouse — move the
         // physical cursor instead.
         await sendInputMove(boundHwnd, x, y)
@@ -1050,10 +992,9 @@ const input: InputPlatform = {
       throw new Error('Click count must be an integer from 1 to 3; no input was sent.')
     }
     if (boundHwnd) {
-      // Multi-click needs the real system click counter; background messages
-      // remain limited to single-click delivery.
-      const realInput = count > 1 || realMouseChannel()
-      await guardBoundWindow(realInput)
+      // Native caption buttons, resize borders and multi-click require real input.
+      const realInput = count > 1 || realMouseChannel() || !isWindowClientPoint(boundHwnd, x, y)
+      guardBoundWindow(realInput)
       if (realInput) {
         await sendInputClick(boundHwnd, x, y, button, count)
         return
@@ -1088,7 +1029,7 @@ for ($i = 0; $i -lt ${count}; $i++) {
       return
     }
     const realInput = realMouseChannel()
-    await guardBoundWindow(realInput)
+    guardBoundWindow(realInput)
     if (realInput) {
       mouseDownUsedRealInput = true
       await sendInputButton(boundHwnd, x, y, 'left', 'down')
@@ -1130,7 +1071,7 @@ for ($i = 0; $i -lt ${count}; $i++) {
       return
     }
     const realInput = realMouseChannel()
-    await guardBoundWindow(realInput)
+    guardBoundWindow(realInput)
     if (realInput) {
       await sendInputDrag(boundHwnd, from.x, from.y, to.x, to.y, durationMs)
       return
@@ -1154,7 +1095,7 @@ for ($i = 0; $i -lt ${count}; $i++) {
     // WM_CHAR is not reliable for Unicode text, including native EDIT controls.
     // Use the same verified SendInput path for every bound window.
     if (boundHwnd) {
-      await guardBoundWindow(true)
+      guardBoundWindow(true)
       await sendInputUnicode(text, boundHwnd, signal)
       return
     }
@@ -1189,14 +1130,14 @@ for ($i = 0; $i -lt ${count}; $i++) {
     }
     if (boundHwnd) {
       if (!realKeyboardChannel()) {
-        await guardBoundWindow(false)
+        guardBoundWindow(false)
         await ensureSendAccess()
         if (!await getWm().sendKey(boundHwnd, vk, 'down', boundPid ?? undefined)) {
           throw new Error(`Window key ${action} dispatch failed for "${name}".`)
         }
         return
       }
-      await guardBoundWindow(true)
+      guardBoundWindow(true)
       await sendAtomicInput(`${WIN32_TYPES}
 ${requireForegroundScript(boundHwnd)}
 ${expectedEscapeScript([name])}[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPtr]::Zero)`)
@@ -1214,14 +1155,14 @@ ${expectedEscapeScript([name])}[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPt
       // Return/Tab need the focused control, which may have its own HWND.
       const needsRealChord = chord.modifiers.length > 0 || chord.keys.includes(VK_MAP.return) || chord.keys.includes(VK_MAP.tab)
       if (!realKeyboardChannel() && !needsRealChord) {
-        await guardBoundWindow(false)
+        guardBoundWindow(false)
         await ensureSendAccess()
         if (!await getWm().sendKeys(boundHwnd, parts, boundPid ?? undefined)) {
           throw new Error('Window key-chord arguments are invalid; no fallback was attempted.')
         }
         return
       }
-      await guardBoundWindow(true)
+      guardBoundWindow(true)
       await sendInputChord(parts, boundHwnd)
       return
     }
@@ -1231,11 +1172,11 @@ ${expectedEscapeScript([name])}[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPt
   async scroll(amount, direction, x, y) {
     if (boundHwnd) {
       if (realMouseChannel()) {
-        await guardBoundWindow(true)
+        guardBoundWindow(true)
         await sendInputScroll(boundHwnd, x, y, amount, direction)
         return
       }
-      await guardBoundWindow(false)
+      guardBoundWindow(false)
       await ensureSendAccess()
       await getWm().sendScroll(boundHwnd, amount, direction, boundPid ?? undefined)
       return
@@ -1324,9 +1265,9 @@ $resized.Dispose()
 }
 
 const screenshot = {
-  async captureScreen(displayId?: number, targetW?: number, targetH?: number, fitForApi = false) {
+  async captureScreen(displayId?: number, targetW?: number, targetH?: number, fitForApi = false, preservePlacement = false) {
     if (boundHwnd) {
-      const result = await captureWindowByHwnd(boundHwnd, boundPid ?? undefined)
+      const result = await captureWindowByHwnd(boundHwnd, boundPid ?? undefined, !preservePlacement)
       if (!result) throw new Error('The bound window did not produce an image.')
       result.displayId = displayId ?? 0
       result.captureMode = 'bound_window'
@@ -1416,17 +1357,20 @@ $bmp.Dispose()
     originX, originY, displayCount: displays.length, displayId: monitor.displayId, captureMode: 'full_display' }
 }
 
-export async function captureScreenForApi(displayId?: number, allowDisplayFallback = false): Promise<ScreenshotResult> {
+export async function captureScreenForApi(displayId?: number, allowDisplayFallback = false, observeBoundRevision?: number): Promise<ScreenshotResult> {
   const captureRevision = bindingRevision
   const hwnd = boundHwnd
+  if (observeBoundRevision !== undefined && (!hwnd || observeBoundRevision !== captureRevision)) {
+    throw new Error('The bound window changed before follow-up capture.')
+  }
   if (hwnd) {
     let shot: ScreenshotResult | undefined
     try {
-      shot = await screenshot.captureScreen(displayId)
+      shot = await screenshot.captureScreen(displayId, undefined, undefined, false, observeBoundRevision !== undefined)
     } catch (error) {
       windowsActionSignal.getStore()?.throwIfAborted()
       if (error instanceof Error && error.name === 'AbortError') throw error
-      if (!allowDisplayFallback || bindingRevision !== captureRevision) throw error
+      if (!allowDisplayFallback || observeBoundRevision !== undefined || bindingRevision !== captureRevision) throw error
       await releaseWindowsMouseAfterTurn()
       windowsActionSignal.getStore()?.throwIfAborted()
       if (bindingRevision !== captureRevision || inputReleasePendingAfterTurn) throw error

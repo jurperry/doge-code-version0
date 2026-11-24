@@ -9,6 +9,12 @@ function expectReal(framework: string, cls: string, childClasses: string[] = [],
   expect(r.matchedClass).toBe(matched)
 }
 
+test('the legacy game needs physical input without classifying unrelated MainWindow apps as games', () => {
+  expect(classifyWindowClasses('MainWindow', [], 'PlantsVsZombiesFood').mouseNeedsRealInput).toBeTrue()
+  expect(classifyWindowClasses('MainWindow', [], 'AnotherApp').mouseNeedsRealInput).toBeFalse()
+  expect(classifyWindowClasses('OtherWindow', [], 'PlantsVsZombiesFood').mouseNeedsRealInput).toBeFalse()
+})
+
 test('classifies Qt windows as self-drawn (Android emulator case)', () => {
   // Qt top-level class carries the version: Qt5152QWindowIcon / Qt6QWindowIcon…
   for (const cls of ['Qt5152QWindowIcon', 'Qt6QWindowIcon', 'Qt671QWindowToolSaveBits']) {

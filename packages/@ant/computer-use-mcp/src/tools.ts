@@ -265,12 +265,16 @@ export function buildComputerUseTools(
 
     {
       name: "left_click",
-      description: `Left-click at the given coordinates. ${FRONTMOST_GATE_DESC}`,
+      description: `Left-click at the given coordinates. ${FRONTMOST_GATE_DESC}` +
+        (caps.platform === "win32" ? " In bound-window mode, use screenshot: true to inspect the result in the same call. Click visible caption buttons for window controls." : ""),
       inputSchema: {
         type: "object" as const,
         properties: {
           coordinate: coordinateTuple,
           text: clickModifierText,
+          ...(caps.platform === "win32" ? {
+            screenshot: { type: "boolean" as const, description: "Return the next bound-window image after clicking, or confirm if the window minimized." },
+          } : {}),
         },
         required: ["coordinate"],
       },
@@ -626,8 +630,11 @@ function buildWindowsTools(): Tool[] {
     },
     {
       name: "activate_window",
-      description: "Bring an authorized Windows window to the foreground while keeping the current binding and coordinate space. Capture a fresh screenshot before acting on newly visible content.",
-      inputSchema: { type: "object", properties: { hwnd }, required: ["hwnd"] },
+      description: "Bring an authorized Windows window to the foreground. For the current binding, pass screenshot: true to return an updated image in the same call.",
+      inputSchema: { type: "object", properties: {
+        hwnd,
+        screenshot: { type: "boolean", description: "Return a fresh image of the same bound window after activation." },
+      }, required: ["hwnd"] },
     },
     {
       name: "get_window",

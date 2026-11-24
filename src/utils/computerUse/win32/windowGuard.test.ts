@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import {
   buildEnsureWindowScript,
   buildRequireWindowScript,
+  ensureInputWindow,
   parseEnsureOutput,
 } from './windowGuard.js'
 
@@ -36,7 +37,8 @@ test('expected-PID guard emits identity checks and final-input guard throws on f
   expect(probe).toContain('PIDMISMATCH|')
   const required = buildRequireWindowScript(12345, 4242)
   expect(required).toContain('Window identity changed')
-  expect(required).toContain("throw 'Could not foreground the target window")
+  expect(required).toContain("throw 'The bound window is no longer in the foreground")
+  expect(required).not.toContain('[CuGuard]::TryForeground(')
 })
 
 test('treats empty or garbage output as dead (fail-closed, never blind input)', () => {
@@ -52,9 +54,8 @@ test('ignores trailing noise after the status line', () => {
 })
 
 test('negative or non-integer hwnd is dead without spawning anything', () => {
-  // ensureWindow itself spawns PowerShell; the guard entry in platforms/win32
-  // validates first. parseEnsureOutput is exercised via the statuses above.
-  expect(parseEnsureOutput('DEAD')).toEqual({ status: 'dead' })
+  expect(ensureInputWindow(-1, false)).toEqual({ status: 'dead' })
+  expect(ensureInputWindow(1.2, true)).toEqual({ status: 'dead' })
 })
 
 // ── buildEnsureWindowScript ─────────────────────────────────────────────────
@@ -65,9 +66,7 @@ test('foreground script restores minimized windows and retries activation', () =
   expect(script).toContain('IsIconic')
   // SW_RESTORE = 9
   expect(script).toContain('ShowWindow([IntPtr]12345, 9)')
-  // Foreground-lock workaround + last-resort ALT nudge + retry loop
   expect(script).toContain('AttachThreadInput')
-  expect(script).toContain('[CuGuard]::AltNudge()')
   expect(script).toContain('for ($i = 0; $i -lt 3')
   // Re-verification after activation attempts
   expect(script).toContain('NOFG|')
@@ -84,7 +83,7 @@ test('liveness-only script skips the activation block entirely', () => {
 })
 
 test('foreground-only activation does not inject an Alt key', () => {
-  const script = buildEnsureWindowScript(12345, true, 4242, false, false)
+  const script = buildEnsureWindowScript(12345, true, 4242)
   expect(script).toContain('[CuGuard]::TryForeground')
-  expect(script).not.toContain('[CuGuard]::AltNudge()')
+  expect(script).not.toContain('keybd_event')
 })

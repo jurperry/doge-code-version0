@@ -105,6 +105,8 @@ export async function cleanupComputerUseAfterTurn(
     } catch (err) {
       logForDebugging(`[Computer Use MCP] mouse release failed: ${errorMessage(err)}`)
     }
+    const { hideBoundWindowIndicator } = await import('./win32/windowBorder.js')
+    hideBoundWindowIndicator()
   }
 
   // Unregister before lock release so the pump-retain drops as soon as the

@@ -17,9 +17,10 @@ const sharedFields: Record<string, string[]> = {
 }
 const windowsFields = {
   ...sharedFields,
+  left_click: [...sharedFields.left_click!, 'screenshot'],
   open_application: ['app', 'window_id', 'screenshot'],
   list_granted_applications: ['include_windows', 'include_desktop'],
-  list_windows: ['visible_only', 'granted_only', 'limit'], activate_window: ['hwnd'], get_window: ['hwnd'],
+  list_windows: ['visible_only', 'granted_only', 'limit'], activate_window: ['hwnd', 'screenshot'], get_window: ['hwnd'],
 }
 
 describe('Computer Use model contract', () => {
@@ -45,6 +46,7 @@ describe('Computer Use model contract', () => {
     const actionTools = windows.filter(tool => properties.action?.enum?.includes(tool.name))
     expect(actionTools).toHaveLength(properties.action?.enum?.length ?? 0)
     const fields = new Set(actionTools.flatMap(tool => Object.keys(tool.inputSchema.properties ?? {})))
+    fields.delete('screenshot') // Batches use an explicit screenshot action.
     expect(Object.keys(properties).sort()).toEqual(['action', ...fields].sort())
   })
 })

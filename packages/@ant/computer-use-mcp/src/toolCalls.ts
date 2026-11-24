@@ -974,9 +974,11 @@ async function takeScreenshotWithRetry(
   logger: ComputerUseHostAdapter["logger"],
   displayId?: number,
   isAborted?: () => boolean,
+  observeBoundRevision?: number,
 ): Promise<ScreenshotResult> {
   if (isAborted?.()) throw new DOMException("Screenshot aborted", "AbortError");
-  const options = { allowedBundleIds, displayId, allowDisplayFallback: executor.capabilities.platform === "win32" };
+  const options = { allowedBundleIds, displayId, allowDisplayFallback: executor.capabilities.platform === "win32" && observeBoundRevision === undefined };
+  if (observeBoundRevision !== undefined) return executor.screenshot({ ...options, observeBoundRevision });
   let shot: ScreenshotResult;
   try {
     shot = await executor.screenshot(options);
@@ -2568,10 +2570,26 @@ function captureReleaseContext(
   return { release, note: formatBindingReleaseNote(release, shot.captureMode) };
 }
 
+function screenshotResult(adapter: ComputerUseHostAdapter, shot: ScreenshotResult, ...notes: Array<string | undefined>): CuCallToolResult {
+  const executor = adapter.executor;
+  const bound = shot.captureMode === "bound_window" && shot.targetRevision === executor.getBoundRevision?.()
+    ? executor.getBoundWindowState?.() : null;
+  return {
+    content: [
+      { type: "text", text: `Screenshot dimensions: ${shot.width}x${shot.height} pixels${shot.captureMode ? ` (capture=${shot.captureMode})` : ""}. All mouse/click coordinates must be within this pixel space (0–${shot.width}, 0–${shot.height}).` },
+      ...(bound ? [{ type: "text" as const, text: `Bound window hwnd=${bound.hwnd}, foreground=${bound.foreground}, minimized=${bound.minimized}.` }] : []),
+      ...notes.filter(Boolean).map(note => ({ type: "text" as const, text: note! })),
+      { type: "image", data: shot.base64, mimeType: "image/jpeg" },
+    ],
+    screenshot: shot,
+  };
+}
+
 async function handleScreenshot(
   adapter: ComputerUseHostAdapter,
   overrides: ComputerUseOverrides,
   subGates: CuSubGates,
+  observeBoundRevision?: number,
 ): Promise<CuCallToolResult> {
   // §2 — empty allowlist → tool error, no screenshot.
   if (overrides.allowedApps.length === 0) {
@@ -2590,7 +2608,7 @@ async function handleScreenshot(
 
   // Atomic resolve→prepare→capture (one Swift call, no scheduler gap).
   // Off → fall through to separate-calls path below.
-  if (subGates.autoTargetDisplay) {
+  if (subGates.autoTargetDisplay && observeBoundRevision === undefined) {
     // Model's explicit switch_display pin overrides everything — Swift's
     // straight cuDisplayInfo(forDisplayID:) passthrough, no chase chain.
     // Otherwise sticky display: only auto-resolve when the allowed-app
@@ -2702,20 +2720,7 @@ async function handleScreenshot(
       shot.displayCount,
     );
 
-    return {
-      content: [
-        { type: "text" as const, text: `Screenshot dimensions: ${shot.width}x${shot.height} pixels${shot.captureMode ? ` (capture=${shot.captureMode})` : ""}. All mouse/click coordinates must be within this pixel space (0–${shot.width}, 0–${shot.height}).` },
-        ...(release.note ? [{ type: "text" as const, text: release.note }] : []),
-        ...(monitorNote ? [{ type: "text" as const, text: monitorNote }] : []),
-        ...(hiddenNote ? [{ type: "text" as const, text: hiddenNote }] : []),
-        {
-          type: "image",
-          data: shot.base64,
-          mimeType: "image/jpeg",
-        },
-      ],
-      screenshot: shot,
-    };
+    return screenshotResult(adapter, shot, release.note, monitorNote, hiddenNote);
   }
 
   // Same hide+defocus sequence as input actions. Screenshot needs hide too
@@ -2755,6 +2760,7 @@ async function handleScreenshot(
   }
 
   const allowedBundleIds = overrides.allowedApps.map((g) => g.bundleId);
+  const captureFailure = observeBoundRevision === undefined ? "Screenshot capture failed after one retry" : "Follow-up screenshot failed";
   let shot: ScreenshotResult;
   try {
     shot = await takeScreenshotWithRetry(
@@ -2763,18 +2769,19 @@ async function handleScreenshot(
       adapter.logger,
       overrides.selectedDisplayId,
       overrides.isAborted,
+      observeBoundRevision,
     );
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") throw err;
     return errorResult(
-      `Screenshot capture failed after one retry: ${err instanceof Error ? err.message : String(err)}. Recovery: ${recoveryGuidanceForFailure("screenshot")}`,
+      `${captureFailure}: ${err instanceof Error ? err.message : String(err)}. Recovery: ${recoveryGuidanceForFailure("screenshot")}`,
       "capture_failed",
     );
   }
   const captureIssue = fullScreenshotIssue(shot);
   if (captureIssue) {
     return errorResult(
-      `Screenshot capture failed after one retry: ${captureIssue}. Do not click using stale coordinates.`,
+      `${captureFailure}: ${captureIssue}. Do not click using stale coordinates.`,
       "capture_failed",
     );
   }
@@ -2791,21 +2798,7 @@ async function handleScreenshot(
     shot.displayCount,
   );
 
-  return {
-    content: [
-      { type: "text" as const, text: `Screenshot dimensions: ${shot.width}x${shot.height} pixels${shot.captureMode ? ` (capture=${shot.captureMode})` : ""}. All mouse/click coordinates must be within this pixel space (0–${shot.width}, 0–${shot.height}).` },
-      ...(release.note ? [{ type: "text" as const, text: release.note }] : []),
-      ...(monitorNote ? [{ type: "text" as const, text: monitorNote }] : []),
-      ...(hiddenNote ? [{ type: "text" as const, text: hiddenNote }] : []),
-      {
-        type: "image",
-        data: shot.base64,
-        mimeType: "image/jpeg",
-      },
-    ],
-    // Piggybacked for serverDef.ts to stash on InternalServerContext.
-    screenshot: shot,
-  };
+  return screenshotResult(adapter, shot, release.note, monitorNote, hiddenNote);
 }
 
 /**
@@ -2913,6 +2906,14 @@ async function handleClickVariant(
   button: "left" | "right" | "middle",
   count: 1 | 2 | 3,
 ): Promise<CuCallToolResult> {
+  if (args.screenshot !== undefined && typeof args.screenshot !== "boolean") {
+    return errorResult("screenshot must be a boolean", "bad_args");
+  }
+  const observe = args.screenshot === true;
+  const revision = adapter.executor.getBoundRevision?.();
+  if (observe && (button !== "left" || count !== 1 || revision === undefined || !adapter.executor.getBoundWindowState?.())) {
+    return errorResult("screenshot: true requires a Windows left_click on a bound window. Use computer_batch with a final screenshot for other clicks.", "bad_args");
+  }
   // A prior left_mouse_down may have set mouseButtonHeld without a matching
   // left_mouse_up (e.g. drag rejected by a tier gate, model falls back to
   // left_click). executor.click() does its own mouseDown+mouseUp, releasing
@@ -2978,6 +2979,14 @@ async function handleClickVariant(
   // anyway) but BEFORE the executor call.
   const isWindows = adapter.executor.capabilities.platform === "win32";
   const boundWindows = isWindows && (adapter.executor.isWindowBound?.() ?? !!adapter.executor.getBoundAppId?.());
+  const bound = boundWindows ? adapter.executor.getBoundWindowState?.() : null;
+  if (bound?.minimized || (bound && (bound.requiresForeground || count > 1 || !!modifiers?.length) && !bound.foreground)) {
+    return errorResult(
+      `The bound window is ${bound.minimized ? "minimized" : "in the background"} (hwnd=${bound.hwnd}, foreground=${bound.foreground}). No click was sent. ` +
+        "If the user wants to continue there, call activate_window with this hwnd and screenshot: true.",
+      "state_conflict", { hwnd: bound.hwnd },
+    );
+  }
   if (adapter.executor.capabilities.platform !== "linux" && subGates.pixelValidation && (!isWindows || boundWindows)) {
     const { xPct, yPct } = coordToPercentageForPixelCompare(
       rawX,
@@ -3038,7 +3047,39 @@ async function handleClickVariant(
 
   throwIfActionAborted(overrides);
   await adapter.executor.click(x, y, button, count, modifiers);
-  return okText(`Click dispatched (count=${count}); application effect is not verified.`);
+  const result = okText(`Click dispatched (count=${count}); application effect is not verified.`);
+  if (!observe || revision === undefined) return result;
+  await delay(140, undefined, { signal: overrides.requestSignal });
+  return observeBoundWindow(adapter, overrides, subGates, revision, result);
+}
+
+async function observeBoundWindow(
+  adapter: ComputerUseHostAdapter,
+  overrides: ComputerUseOverrides,
+  subGates: CuSubGates,
+  revision: number,
+  action: CuCallToolResult,
+): Promise<CuCallToolResult> {
+  const readState = () => adapter.executor.getBoundRevision?.() === revision ? adapter.executor.getBoundWindowState?.() : null;
+  const append = (text: string) => ({ ...action, content: [...action.content, { type: "text" as const, text }] });
+  const bound = readState();
+  if (!bound) return append("The original bound window is no longer available. Inspect the current target before sending more input.");
+  if (bound.minimized) return append(`Bound window hwnd=${bound.hwnd}, foreground=${bound.foreground}, minimized=true.`);
+  let image: CuCallToolResult;
+  try {
+    image = await handleScreenshot(adapter, overrides, subGates, revision);
+  } catch (error) {
+    throwIfActionAborted(overrides, "during_action");
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    return append(`The action was already dispatched. Follow-up capture failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  throwIfActionAborted(overrides, "during_action");
+  const after = readState();
+  if (after?.minimized) return append(`Bound window hwnd=${after.hwnd}, foreground=${after.foreground}, minimized=true.`);
+  if (!after) return append("The original bound window changed after the action. Inspect the current target before sending more input.");
+  if (image.isError) return append(`The action was already dispatched. ${textContent(image)}`);
+  if (image.screenshot?.targetRevision !== revision) return append("Follow-up capture did not return an image of the original binding. Take a fresh screenshot.");
+  return { ...image, content: [...action.content, ...image.content] };
 }
 
 async function handleType(
@@ -3653,6 +3694,7 @@ async function handleWindowsTool(
   adapter: ComputerUseHostAdapter,
   args: Record<string, unknown>,
   overrides: ComputerUseOverrides,
+  subGates: CuSubGates,
 ): Promise<CuCallToolResult> {
   const executor = adapter.executor;
   if (executor.capabilities.platform !== "win32" || !executor.listWindows ||
@@ -3689,11 +3731,20 @@ async function handleWindowsTool(
   }
   throwIfActionAborted(overrides);
   if (name === "get_window") return okJson({ ...publicWindow(authorized.window, authorized.tier), rootHwnd: hwnd });
+  if (args.screenshot !== undefined && typeof args.screenshot !== "boolean") {
+    return errorResult("screenshot must be a boolean", "bad_args");
+  }
+  const revision = executor.getBoundRevision?.();
+  if (args.screenshot === true && (revision === undefined || executor.getBoundWindowState?.()?.hwnd !== hwnd)) {
+    return errorResult("screenshot: true requires the current bound window. Use open_application to bind a different window and get its screenshot.", "state_conflict");
+  }
   if (mouseButtonHeld) return errorResult("Release the held mouse button before activating a different window.", "state_conflict");
   const activated = await executor.activateWindow!(authorized.window, overrides.requestSignal);
-  return okJson({ activated, hwnd, message: activated
-    ? "Window is in the foreground. Take a fresh screenshot before acting on newly visible content."
+  const result = okJson({ activated, hwnd, message: activated
+    ? (args.screenshot === true ? "Window was brought to the foreground." : "Window is in the foreground. Take a fresh screenshot before acting on newly visible content.")
     : "Windows did not foreground this window. Inspect the current screen or ask the user to activate it." });
+  return activated && args.screenshot === true && revision !== undefined
+    ? observeBoundWindow(adapter, overrides, subGates, revision, result) : result;
 }
 
 async function handleReadClipboard(
@@ -4076,6 +4127,7 @@ function validateBatchActionArgs(
   if (action === "screenshot" && args.save_to_disk !== undefined && typeof args.save_to_disk !== "boolean") {
     return fail("save_to_disk must be a boolean");
   }
+  if (args.screenshot !== undefined) return fail("append a screenshot action at the end of the batch");
   if (args.text !== undefined && action !== "type" && action !== "key" && action !== "hold_key" && typeof args.text !== "string") {
     return fail("text must be a string");
   }
@@ -4417,7 +4469,7 @@ async function dispatchAction(
     case "list_windows":
     case "get_window":
     case "activate_window":
-      return handleWindowsTool(name, adapter, a, overrides);
+      return handleWindowsTool(name, adapter, a, overrides, subGates);
 
     case "read_clipboard":
       return handleReadClipboard(adapter, overrides, subGates);

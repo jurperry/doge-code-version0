@@ -202,9 +202,9 @@ ${NORMALIZE_UNAWARE_CAPTURE_CS}
 '@
 `
 
-export async function captureWindowByHwnd(hwnd: number, expectedPid?: number): Promise<CaptureResult | null> {
+export async function captureWindowByHwnd(hwnd: number, expectedPid?: number, allowPlacementChange = true): Promise<CaptureResult | null> {
   windowsActionSignal.getStore()?.throwIfAborted()
-  const minimized = isWindowMinimized(hwnd)
+  const minimized = allowPlacementChange && isWindowMinimized(hwnd)
   const script = `${CAPTURE_BY_HWND_PS}\n[WinCapH]::Capture([IntPtr]::new(${hwnd}), ${expectedPid ?? 0}, $${minimized})`
   // Once we move a minimized window, let the bounded capture restore it.
   const raw = await (minimized

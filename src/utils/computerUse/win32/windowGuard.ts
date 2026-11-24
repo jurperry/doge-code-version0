@@ -8,20 +8,13 @@
  *    keybd_event）→ 事件注入系统输入流，会落进**当前前台窗口**；目标
  *    不在前台时等于往别的应用里点击/打字。
  *
- * 卫兵链（对齐 zcode computer-use MCP 的 activate 语义：激活后必须验证
- * 前台后置条件，失败即报错，绝不静默降级到后台）：
- *   检查（IsWindow / IsIconic / 前台归属）→ 需要时恢复最小化并激活
- *   （AttachThreadInput 前台锁绕行 + ALT 微扰）→ 再校验 → 通过才放行。
- *
- * 全部走单条 PowerShell（一次进程内完成检查+激活+重试校验），与
- * platforms/win32.ts 其余输入原语同一套 spawnSync 风格。
+ * 输入前通过 FFI 快速检查，在实际派发的进程中复查身份与焦点。
+ * 只有显式激活窗口才尝试恢复和置前。
  */
 
-import { listWindows } from './windowEnum.js'
-import { runComputerUsePowerShell, runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
+import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
 import { runPowerShell } from './powerShell.js'
-import { foregroundWindow, windowProcessId } from './nativeWindows.js'
-import { INPUT_INTEGRITY_TYPES } from './elevation.js'
+import { foregroundWindow, isWindowForeground, isWindowMinimized, windowProcessId, windowText } from './nativeWindows.js'
 
 // ── C# P/Invoke helper ──────────────────────────────────────────────────────
 
@@ -40,15 +33,10 @@ public class CuGuard {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder sb, int max);
     public const uint GA_ROOT = 2;
-    public const byte VK_MENU = 0x12;
-    public const uint KEYEVENTF_KEYUP = 0x2;
 
-    // Foreground comparison is root-owner based: clicking a child/owned window
-    // (e.g. a dialog of the target app) still counts as the target being front.
     public static bool IsFg(IntPtr target) {
         IntPtr fg = GetForegroundWindow();
         return fg == target || GetAncestor(fg, GA_ROOT) == target;
@@ -82,13 +70,6 @@ public class CuGuard {
         }
         return IsFg(target);
     }
-    public static void AltNudge() {
-        // Bare ALT press/release unlocks the foreground lock for the next
-        // SetForegroundWindow (Windows treats it as user input). Last resort
-        // only — fires on the final retry below.
-        keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
-        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-    }
 }
 '@
 `
@@ -107,8 +88,6 @@ export function buildEnsureWindowScript(
   hwnd: number,
   needForeground: boolean,
   expectedPid?: number,
-  forInput = false,
-  allowAltNudge = true,
 ): string {
   const fgBlock = needForeground
     ? `
@@ -120,7 +99,6 @@ if ([CuGuard]::IsIconic([IntPtr]${hwnd})) {
 for (\$i = 0; \$i -lt 3 -and -not \$ok; \$i++) {
     \$ok = [CuGuard]::TryForeground([IntPtr]${hwnd})
     if (-not \$ok) {
-        ${allowAltNudge ? 'if ($i -eq 1) { [CuGuard]::AltNudge() }' : ''}
         Start-Sleep -Milliseconds 200
     }
 }
@@ -128,14 +106,13 @@ if (\$ok) { 'OK' } else { 'NOFG|' + [CuGuard]::FgTitle() }
 `
     : `'OK'
 `
-  const guarded = forInput ? `[CuInputIntegrity]::RequireWindow([IntPtr]${hwnd})\n${fgBlock}` : fgBlock
-  const identityBlock = expectedPid === undefined ? guarded : `
+  const identityBlock = expectedPid === undefined ? fgBlock : `
 \$currentPid = [uint32]0
 [CuGuard]::GetWindowThreadProcessId([IntPtr]${hwnd}, [ref]\$currentPid) | Out-Null
 if (\$currentPid -ne ${expectedPid}) { 'PIDMISMATCH|' + \$currentPid } else {
-${guarded}}
+${fgBlock}}
 `
-  return `${forInput ? INPUT_INTEGRITY_TYPES : ''}${GUARD_TYPES}
+  return `${GUARD_TYPES}
 if (-not [CuGuard]::IsWindow([IntPtr]${hwnd})) { 'DEAD' } else {
 ${identityBlock}}
 `
@@ -150,19 +127,9 @@ if (\$currentPid -ne ${expectedPid}) { throw 'Window identity changed (PID ' + \
   return `${GUARD_TYPES}
 if (-not [CuGuard]::IsWindow([IntPtr]${hwnd})) { throw 'Target window no longer exists' }
 ${pidCheck}
-if ([CuGuard]::IsIconic([IntPtr]${hwnd})) {
-    [CuGuard]::ShowWindow([IntPtr]${hwnd}, 9) | Out-Null
-    Start-Sleep -Milliseconds 250
+if ([CuGuard]::IsIconic([IntPtr]${hwnd}) -or -not [CuGuard]::IsFg([IntPtr]${hwnd})) {
+    throw 'The bound window is no longer in the foreground. No input was sent. Use activate_window with screenshot: true.'
 }
-\$ok = \$false
-for (\$i = 0; \$i -lt 3 -and -not \$ok; \$i++) {
-    \$ok = [CuGuard]::TryForeground([IntPtr]${hwnd})
-    if (-not \$ok) {
-        if (\$i -eq 1) { [CuGuard]::AltNudge() }
-        Start-Sleep -Milliseconds 200
-    }
-}
-if (-not \$ok) { throw 'Could not foreground the target window: ' + [CuGuard]::FgTitle() }
 `
 }
 
@@ -189,68 +156,25 @@ export function parseEnsureOutput(raw: string): EnsureWindowResult {
 
 // ── Guard entry point ───────────────────────────────────────────────────────
 
-/**
- * Check (and when `needForeground`, activate + re-verify) a window in a single
- * PowerShell invocation. Returns the status; the caller decides the error.
- */
-export function ensureWindow(
-  hwnd: number,
-  needForeground: boolean,
-  expectedPid?: number,
-  forInput = false,
-): EnsureWindowResult {
-  if (!Number.isInteger(hwnd) || hwnd <= 0) return { status: 'dead' }
-  try {
-    return parseEnsureOutput(runPowerShellSync(buildEnsureWindowScript(hwnd, needForeground, expectedPid, forInput), 10000))
-  } catch (error) {
-    if (forInput) throw error
-    return { status: 'dead' }
-  }
-}
-
 /** Foreground an observed window using only local window-manager operations. */
 export async function activateObservedWindow(hwnd: number, pid: number, signal?: AbortSignal): Promise<boolean> {
   if (!Number.isSafeInteger(hwnd) || hwnd <= 0 || !Number.isSafeInteger(pid) || pid <= 0) return false
   signal?.throwIfAborted()
   if (windowProcessId(hwnd) !== pid) return false
-  if (foregroundWindow() === hwnd) return true
-  const result = await runPowerShell(buildEnsureWindowScript(hwnd, true, pid, false, false), 4000, undefined, signal)
+  if (isWindowForeground(hwnd) && !isWindowMinimized(hwnd)) return true
+  const result = await runPowerShell(buildEnsureWindowScript(hwnd, true, pid), 4000, undefined, signal)
   return parseEnsureOutput(result).status === 'ok'
 }
 
-export async function ensureInputWindow(hwnd: number, needForeground: boolean, expectedPid?: number): Promise<EnsureWindowResult> {
+export function ensureInputWindow(hwnd: number, needForeground: boolean, expectedPid?: number): EnsureWindowResult {
+  if (!Number.isSafeInteger(hwnd) || hwnd <= 0) return { status: 'dead' }
   const pid = windowProcessId(hwnd)
   if (!pid) return { status: 'dead' }
   if (expectedPid !== undefined && pid !== expectedPid) return { status: 'identity_mismatch', actualPid: pid }
-  return parseEnsureOutput(await runComputerUsePowerShell(buildEnsureWindowScript(hwnd, needForeground, expectedPid, true), 5000))
-}
-
-// ── Replacement-window lookup (window died → app may have another window) ──
-
-/**
- * Find a live replacement window for a dead binding: same PID first, then any
- * window whose process name matches the bound executable's base name. Used to
- * survive an app closing one window and opening another (new document, dialog
- * teardown) without forcing the model to re-open the whole app.
- */
-export function findReplacementWindow(
-  pid: number | null,
-  exeBase: string | null,
-): { hwnd: number; pid: number } | null {
-  const windows = listWindows()
-  if (windows.length === 0) return null
-  if (pid != null && pid > 0) {
-    const byPid = windows.find(w => w.pid === pid)
-    if (byPid) return { hwnd: byPid.hwnd, pid: byPid.pid }
+  if (needForeground && (!isWindowForeground(hwnd) || isWindowMinimized(hwnd))) {
+    return { status: 'not_foreground', foregroundTitle: windowText(foregroundWindow(), 'title') || null }
   }
-  if (exeBase) {
-    const pids = getPidsForProcessName(exeBase)
-    if (pids.length > 0) {
-      const byProc = windows.find(w => pids.includes(w.pid))
-      if (byProc) return { hwnd: byProc.hwnd, pid: byProc.pid }
-    }
-  }
-  return null
+  return { status: 'ok' }
 }
 
 /** PIDs whose process name equals `name` (case-insensitive, no .exe). */
