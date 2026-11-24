@@ -13,6 +13,7 @@
  */
 
 import { win32 as windowsPath } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { API_RESIZE_PARAMS, resetMouseButtonHeld, targetImageSize } from '@ant/computer-use-mcp'
 import type { BindingReleaseInfo, BindingReleaseReason, FrontmostApp, TargetPreparation, WindowsWindow } from '@ant/computer-use-mcp'
 import { logForDebugging } from '../../debug.js'
@@ -39,13 +40,12 @@ import {
   getPidsForProcessName,
 } from '../win32/windowGuard.js'
 import { listInstalledAppsWin32 } from '../win32/installedApps.js'
-import { buildPortableAppLaunchBlock, START_CU_APPLICATION } from '../win32/appLaunch.js'
+import { buildPortableAppLaunchBlock, comparableExePath, launchExactExecutable, START_CU_APPLICATION } from '../win32/appLaunch.js'
 import { classifyWindowClasses, type WindowFramework } from '../win32/windowClassify.js'
 import { getWin32EscExpectFile, isWin32EscHotkeyRegistered } from '../win32/escHook.js'
 import { runPowerShell, windowsActionSignal } from '../win32/powerShell.js'
-import { childWindowClasses, enumerateDisplays, foregroundTarget, isWindowClientPoint, isWindowForeground, isWindowMinimized, monitorForWindow, targetAtPoint, windowProcessId, windowRectangle, windowText } from '../win32/nativeWindows.js'
+import { childWindowClasses, enumerateDisplays, foregroundTarget, hasMinimizeBox, isWindowClientPoint, isWindowForeground, isWindowMinimized, monitorForWindow, requestWindowMinimize, targetAtPoint, visibleWindowFrame, windowProcessId, windowRectangle, windowText } from '../win32/nativeWindows.js'
 import { ensureElevatedPowerShell, getElevatedPowerShellPid, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
-import { PROCESS_IMAGE_PS } from '../win32/processImage.js'
 import { getCurrentProcessIL, getProcessIL, INPUT_INTEGRITY_TYPES, needsElevatedHelper } from '../win32/elevation.js'
 import { desktopState } from '../win32/uacProbe.js'
 
@@ -326,7 +326,7 @@ async function flushPendingKeyReleases(): Promise<void> {
   }
 }
 
-export async function prepareWindowsTarget(signal?: AbortSignal, purpose: TargetPreparation = 'input'): Promise<void> {
+export async function prepareWindowsTarget(signal?: AbortSignal, purpose: TargetPreparation = 'input', authorizedPid?: number): Promise<void> {
   signal?.throwIfAborted()
   if (pendingKeyReleases.size > 0) await prepareComputerUseRelease()
   await flushPendingKeyReleases()
@@ -342,8 +342,8 @@ export async function prepareWindowsTarget(signal?: AbortSignal, purpose: Target
     }
   }
   if (boundHwnd && boundPid) showBoundWindowIndicator(boundHwnd, boundPid)
-  if (!boundPid && (purpose === 'capture' || purpose === 'hover')) {
-    // Full-display capture and positioning operate on the desktop itself.
+  if (!boundPid && (purpose === 'capture' || purpose === 'hover' || (purpose === 'click' && authorizedPid === undefined))) {
+    // Desktop clicks resolve the verified hit target later, after coordinate checks.
     setComputerUseTargetElevated(false)
     return
   }
@@ -352,7 +352,7 @@ export async function prepareWindowsTarget(signal?: AbortSignal, purpose: Target
     setComputerUseTargetElevated(false)
     return
   }
-  const pid = boundPid ?? foreground?.pid
+  const pid = boundPid ?? authorizedPid ?? foreground?.pid
   const target = pid ? getProcessIL(pid) : 'unknown'
   const required = needsElevatedHelper(current, target)
   if (required) {
@@ -986,19 +986,24 @@ const input: InputPlatform = {
     await sendAtomicInput(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed during mouse move' }`)
   },
 
-  async click(x, y, button, count = 1, modifiersHeld = false) {
+  async click(x, y, button, count = 1, modifiersHeld = false, foreground = false, authorizedPid) {
     if (!Number.isInteger(count) || count < 1 || count > 3) {
       throw new Error('Click count must be an integer from 1 to 3; no input was sent.')
     }
+    if (foreground && !boundHwnd) throw new Error('The selected window is no longer bound. No input was sent.')
+    if (authorizedPid !== undefined && (boundHwnd || !Number.isInteger(authorizedPid) || authorizedPid <= 0 ||
+        authorizedPid > 0xffffffff || targetAtPoint(x, y)?.pid !== authorizedPid)) {
+      throw new Error('The authorized window at these coordinates changed. Take a fresh screenshot. No click was sent.')
+    }
     if (boundHwnd) {
       const clientPoint = isWindowClientPoint(boundHwnd, x, y)
-      if (!clientPoint && count === 1 && button === 'left' && !modifiersHeld && boundPid) {
+      if (!foreground && !clientPoint && count === 1 && button === 'left' && !modifiersHeld && boundPid) {
         const revision = bindingRevision
         guardBoundWindow(false)
         if (await getWm().tryClickMinimize(boundHwnd, boundPid, x, y)) return
         if (bindingRevision !== revision) throw new Error('The bound window changed. Take a fresh screenshot before clicking.')
       }
-      const realInput = count > 1 || realMouseChannel() || !clientPoint
+      const realInput = foreground || count > 1 || realMouseChannel() || !clientPoint
       guardBoundWindow(realInput)
       if (realInput) {
         await sendInputClick(boundHwnd, x, y, button, count)
@@ -1017,8 +1022,12 @@ ${INPUT_INTEGRITY_TYPES}
 [CuWin32]::SetProcessDPIAware() | Out-Null
 if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed before click' }
 Start-Sleep -Milliseconds 20
+$pointer = New-Object CuWin32+POINT
 for ($i = 0; $i -lt ${count}; $i++) {
-    [CuInputIntegrity]::RequireAtCursor()
+    if (-not [CuWin32]::GetCursorPos([ref]$pointer) -or $pointer.X -ne ${Math.round(x)} -or $pointer.Y -ne ${Math.round(y)}) {
+        throw "The pointer moved before click $i. Inspect the current window before continuing."
+    }
+    [CuInputIntegrity]::RequireAtCursor([IntPtr]::Zero, ${authorizedPid ?? 0})
     [CuWin32]::mouse_event(${downFlag}, 0, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 50
     [CuWin32]::mouse_event(${upFlag}, 0, 0, 0, [IntPtr]::Zero)
@@ -1423,10 +1432,6 @@ function isAbsoluteExe(path: string | null): boolean {
   return path !== null && windowsPath.isAbsolute(path) && /\.exe$/i.test(path)
 }
 
-function comparableExePath(path: string): string {
-  return windowsPath.normalize(path).toLowerCase()
-}
-
 function windowIdentity(window: { hwnd: number; pid: number }): string {
   return `${window.hwnd}:${window.pid}`
 }
@@ -1439,16 +1444,72 @@ export function listWindowsWithIdentity(visibleOnly = true): WindowsWindow[] {
   }))
 }
 
+function requireObservedWindow(window: WindowsWindow) {
+  const candidate = listWindowDetails(false).find(item => item.hwnd === window.hwnd && item.pid === window.pid)
+  if (!candidate?.path || !window.bundleId || comparableExePath(candidate.path) !== comparableExePath(window.bundleId)) {
+    throw new Error('The selected window changed. Refresh list_windows before operating it.')
+  }
+  return candidate
+}
+
 export async function activateWindowsWindow(window: WindowsWindow, signal?: AbortSignal): Promise<boolean> {
   signal?.throwIfAborted()
-  const candidate = listWindowDetails(false).find(item => item.hwnd === window.hwnd && item.pid === window.pid)
-  if (!candidate?.path || comparableExePath(candidate.path) !== comparableExePath(window.bundleId)) {
-    throw new Error('The selected window changed. Refresh list_windows before activating it.')
-  }
+  const candidate = requireObservedWindow(window)
   signal?.throwIfAborted()
   const activated = await activateObservedWindow(candidate.hwnd, candidate.pid, signal)
   if (activated) explicitlyActivatedPid = candidate.pid
   return activated
+}
+
+export async function minimizeWindowsWindow(window: WindowsWindow, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted()
+  const { hwnd, pid, minimized } = requireObservedWindow(window)
+  if (minimized) return true
+  const elevated = needsElevatedHelper(getCurrentProcessIL(), getProcessIL(pid))
+  if (elevated) await ensureElevatedPowerShell(signal)
+  signal?.throwIfAborted()
+  requireObservedWindow(window)
+  setComputerUseTargetElevated(elevated)
+  try {
+    await getWm().sendMinimize(hwnd, pid, signal)
+  } finally {
+    setComputerUseTargetElevated(false)
+  }
+  for (let i = 0; i < 10 && windowProcessId(hwnd) === pid; i++) {
+    if (isWindowMinimized(hwnd)) return true
+    await delay(50, undefined, { signal })
+  }
+  return false
+}
+
+export async function minimizeAllWindows(signal?: AbortSignal) {
+  signal?.throwIfAborted()
+  const before = listWindows().filter(({ hwnd }) => hasMinimizeBox(hwnd) && visibleWindowFrame(hwnd))
+  unbindWindow('switch_display')
+  for (const { hwnd, pid } of before) requestWindowMinimize(hwnd, pid)
+
+  const inspect = () => {
+    const stillOpen = before.filter(({ hwnd, pid }) => windowProcessId(hwnd) === pid)
+    const minimized = stillOpen.filter(({ hwnd }) => isWindowMinimized(hwnd)).length
+    return { minimized, remaining: stillOpen.length - minimized, closed: before.length - stillOpen.length }
+  }
+  const deadline = performance.now() + 800
+  let status = inspect()
+  while (status.remaining > 0 && performance.now() < deadline) {
+    await delay(50, undefined, { signal })
+    status = inspect()
+  }
+  return { requested: before.length, ...status }
+}
+
+async function openObservedWindow(hwnd: number, pid: number, appId: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted()
+  bindWindow(hwnd, pid, appId)
+  if (await activateObservedWindow(hwnd, pid, signal)) explicitlyActivatedPid = pid
+  await prepareWindowsTarget(signal)
+  if (boundHwnd !== hwnd || windowProcessId(hwnd) !== pid) {
+    throw new Error('The opened application did not retain a valid window binding. Inspect the current target before continuing.')
+  }
 }
 
 const apps: AppsPlatform = {
@@ -1495,17 +1556,15 @@ const apps: AppsPlatform = {
     if (windowId && !candidate) {
       throw new Error('The selected window no longer matches the granted executable. Refresh list_granted_applications before opening it.')
     }
-    if (candidate) {
-      bindWindow(candidate.hwnd, candidate.pid, name)
-      await activateObservedWindow(candidate.hwnd, candidate.pid, signal)
-      await prepareWindowsTarget(signal)
+    const selected = candidate ?? (exactExe ? await launchExactExecutable(name, signal) : undefined)
+    if (selected) {
+      await openObservedWindow(selected.hwnd, selected.pid, name, signal)
       return
     }
 
     // ── Launch: 1) exact path 2) PATH 3) registry 4) UWP 5) raw name ──
     const result = await runPowerShell(`
 ${WIN32_TYPES}
-${exactExe ? PROCESS_IMAGE_PS : ''}
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -1541,7 +1600,6 @@ public class CuLaunch {
 # WindowsApps with an App Paths entry) — Get-StartApps is unreliable in
 # non-interactive sessions.
 $target = '${escaped}'
-$exactExe = $${exactExe}
 $proc = $null
 $launchPath = ''
 
@@ -1552,7 +1610,6 @@ if (Test-Path -LiteralPath $target) {
     ${buildPortableAppLaunchBlock()}
 }
 
-if (-not $exactExe) {
 # 2. exe name in PATH (e.g. "notepad.exe", "code.exe") — .exe results only
 if (-not $proc) {
     foreach ($name in @($target, "$target.exe")) {
@@ -1606,30 +1663,16 @@ if (-not $proc) {
 # 6. Last resort: try raw name
 if (-not $proc) { $proc = Start-CuApplication $target; if ($proc) { $launchPath = $target } }
 
-}
-
 if (-not $proc) { Write-Host "LAUNCH_FAILED"; exit }
 
 # Wait for a window: 1) the new PID  2) any PID whose process name matches the
 # launched exe's base for shell identities (single-instance/UWP handoff).
-# Complete exe paths are matched only by process image.
 $hint = if ($launchPath -like '*\\*') { [System.IO.Path]::GetFileNameWithoutExtension($launchPath) } else { '${base.replace(/'/g, "''")}' }
 $hwnd = 0
 $hwndPid = 0
 for ($i = 0; $i -lt 50 -and $hwnd -eq 0; $i++) {
     Start-Sleep -Milliseconds 200
     [CuLaunch]::ListWindows()
-    if ($exactExe) {
-        foreach ($c in [CuLaunch]::windows) {
-            $parts = $c.Split('|')
-            $wp = [uint32]$parts[1]
-            $image = [CuProcessImage]::Get($wp)
-            if ([string]::Equals($image, $launchPath, [StringComparison]::OrdinalIgnoreCase)) {
-                $hwnd = [long]$parts[0]; $hwndPid = $wp; break
-            }
-        }
-        continue
-    }
     foreach ($c in [CuLaunch]::windows) {
         $parts = $c.Split('|')
         $wp = [uint32]$parts[1]
@@ -1657,9 +1700,6 @@ Write-Host "$hwnd|$hwndPid"
       )
     }
     if (result.startsWith('HWND_NOT_FOUND')) {
-      if (exactExe) {
-        throw new Error(`Launched "${name}" but no window belonging to that executable appeared within 10s. If it opened another application, request access to that application's executable before binding its window.`)
-      }
       throw new Error(
         `Launched "${name}" but no application window appeared within 10s. ` +
           'It may be a background-only app, still initializing, or require ' +
@@ -1671,10 +1711,7 @@ Write-Host "$hwnd|$hwndPid"
     const hwnd = Number(parts[0])
     const pid = Number(parts[1])
     if (hwnd > 0) {
-      // Bind to the launched window — all subsequent operations target this HWND
-      bindWindow(hwnd, pid, name)
-      await activateObservedWindow(hwnd, pid, signal)
-      await prepareWindowsTarget(signal)
+      await openObservedWindow(hwnd, pid, name, signal)
     }
   },
 

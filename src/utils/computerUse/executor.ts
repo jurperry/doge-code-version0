@@ -759,9 +759,11 @@ export function createCliExecutor(opts: {
       button: 'left' | 'right' | 'middle',
       count: 1 | 2 | 3,
       modifiers?: string[],
+      foreground?: boolean,
+      authorizedPid?: number,
     ): Promise<void> {
       if (process.platform === 'win32' && !modifiers?.length) {
-        await platform!.input.click(x, y, button, count)
+        await platform!.input.click(x, y, button, count, false, foreground, authorizedPid)
         lastMouseX = x
         lastMouseY = y
         return
@@ -848,10 +850,10 @@ export function createCliExecutor(opts: {
 
     // ── App management ───────────────────────────────────────────────────
 
-    async prepareForTarget(signal, purpose): Promise<void> {
+    async prepareForTarget(signal, purpose, authorizedPid): Promise<void> {
       if (process.platform !== 'win32') return
       const { prepareWindowsTarget } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
-      await prepareWindowsTarget(signal, purpose)
+      await prepareWindowsTarget(signal, purpose, authorizedPid)
     },
 
     isWindowBound: process.platform === 'win32' ? () => {
@@ -948,6 +950,21 @@ export function createCliExecutor(opts: {
     activateWindow: process.platform === 'win32' ? async (window, signal) => {
       const { activateWindowsWindow } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
       return activateWindowsWindow(window, signal)
+    } : undefined,
+
+    minimizeWindow: process.platform === 'win32' ? async (window, signal) => {
+      const { minimizeWindowsWindow } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      return minimizeWindowsWindow(window, signal)
+    } : undefined,
+
+    minimizeAllWindows: process.platform === 'win32' ? async signal => {
+      const { minimizeAllWindows } = require('./platforms/win32.js') as typeof import('./platforms/win32.js')
+      return minimizeAllWindows(signal)
+    } : undefined,
+
+    resolveDesktopApp: process.platform === 'win32' ? async (reference, signal) => {
+      const { resolveDesktopApp } = require('./win32/desktopItems.js') as typeof import('./win32/desktopItems.js')
+      return resolveDesktopApp(reference, signal)
     } : undefined,
 
     getOwnIntegrity: process.platform === 'win32' ? () => {

@@ -65,7 +65,7 @@ test('foreground script restores minimized windows and retries activation', () =
   expect(script).toContain('IsWindow')
   expect(script).toContain('IsIconic')
   // SW_RESTORE = 9
-  expect(script).toContain('ShowWindow([IntPtr]12345, 9)')
+  expect(script).toContain('ShowWindowAsync([IntPtr]12345, 9)')
   expect(script).toContain('AttachThreadInput')
   expect(script).toContain('for ($i = 0; $i -lt 3')
   // Re-verification after activation attempts

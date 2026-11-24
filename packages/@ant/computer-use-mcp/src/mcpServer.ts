@@ -275,7 +275,7 @@ export function bindSessionContext(
 
     // ─── Dispatch ────────────────────────────────────────────────────────
     const changesTarget = name === "open_application" || name === "switch_display";
-    const changesFocus = changesTarget || name === "activate_window";
+    const changesFocus = changesTarget || name === "activate_window" || name === "minimize_window";
     if (targetChangesPending > 0 || (changesFocus && activeCalls > 0) ||
         (isLinux && activeLinuxExecutors.has(adapter.executor))) {
       requestSignal?.removeEventListener("abort", abortDialog);
@@ -294,6 +294,7 @@ export function bindSessionContext(
       if (changesTarget) clearScreenshot();
       throwIfAborted();
       const result = await handleToolCall(adapter, name, args, overrides);
+      if (name === "minimize_window" && !result.isError) clearScreenshot();
       const currentBoundRevision = adapter.executor.getBoundRevision?.();
       const automaticallyUnbound = !changesTarget && boundRevision !== undefined && currentBoundRevision !== undefined && currentBoundRevision !== boundRevision && currentBoundRevision > lastHandledBoundRevision && !adapter.executor.getBoundAppId?.();
       if (automaticallyUnbound) {

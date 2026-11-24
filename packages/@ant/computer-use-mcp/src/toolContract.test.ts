@@ -17,10 +17,11 @@ const sharedFields: Record<string, string[]> = {
 }
 const windowsFields = {
   ...sharedFields,
-  left_click: [...sharedFields.left_click!, 'screenshot'],
-  open_application: ['app', 'window_id', 'screenshot'],
+  left_click: [...sharedFields.left_click!, 'screenshot', 'input', 'settle_ms'],
+  open_application: ['app', 'window_id', 'screenshot', 'settle_ms'],
   list_granted_applications: ['include_windows', 'include_desktop'],
   list_windows: ['visible_only', 'granted_only', 'limit'], activate_window: ['hwnd', 'screenshot'], get_window: ['hwnd'],
+  minimize_window: ['window_id', 'all'],
 }
 
 describe('Computer Use model contract', () => {
@@ -47,6 +48,8 @@ describe('Computer Use model contract', () => {
     expect(actionTools).toHaveLength(properties.action?.enum?.length ?? 0)
     const fields = new Set(actionTools.flatMap(tool => Object.keys(tool.inputSchema.properties ?? {})))
     fields.delete('screenshot') // Batches use an explicit screenshot action.
+    fields.delete('settle_ms') // Batches use an explicit wait action.
+    fields.delete('input') // Foreground override is a standalone action.
     expect(Object.keys(properties).sort()).toEqual(['action', ...fields].sort())
   })
 })

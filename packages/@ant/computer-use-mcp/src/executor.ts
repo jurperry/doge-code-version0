@@ -97,7 +97,7 @@ export interface ComputerExecutorCapabilities {
   hostBundleId: string
 }
 
-export type TargetPreparation = 'input' | 'capture' | 'hover'
+export type TargetPreparation = 'input' | 'capture' | 'hover' | 'click'
 
 export interface ComputerExecutor {
   capabilities: ComputerExecutorCapabilities
@@ -147,6 +147,8 @@ export interface ComputerExecutor {
     button: 'left' | 'right' | 'middle',
     count: 1 | 2 | 3,
     modifiers?: string[],
+    foreground?: boolean,
+    authorizedPid?: number,
   ): Promise<void>
   mouseDown(): Promise<void>
   mouseUp(): Promise<void>
@@ -157,7 +159,7 @@ export interface ComputerExecutor {
   ): Promise<void>
   scroll(x: number, y: number, dx: number, dy: number): Promise<void>
   /** Match the execution context to the authorized Windows target when UIPI requires it. */
-  prepareForTarget?(signal?: AbortSignal, purpose?: TargetPreparation): Promise<void>
+  prepareForTarget?(signal?: AbortSignal, purpose?: TargetPreparation, authorizedPid?: number): Promise<void>
   isWindowBound?(): boolean
   getBoundAppId?(): string | null
   getBoundRevision?(): number | undefined
@@ -174,6 +176,9 @@ export interface ComputerExecutor {
   listRunningApps(): Promise<RunningApp[]>
   listWindows?(visibleOnly?: boolean): Promise<WindowsWindow[]>
   activateWindow?(window: WindowsWindow, signal?: AbortSignal): Promise<boolean>
+  minimizeWindow?(window: WindowsWindow, signal?: AbortSignal): Promise<boolean>
+  minimizeAllWindows?(signal?: AbortSignal): Promise<{ requested: number; minimized: number; remaining: number; closed: number }>
+  resolveDesktopApp?(reference: string, signal?: AbortSignal): Promise<InstalledApp | undefined>
   getOwnIntegrity?(): string
   openApp(bundleId: string, signal?: AbortSignal, windowId?: string): Promise<void>
   /** Windows: leave HWND-bound mode and use display/global coordinates. */

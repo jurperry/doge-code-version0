@@ -88,10 +88,15 @@ public static class CuInputIntegrity {
 
     public static void RequireForeground() { RequireWindow(GetForegroundWindow()); }
     public static void RequireAtCursor() { RequireAtCursor(IntPtr.Zero); }
-    public static void RequireAtCursor(IntPtr expectedRoot) {
+    public static void RequireAtCursor(IntPtr expectedRoot) { RequireAtCursor(expectedRoot, 0); }
+    public static void RequireAtCursor(IntPtr expectedRoot, uint expectedPid) {
         Point point;
         if (!GetCursorPos(out point)) throw new InvalidOperationException("Could not read cursor position before Windows input.");
         IntPtr hit = WindowFromPoint(point);
+        uint pid;
+        if (expectedPid != 0 && (GetWindowThreadProcessId(hit, out pid) == 0 || pid != expectedPid)) {
+            throw new InvalidOperationException("The authorized window at these coordinates changed. Take a fresh screenshot. No click was sent at this point.");
+        }
         if (expectedRoot != IntPtr.Zero && GetAncestor(hit, 2) != expectedRoot) { // GA_ROOT
             throw new InvalidOperationException("The point is covered by another window or is outside the bound window. Take a fresh screenshot. No click was sent at this point.");
         }

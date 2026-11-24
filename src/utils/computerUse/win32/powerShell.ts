@@ -25,13 +25,17 @@ function summarize(value: string): string {
   return text.length > 500 ? `${text.slice(0, 500)}…` : text
 }
 
+export class PowerShellTimeoutError extends Error {}
+
 function assertPowerShellSuccess(result: PowerShellResult, timedOut = false): string {
   if (timedOut || result.exitCode !== 0) {
     const detail = summarize(result.stderr) || summarize(result.stdout) || 'no diagnostic output'
     const reason = timedOut
       ? 'PowerShell timed out'
       : `PowerShell exited with code ${result.exitCode ?? 'unknown'}`
-    throw new Error(`${reason}: ${detail}. The action outcome is unknown; do not blindly retry operations with side effects.`)
+    const message = `${reason}: ${detail}. The action outcome is unknown; do not blindly retry operations with side effects.`
+    if (timedOut) throw new PowerShellTimeoutError(message)
+    throw new Error(message)
   }
   return result.stdout.trim()
 }

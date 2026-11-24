@@ -83,7 +83,7 @@ export interface FrontmostAppInfo {
 export interface InputPlatform {
   // --- Mode A: Global input (all platforms) ---
   moveMouse(x: number, y: number): Promise<void>
-  click(x: number, y: number, button: 'left' | 'right' | 'middle', count?: number, modifiersHeld?: boolean): Promise<void>
+  click(x: number, y: number, button: 'left' | 'right' | 'middle', count?: number, modifiersHeld?: boolean, foreground?: boolean, authorizedPid?: number): Promise<void>
   typeText(text: string, signal?: AbortSignal): Promise<void>
   key(name: string, action: 'press' | 'release'): Promise<void>
   keys(combo: string[]): Promise<void>

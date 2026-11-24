@@ -55,7 +55,7 @@ import type {
 } from "./executor.js";
 import { isSystemKeyCombo } from "./keyBlocklist.js";
 import { validateClickTarget } from "./pixelCompare.js";
-import { BATCH_ACTION_NAMES, isComputerUseToolAvailable } from "./tools.js";
+import { BATCH_ACTION_NAMES, isComputerUseToolAvailable, MAX_RENDER_WAIT_MS } from "./tools.js";
 import { SENTINEL_BUNDLE_IDS } from "./sentinelApps.js";
 import type {
   AppGrant,
@@ -598,6 +598,7 @@ async function runInputActionGates(
   subGates: CuSubGates,
   actionKind: CuActionKind,
   prepareTarget = true,
+  directClick = false,
 ): Promise<CuCallToolResult | null> {
   const liveRevision = adapter.executor.getBoundRevision?.();
   if (prepareTarget && actionKind !== "keyboard" && adapter.executor.capabilities.platform === "win32" &&
@@ -608,7 +609,8 @@ async function runInputActionGates(
   if (gate) return gate;
   if (prepareTarget) {
     const boundBefore = adapter.executor.getBoundAppId?.() ?? null;
-    await adapter.executor.prepareForTarget?.(overrides.requestSignal, actionKind === "mouse_position" ? "hover" : "input");
+    const purpose = actionKind === "mouse_position" ? "hover" : directClick && !boundBefore ? "click" : "input";
+    await adapter.executor.prepareForTarget?.(overrides.requestSignal, purpose);
     if (adapter.executor.capabilities.platform === 'win32') {
       const revisionChanged = overrides.boundRevision !== undefined && adapter.executor.getBoundRevision?.() !== overrides.boundRevision;
       if (revisionChanged || (boundBefore !== null && !adapter.executor.getBoundAppId?.())) {
@@ -805,6 +807,7 @@ async function runHitTestGate(
   x: number,
   y: number,
   actionKind: CuActionKind,
+  onAuthorizedTarget?: (target: FrontmostApp) => void,
 ): Promise<CuCallToolResult | null> {
   // Windows bound mode resolves appUnderPoint to the authorized binding;
   // global mode performs a real WindowFromPoint hit-test. Other unfiltered
@@ -860,7 +863,10 @@ async function runHitTestGate(
     await syncClipboardStash(adapter, overrides, true);
   }
 
-  if (tierSatisfies(targetTier, actionKind)) return null;
+  if (tierSatisfies(targetTier, actionKind)) {
+    onAuthorizedTarget?.(target);
+    return null;
+  }
 
   // Target is in the allowlist but tier doesn't cover this action.
   // runHitTestGate is only called with mouse/mouse_full (keyboard routes to
@@ -1134,6 +1140,16 @@ function isExactAppPathMatch(requested: string, app: InstalledApp): boolean {
     .some(candidate => normalizeAppId("win32", candidate) === wanted);
 }
 
+function desktopGrantIdentity(item: InstalledApp, installed: readonly InstalledApp[]): InstalledApp {
+  const id = item.bundleId;
+  const exe = windowsPath.basename(id);
+  const names = installed.filter(app => isExactAppPathMatch(id, app)).map(app => app.displayName);
+  const restrictedNames = [...names, exe, id];
+  const displayName = restrictedNames.find(name => getDefaultTierForApp(id, name) === "read") ??
+    restrictedNames.find(name => getDefaultTierForApp(id, name) === "click") ?? names[0] ?? exe;
+  return { ...item, displayName };
+}
+
 function resolvePortableExecutable(requested: string): InstalledApp | undefined {
   if (process.platform !== "win32" || !/^[a-z]:[\\/].+\.exe$/i.test(requested)) return undefined;
   try {
@@ -1145,10 +1161,15 @@ function resolvePortableExecutable(requested: string): InstalledApp | undefined 
   return { bundleId: requested, displayName, path: requested };
 }
 
+function isWindowsDesktopReference(requested: string): boolean {
+  return /^Desktop[\\/]/i.test(requested) || /^[a-z]:[\\/].+\.lnk$/i.test(requested);
+}
+
 function resolveRequestedApps(
   requestedNames: string[],
   installed: InstalledApp[],
   alreadyGrantedBundleIds: ReadonlySet<string>,
+  desktopApps?: ReadonlyMap<string, InstalledApp | undefined>,
 ): ResolvedAppRequest[] {
   const byLowerDisplayName = new Map<string, InstalledApp>();
   const byBundleId = new Map<string, InstalledApp>();
@@ -1162,6 +1183,18 @@ function resolveRequestedApps(
   }
 
   return requestedNames.map((requested): ResolvedAppRequest => {
+    if (desktopApps?.has(requested)) {
+      const item = desktopApps.get(requested);
+      const resolved = item && desktopGrantIdentity(item, installed);
+      const id = resolved?.bundleId;
+      return {
+        requestedName: requested,
+        resolved,
+        isSentinel: false,
+        alreadyGranted: id ? alreadyGrantedBundleIds.has(id) : false,
+        proposedTier: getDefaultTierForApp(id, resolved?.displayName ?? requested),
+      };
+    }
     const portable = resolvePortableExecutable(requested);
     let resolved: InstalledApp | undefined;
     if (looksLikeBundleId(requested)) {
@@ -1407,6 +1440,7 @@ async function handleRequestAccess(
     overrides.allowedApps,
     new Set(overrides.userDeniedBundleIds.map(id => normalizeAppId(adapter.executor.capabilities.platform, id))),
     overrides.selectedDisplayId,
+    overrides.requestSignal,
   );
 
   let dialogGranted: AppGrant[] = [];
@@ -1593,10 +1627,25 @@ async function buildAccessRequest(
   allowedApps: AppGrant[],
   userDeniedBundleIds: ReadonlySet<string>,
   selectedDisplayId?: number,
+  signal?: AbortSignal,
 ): Promise<AccessRequestParts> {
   const alreadyGranted = new Set(allowedApps.map((g) => g.bundleId));
-  const installed = await adapter.executor.listInstalledApps();
-  const resolved = resolveRequestedApps(apps, installed, alreadyGranted);
+  const executor = adapter.executor;
+  const references = executor.capabilities.platform === "win32" ? [...new Set(apps.filter(isWindowsDesktopReference))] : [];
+  const [installed, desktopItems] = await Promise.all([
+    executor.listInstalledApps(),
+    // Resolve in order so a large request cannot spawn a burst of helpers.
+    (async () => {
+      const items = new Map<string, InstalledApp | undefined>();
+      for (const reference of references) {
+        signal?.throwIfAborted();
+        items.set(reference, await executor.resolveDesktopApp?.(reference, signal));
+      }
+      return items;
+    })(),
+  ]);
+  signal?.throwIfAborted();
+  const resolved = resolveRequestedApps(apps, installed, alreadyGranted, desktopItems);
 
   // Policy-level auto-deny (baked-in, not user-configurable). Stripped
   // before userDenied — checks bundle ID AND display name (covers
@@ -1606,7 +1655,11 @@ async function buildAccessRequest(
   const afterPolicy: typeof resolved = [];
   for (const r of resolved) {
     const displayName = r.resolved?.displayName ?? r.requestedName;
-    if (isPolicyDenied(r.resolved?.bundleId, displayName)) {
+    const desktopApp = desktopItems.get(r.requestedName);
+    const knownAliases = desktopApp ? installed.filter(app => isExactAppPathMatch(desktopApp.bundleId, app)) : [];
+    if (isPolicyDenied(r.resolved?.bundleId, displayName) ||
+        (desktopApp && isPolicyDenied(desktopApp.bundleId, windowsPath.basename(desktopApp.bundleId))) ||
+        knownAliases.some(app => isPolicyDenied(app.bundleId, app.displayName))) {
       policyDenied.push({ requestedName: r.requestedName, displayName });
     } else {
       afterPolicy.push(r);
@@ -1622,7 +1675,9 @@ async function buildAccessRequest(
   const userDenied: Array<{ requestedName: string; displayName: string }> = [];
   const surviving: typeof afterPolicy = [];
   for (const r of afterPolicy) {
-    if (r.resolved && userDeniedBundleIds.has(normalizeAppId(adapter.executor.capabilities.platform, r.resolved.bundleId))) {
+    if (r.resolved && (userDeniedBundleIds.has(normalizeAppId(executor.capabilities.platform, r.resolved.bundleId)) ||
+        (desktopItems.get(r.requestedName) && installed.some(app => isExactAppPathMatch(r.resolved!.bundleId, app) &&
+          [app.bundleId, app.path, ...(app.extraPaths ?? [])].some(alias => userDeniedBundleIds.has(normalizeAppId("win32", alias))))))) {
       userDenied.push({
         requestedName: r.requestedName,
         displayName: r.resolved.displayName,
@@ -1934,6 +1989,7 @@ async function handleRequestTeachAccess(
     overrides.allowedApps,
     new Set(overrides.userDeniedBundleIds.map(id => normalizeAppId(adapter.executor.capabilities.platform, id))),
     overrides.selectedDisplayId,
+    overrides.requestSignal,
   );
 
   // All requested apps were user-denied (or unresolvable) and none pre-granted
@@ -2897,6 +2953,15 @@ async function handleZoom(
   };
 }
 
+function readRenderWait(value: unknown, supported: boolean, fallback: number): number | Error {
+  if (value === undefined) return fallback;
+  if (!supported) return new Error("settle_ms requires a Windows follow-up screenshot.");
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > MAX_RENDER_WAIT_MS) {
+    return new Error(`settle_ms must be an integer from 0 to ${MAX_RENDER_WAIT_MS}.`);
+  }
+  return value;
+}
+
 /** Shared handler for all five click variants. */
 async function handleClickVariant(
   adapter: ComputerUseHostAdapter,
@@ -2910,9 +2975,19 @@ async function handleClickVariant(
     return errorResult("screenshot must be a boolean", "bad_args");
   }
   const observe = args.screenshot === true;
+  const isWindows = adapter.executor.capabilities.platform === "win32";
+  const waitMs = readRenderWait(args.settle_ms, isWindows && observe, 140);
+  if (waitMs instanceof Error) return errorResult(waitMs.message, "bad_args");
   const revision = adapter.executor.getBoundRevision?.();
   if (observe && (button !== "left" || count !== 1 || revision === undefined || !adapter.executor.getBoundWindowState?.())) {
     return errorResult("screenshot: true requires a Windows left_click on a bound window. Use computer_batch with a final screenshot for other clicks.", "bad_args");
+  }
+  if (args.input !== undefined && (!isWindows || button !== "left" || count !== 1 || (args.input !== "auto" && args.input !== "foreground"))) {
+    return errorResult("input must be auto or foreground on Windows left_click.", "bad_args");
+  }
+  const foregroundInput = args.input === "foreground";
+  if (foregroundInput && (revision === undefined || !adapter.executor.getBoundWindowState?.() || args.text !== undefined)) {
+    return errorResult("input: foreground requires a bound Windows window and no modifier keys. Call open_application first.", "bad_args");
   }
   // A prior left_mouse_down may have set mouseButtonHeld without a matching
   // left_mouse_up (e.g. drag rejected by a tier gate, model falls back to
@@ -2963,12 +3038,15 @@ async function handleClickVariant(
     button !== "left" || (modifiers !== undefined && modifiers.length > 0)
       ? "mouse_full"
       : "mouse";
+  const directWindowsClick = isWindows && !modifiers?.length;
 
   const gate = await runInputActionGates(
     adapter,
     overrides,
     subGates,
     clickActionKind,
+    true,
+    directWindowsClick,
   );
   if (gate) return gate;
 
@@ -2977,10 +3055,12 @@ async function handleClickVariant(
   // §6 item P — pixel-validation staleness check. Sub-gated.
   // Runs AFTER the gates (no point validating if we're about to refuse
   // anyway) but BEFORE the executor call.
-  const isWindows = adapter.executor.capabilities.platform === "win32";
   const boundWindows = isWindows && (adapter.executor.isWindowBound?.() ?? !!adapter.executor.getBoundAppId?.());
   const bound = boundWindows ? adapter.executor.getBoundWindowState?.() : null;
-  if (bound?.minimized || (bound && (bound.requiresForeground || count > 1 || !!modifiers?.length) && !bound.foreground)) {
+  if (foregroundInput && (!bound || revision !== adapter.executor.getBoundRevision?.())) {
+    return errorResult("The bound window changed. Use open_application to get a fresh screenshot.", "state_conflict");
+  }
+  if (bound?.minimized || (bound && (foregroundInput || bound.requiresForeground || count > 1 || !!modifiers?.length) && !bound.foreground)) {
     return errorResult(
       `The bound window is ${bound.minimized ? "minimized" : "in the background"} (hwnd=${bound.hwnd}, foreground=${bound.foreground}). No click was sent. ` +
         "If the user wants to continue there, call activate_window with this hwnd and screenshot: true.",
@@ -3035,6 +3115,7 @@ async function handleClickVariant(
     adapter.logger,
   );
 
+  let authorizedPid: number | undefined;
   const hitGate = await runHitTestGate(
     adapter,
     overrides,
@@ -3042,14 +3123,27 @@ async function handleClickVariant(
     x,
     y,
     clickActionKind,
+    directWindowsClick && !boundWindows ? target => { authorizedPid = target.pid } : undefined,
   );
   if (hitGate) return hitGate;
 
+  if (authorizedPid !== undefined) {
+    await adapter.executor.prepareForTarget?.(overrides.requestSignal, "click", authorizedPid);
+  }
+  // Preparation may have shown UAC. The host checks the desktop again before input.
+  if (isWindows) await overrides.beforeAction?.("left_click");
   throwIfActionAborted(overrides);
-  await adapter.executor.click(x, y, button, count, modifiers);
+  if (foregroundInput && revision !== adapter.executor.getBoundRevision?.()) {
+    return errorResult("The bound window changed. Use open_application to get a fresh screenshot.", "state_conflict");
+  }
+  if (foregroundInput || authorizedPid !== undefined) {
+    await adapter.executor.click(x, y, button, count, modifiers, foregroundInput, authorizedPid);
+  } else {
+    await adapter.executor.click(x, y, button, count, modifiers);
+  }
   const result = okText(`Click dispatched (count=${count}); application effect is not verified.`);
   if (!observe || revision === undefined) return result;
-  await delay(140, undefined, { signal: overrides.requestSignal });
+  if (waitMs > 0) await delay(waitMs, undefined, { signal: overrides.requestSignal });
   return observeBoundWindow(adapter, overrides, subGates, revision, result);
 }
 
@@ -3441,6 +3535,8 @@ async function handleOpenApplication(
 
   // Resolve display-name → bundle ID. Same logic as request_access.
   const platform = adapter.executor.capabilities.platform;
+  const waitMs = readRenderWait(args.settle_ms, platform === "win32" && args.screenshot !== false, 0);
+  if (waitMs instanceof Error) return errorResult(waitMs.message, "bad_args");
   if (platform === "win32" && args.screenshot !== undefined && typeof args.screenshot !== "boolean") {
     return errorResult("screenshot must be a boolean.", "bad_args");
   }
@@ -3468,15 +3564,15 @@ async function handleOpenApplication(
   }
 
   const windowId = args.window_id;
+  if (platform === "win32" && await isExplicitlyDeniedTarget(adapter, overrides, { bundleId: targetBundleId, displayName: app })) {
+    return errorResult("The selected application is denied.", "app_not_granted");
+  }
   if (windowId !== undefined) {
     if (platform !== "win32" || !adapter.executor.listWindows) {
       return errorResult("Window selection is unavailable on this platform.", "feature_unavailable");
     }
     if (typeof windowId !== "string" || !/^[1-9]\d{0,15}:[1-9]\d{0,9}$/.test(windowId)) {
       return errorResult("window_id must come from list_granted_applications.", "bad_args");
-    }
-    if (await isExplicitlyDeniedTarget(adapter, overrides, { bundleId: targetBundleId, displayName: app })) {
-      return errorResult("The selected application is denied.", "app_not_granted");
     }
   }
 
@@ -3492,6 +3588,12 @@ async function handleOpenApplication(
   if (platform === "win32") {
     const opened = `Open dispatched for "${app}".`;
     if (args.screenshot === false) return okText(`${opened} Call screenshot before clicking.`);
+    const revision = adapter.executor.getBoundRevision?.();
+    const wasBound = adapter.executor.isWindowBound?.() ?? !!adapter.executor.getBoundWindowState?.();
+    if (waitMs > 0) await delay(waitMs, undefined, { signal: overrides.requestSignal });
+    if (revision !== undefined && wasBound) {
+      return observeBoundWindow(adapter, { ...overrides, lastScreenshot: undefined }, subGates, revision, okText(opened));
+    }
     const shot = await handleScreenshot(adapter, { ...overrides, lastScreenshot: undefined }, subGates);
     if (shot.isError) return okText(`${opened} A fresh image was unavailable. Call screenshot before clicking.`);
     return { ...shot, content: [{ type: "text", text: opened }, ...shot.content] };
@@ -3745,6 +3847,43 @@ async function handleWindowsTool(
     : "Windows did not foreground this window. Inspect the current screen or ask the user to activate it." });
   return activated && args.screenshot === true && revision !== undefined
     ? observeBoundWindow(adapter, overrides, subGates, revision, result) : result;
+}
+
+async function handleMinimizeWindow(
+  adapter: ComputerUseHostAdapter,
+  args: Record<string, unknown>,
+  overrides: ComputerUseOverrides,
+): Promise<CuCallToolResult> {
+  const executor = adapter.executor;
+  if (args.all !== undefined && typeof args.all !== "boolean") return errorResult("all must be a boolean.", "bad_args");
+  if (mouseButtonHeld) return errorResult("Release the held mouse button before minimizing windows.", "state_conflict");
+  const windowId = args.window_id;
+  if (args.all === true) {
+    if (windowId !== undefined) return errorResult("all and window_id cannot be combined.", "bad_args");
+    if (!overrides.grantFlags.systemKeyCombos) {
+      return errorResult("Minimize All requires the systemKeyCombos grant from request_access.", "grant_flag_required");
+    }
+    if (!executor.minimizeAllWindows) return errorResult("Minimize All is unavailable.", "feature_unavailable");
+    throwIfActionAborted(overrides);
+    const status = await executor.minimizeAllWindows(overrides.requestSignal);
+    return okJson({ scope: "desktop", ...status, ...(status.remaining > 0 && { message: "Some windows are still open. Use screenshot to inspect the desktop if needed." }) });
+  }
+  if (!executor.listWindows || !executor.minimizeWindow) return errorResult("Window minimization is unavailable.", "feature_unavailable");
+  if (windowId !== undefined && (typeof windowId !== "string" || !/^[1-9]\d{0,15}:[1-9]\d{0,9}$/.test(windowId))) {
+    return errorResult("window_id must be an exact windowId from list_windows.", "bad_args");
+  }
+  const boundHwnd = windowId === undefined ? executor.getBoundWindowState?.()?.hwnd : undefined;
+  if (windowId === undefined && boundHwnd === undefined) {
+    return errorResult("No window is bound. Pass window_id from list_windows or bind an app with open_application.", "state_conflict");
+  }
+  const match = (await executor.listWindows(false)).find(window => windowId === undefined ? window.hwnd === boundHwnd : window.windowId === windowId);
+  const [authorized] = match ? await windowsWithGrant(adapter, overrides, [match]) : [];
+  if (!authorized || !tierSatisfies(authorized.tier, "mouse")) {
+    return errorResult("The window is unavailable or lacks click access. Check list_windows and the session grant.", "app_not_granted");
+  }
+  throwIfActionAborted(overrides);
+  const minimized = await executor.minimizeWindow(authorized.window, overrides.requestSignal);
+  return okJson({ minimized, windowId: authorized.window.windowId, ...(!minimized && { message: "Windows did not confirm minimization. Inspect window state before continuing." }) });
 }
 
 async function handleReadClipboard(
@@ -4128,6 +4267,7 @@ function validateBatchActionArgs(
     return fail("save_to_disk must be a boolean");
   }
   if (args.screenshot !== undefined) return fail("append a screenshot action at the end of the batch");
+  if (args.settle_ms !== undefined || args.input !== undefined) return fail("use standalone left_click for input or settle_ms");
   if (args.text !== undefined && action !== "type" && action !== "key" && action !== "hold_key" && typeof args.text !== "string") {
     return fail("text must be a string");
   }
@@ -4470,6 +4610,8 @@ async function dispatchAction(
     case "get_window":
     case "activate_window":
       return handleWindowsTool(name, adapter, a, overrides, subGates);
+    case "minimize_window":
+      return handleMinimizeWindow(adapter, a, overrides);
 
     case "read_clipboard":
       return handleReadClipboard(adapter, overrides, subGates);
@@ -4519,7 +4661,7 @@ export async function handleToolCall(
   // zero-alloc.
   const platform = adapter.executor.capabilities.platform;
   if (!isComputerUseToolAvailable(platform, name)) {
-    return errorResult(`Tool "${name}" is unavailable in X11 window mode.`, "feature_unavailable");
+    return errorResult(`Tool "${name}" is unavailable on this platform.`, "feature_unavailable");
   }
   const userDeniedSet = new Set(rawOverrides.userDeniedBundleIds.map(id => normalizeAppId(platform, id)));
   const overrides: ComputerUseOverrides = rawOverrides.allowedApps.some(

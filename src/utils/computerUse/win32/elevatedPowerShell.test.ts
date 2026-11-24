@@ -100,12 +100,15 @@ Start-Sleep -Milliseconds 1500
 
 test.skipIf(process.platform !== 'win32')('a permanent broker detaches and reconnects without stopping between sessions', async () => {
   const pipeName = await _test.startPersistentLocal()
+  const serverPid = getElevatedPowerShellPid()
   try {
+    expect(serverPid).toBeGreaterThan(0)
     expect(await runComputerUsePowerShell('"first-owner"')).toBe('first-owner')
     await _test.stop()
     expect(isElevatedPowerShellActive()).toBe(false)
     await _test.attachPersistentLocal(pipeName)
     expect(isElevatedPowerShellActive()).toBe(true)
+    expect(getElevatedPowerShellPid()).toBe(serverPid)
     expect(await runComputerUsePowerShell('"second-owner"')).toBe('second-owner')
   } finally {
     await _test.stopPipe(pipeName)

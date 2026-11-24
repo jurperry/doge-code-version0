@@ -1046,6 +1046,41 @@ describe('Windows effective-target permission gates', () => {
     expect(actions).toBe(0)
   })
 
+  test('a desktop click uses the authorized hit PID rather than the foreground PID', async () => {
+    const adapter = windowsAdapter('full', { bundleId: 'app.test', displayName: 'Test App', pid: 20 });
+    const events: Array<string | number | undefined> = [];
+    adapter.executor.prepareForTarget = async (_signal, purpose, authorizedPid) => { events.push(authorizedPid ?? purpose) };
+    adapter.executor.appUnderPoint = async () => ({ bundleId: 'other.app', displayName: 'Other', pid: 30 });
+    adapter.executor.click = async (_x, _y, _button, _count, _modifiers, _foreground, authorizedPid) => { events.push(authorizedPid) };
+    const denied = await handleToolCall(adapter, 'left_click', { coordinate: [1, 1] }, grants('full'));
+    expect(denied.telemetry?.error_kind).toBe('app_not_granted');
+    expect(events).toEqual(['click']);
+    const allowed = grants('full');
+    allowed.allowedApps.push({ bundleId: 'other.app', displayName: 'Other', grantedAt: 1, tier: 'click' });
+    expect((await handleToolCall(adapter, 'left_click', { coordinate: [1, 1] }, allowed)).isError).toBeUndefined();
+    expect(events).toEqual(['click', 'click', 30, 30]);
+  })
+
+  test('Windows rechecks the UAC desktop guard after preparing the approved pointer target', async () => {
+    const adapter = windowsAdapter('full');
+    const events: string[] = [];
+    adapter.executor.appUnderPoint = async () => ({ bundleId: 'app.test', displayName: 'Test App', pid: 30 });
+    adapter.executor.prepareForTarget = async (_signal, _purpose, authorizedPid) => {
+      if (authorizedPid) events.push('elevation prepared');
+    };
+    adapter.executor.click = async () => { events.push('clicked') };
+    const result = await handleToolCall(adapter, 'left_click', { coordinate: [1, 1] }, {
+      ...grants('full'),
+      beforeAction: async () => {
+        events.push('checked desktop');
+        if (events.includes('elevation prepared')) throw new Error('Take a fresh screenshot after UAC.');
+      },
+    });
+    expect(result.isError).toBeTrue();
+    expect(JSON.stringify(result.content)).toContain('after UAC');
+    expect(events).toEqual(['checked desktop', 'elevation prepared', 'checked desktop']);
+  })
+
   test('an embedded target uses its authorized host without process-name special cases', async () => {
     let clicks = 0
     const adapter = windowsAdapter('full')
@@ -1163,8 +1198,8 @@ describe('Windows effective-target permission gates', () => {
     const tools = buildComputerUseTools(adapter.executor.capabilities, 'pixels')
     expect(tools.find(tool => tool.name === 'list_granted_applications')?.inputSchema.properties).toHaveProperty('include_windows')
     expect(tools.find(tool => tool.name === 'open_application')?.inputSchema.properties).toHaveProperty('window_id')
-    expect(tools).toHaveLength(27)
-    expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['list_windows', 'get_window', 'activate_window']))
+    expect(tools).toHaveLength(28)
+    expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['list_windows', 'get_window', 'activate_window', 'minimize_window']))
     expect(tools.map(tool => tool.name)).not.toContain('desktop_info')
 
     const summary = await handleToolCall(adapter, 'list_granted_applications', {}, overrides)
@@ -1189,6 +1224,18 @@ describe('Windows effective-target permission gates', () => {
     const activation = await handleToolCall(adapter, 'activate_window', { hwnd: 10 }, overrides)
     expect(json(activation)).toMatchObject({ activated: true, hwnd: 10 })
     expect(activatedHwnd).toBe(10)
+    const minimizeCalls: string[] = []
+    adapter.executor.minimizeWindow = async window => { minimizeCalls.push(window.windowId); return true }
+    adapter.executor.minimizeAllWindows = async () => { minimizeCalls.push('all'); return { requested: 2, minimized: 2, remaining: 0, closed: 0 } }
+    adapter.executor.getBoundWindowState = () => ({ hwnd: 10, foreground: true, minimized: false, requiresForeground: false })
+    expect((await handleToolCall(adapter, 'minimize_window', {}, overrides)).telemetry?.error_kind).toBe('app_not_granted')
+    const clickGrant = { ...overrides, allowedApps: [{ ...overrides.allowedApps[0]!, tier: 'click' as const }] }
+    expect((await handleToolCall(adapter, 'minimize_window', { window_id: '30:40' }, clickGrant)).telemetry?.error_kind).toBe('app_not_granted')
+    expect((await handleToolCall(adapter, 'minimize_window', { all: true }, clickGrant)).telemetry?.error_kind).toBe('grant_flag_required')
+    expect(json(await handleToolCall(adapter, 'minimize_window', {}, clickGrant))).toMatchObject({ minimized: true, windowId: '10:20' })
+    const desktopGrant = { ...clickGrant, grantFlags: { ...clickGrant.grantFlags, systemKeyCombos: true } }
+    expect(json(await handleToolCall(adapter, 'minimize_window', { all: true }, desktopGrant))).toMatchObject({ minimized: 2, remaining: 0, scope: 'desktop' })
+    expect(minimizeCalls).toEqual(['10:20', 'all'])
     const diagnostics = await handleToolCall(adapter, 'list_granted_applications', { include_desktop: true }, { ...overrides, screenshotAgeMs: 25 })
     expect(json(diagnostics).desktop_info).toMatchObject({ anchorAgeMs: 25, limits: { batchActions: 100, typeCodeUnits: 100_000 } })
     expect(json(diagnostics).desktop_info.displays[0]).toEqual({ displayId: 0, label: 'display 0', isPrimary: false })
@@ -1198,6 +1245,7 @@ describe('Windows effective-target permission gates', () => {
     const denied = await handleToolCall(adapter, 'list_granted_applications', { include_windows: true }, deniedOverrides)
     expect(json(denied).windows).toEqual([])
     expect((await handleToolCall(adapter, 'open_application', { app: grantedExe, window_id: '10:20' }, deniedOverrides)).telemetry?.error_kind).toBe('app_not_granted')
+    expect((await handleToolCall(adapter, 'minimize_window', {}, { ...clickGrant, userDeniedBundleIds: ['alias'] })).telemetry?.error_kind).toBe('app_not_granted')
   })
 
   test('desktop diagnostics separate the current mode from the last image', async () => {
@@ -1260,6 +1308,30 @@ describe('Windows effective-target permission gates', () => {
 
 describe('request_access denial feedback', () => {
   const installed = [{ bundleId: 'app.test', displayName: 'Test App', path: '/test' }]
+
+  test('shortcut approval uses the executable identity even when the responder leaves the tier unset', async () => {
+    const chrome = 'E:\\portable\\chrome.exe';
+    const spotify = 'E:\\portable\\spotify.exe';
+    const adapter = makeAdapter({
+      capabilities: { platform: 'win32', screenshotFiltering: 'none' },
+      resolveDesktopApp: async reference => {
+        const target = reference.includes('First') ? chrome : spotify;
+        return { bundleId: target, displayName: 'Unrelated label', path: target };
+      },
+    });
+    const result = await handleToolCall(adapter, 'request_access', {
+      apps: ['Desktop\\First.lnk', 'Desktop\\Second.lnk'], reason: 'test shortcuts',
+    }, makeOverrides({ allowedApps: [], onPermissionRequest: async request => ({
+      granted: request.apps.map(({ resolved }) => ({ bundleId: resolved!.bundleId, displayName: resolved!.displayName, grantedAt: 1 })),
+      denied: [], flags: { ...DEFAULT_GRANT_FLAGS },
+    }) }));
+    const payload = json(result);
+    expect(payload.granted).toEqual([{ bundleId: chrome, displayName: 'chrome.exe', grantedAt: 1 }]);
+    expect(payload.policyDenied.apps).toMatchObject([{ requestedName: 'Desktop\\Second.lnk' }]);
+    adapter.executor.getFrontmostApp = async () => ({ bundleId: chrome, displayName: 'chrome.exe' });
+    const click = await handleToolCall(adapter, 'left_click', { coordinate: [20, 30] }, makeOverrides({ allowedApps: payload.granted }));
+    expect(click.telemetry?.error_kind).toBe('tier_insufficient');
+  })
 
   test('multiple aliases for one resolved application are granted only once', async () => {
     let requested = 0
@@ -1364,6 +1436,45 @@ describe('request_access denial feedback', () => {
 })
 
 describe('Windows click observation', () => {
+  test('a window lost while open settles does not return a desktop image', async () => {
+    let bound = false;
+    let captures = 0;
+    const adapter = makeAdapter({
+      capabilities: { platform: 'win32', screenshotFiltering: 'none' },
+      isWindowBound: () => bound,
+      getBoundWindowState: () => bound ? { hwnd: 20, minimized: false, foreground: true, requiresForeground: false } : null,
+      getBoundRevision: () => bound ? 2 : 3,
+      openApp: async () => { bound = true; setTimeout(() => { bound = false }, 0) },
+      screenshot: async () => { captures++; return shot() },
+    });
+    const result = await handleToolCall(adapter, 'open_application', { app: 'app.test', settle_ms: 20 }, makeOverrides());
+    expect(JSON.stringify(result.content)).toContain('original bound window is no longer available');
+    expect(result.screenshot).toBeUndefined();
+    expect(captures).toBe(0);
+  })
+
+  test('explicit foreground click uses the guarded channel once and requires a focused binding', async () => {
+    const frame = { ...shot(), captureMode: 'bound_window' as const, targetRevision: 3 }
+    const state = { hwnd: 20, minimized: false, foreground: false, requiresForeground: false }
+    const channels: Array<boolean | undefined> = []
+    const adapter = makeAdapter({
+      capabilities: { platform: 'win32', screenshotFiltering: 'none' },
+      isWindowBound: () => true,
+      getBoundAppId: () => 'app.test',
+      getBoundRevision: () => 3,
+      getBoundWindowState: () => state,
+      click: async (_x, _y, _button, _count, _modifiers, foreground) => { channels.push(foreground) },
+      screenshot: async () => frame,
+    })
+    const options = makeOverrides({ lastScreenshot: frame, boundRevision: 3 })
+    const input = { coordinate: [20, 30], input: 'foreground', screenshot: true, settle_ms: 0 }
+    expect((await handleToolCall(adapter, 'left_click', input, options)).telemetry?.error_kind).toBe('state_conflict')
+    state.foreground = true
+    expect((await handleToolCall(adapter, 'left_click', { ...input, settle_ms: 5001 }, options)).telemetry?.error_kind).toBe('bad_args')
+    expect((await handleToolCall(adapter, 'left_click', input, options)).screenshot).toEqual(frame)
+    expect(channels).toEqual([true])
+  })
+
   test('reports focus loss before capture or input, then returns the next image or minimized status', async () => {
     const frame = { ...shot(), captureMode: 'bound_window' as const, targetRevision: 3 }
     const state = { hwnd: 20, minimized: false, foreground: false, requiresForeground: true }
@@ -1626,6 +1737,19 @@ describe('Windows display and window coordinate spaces', () => {
   })
 
   const windowsTest = process.platform === 'win32' ? test : test.skip
+
+  test('literal desktop references grant the target executable and never fuzzy match unresolved shortcuts', () => {
+    const exact = 'Desktop\\游戏\\App';
+    const missing = 'Desktop\\游戏\\Missing';
+    const program = { bundleId: 'E:\\apps\\Code.exe', displayName: 'Launcher', path: 'E:\\apps\\Code.exe' };
+    const [resolved, denied] = _test.resolveRequestedApps([exact, missing], [
+      { bundleId: 'missing', path: 'E:\\games\\missing.exe', displayName: 'Missing' },
+      { bundleId: 'vscode', path: program.path, displayName: 'Visual Studio Code' },
+    ], new Set(), new Map([[exact, program], [missing, undefined]]));
+    expect(resolved?.resolved).toEqual({ ...program, displayName: 'Visual Studio Code' });
+    expect(resolved?.proposedTier).toBe('click');
+    expect(denied?.resolved).toBeUndefined();
+  })
 
   windowsTest('an existing portable exe needs no registry or running-app cache', () => {
     const [request] = _test.resolveRequestedApps([process.execPath], [], new Set())

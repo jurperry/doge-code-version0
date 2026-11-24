@@ -3,7 +3,7 @@ import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildBrokerServerScript } from './brokerScript.js'
-import { runPowerShell, runPowerShellSync } from './powerShell.js'
+import { PowerShellTimeoutError, runPowerShell, runPowerShellSync, windowsActionSignal } from './powerShell.js'
 import {
   assertPermanentElevationNotRevoking,
   getPermanentElevationDescriptor,
@@ -24,11 +24,25 @@ type Command = 'execute' | 'ping' | 'stop'
 
 const CLIENT_SCRIPT = `
 $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+if ($request.identifyServer) {
+    Add-Type @'
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class CuPipeIdentity {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid);
+}
+'@
+}
 $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', [string]$request.pipe, [System.IO.Pipes.PipeDirection]::InOut)
 $exitCode = 1
 $stage = 'connect'
 try {
-    $pipe.Connect(15000)
+    $pipe.Connect([int]$request.connectMs)
+    $serverPid = [uint32]0
+    if ($request.identifyServer -and (-not [CuPipeIdentity]::GetNamedPipeServerProcessId($pipe.SafePipeHandle, [ref]$serverPid) -or $serverPid -eq 0)) {
+        throw 'The Windows Computer Use helper did not have a readable process identity.'
+    }
     $stage = 'exchange'
     $writer = [System.IO.BinaryWriter]::new($pipe, [System.Text.Encoding]::UTF8, $true)
     $reader = [System.IO.BinaryReader]::new($pipe, [System.Text.Encoding]::UTF8, $true)
@@ -41,7 +55,9 @@ try {
     $stdout = $reader.ReadString()
     $stderr = $reader.ReadString()
     $exitCode = $reader.ReadInt32()
-    [Console]::Out.Write($stdout)
+    if ($request.identifyServer -and $exitCode -eq 0 -and $stdout -ceq 'ready') {
+        [Console]::Out.Write("ready|$serverPid")
+    } else { [Console]::Out.Write($stdout) }
     [Console]::Error.Write($stderr)
 } catch {
     [Console]::Error.WriteLine('[CU_HELPER_' + $stage.ToUpperInvariant() + '] ' + $_.Exception.Message)
@@ -53,7 +69,7 @@ try {
 if ($exitCode -ne 0) { exit $exitCode }
 `
 
-function payload(broker: Broker, command: Command, script = '', stdin = ''): string {
+function payload(broker: Broker, command: Command, timeoutMs: number, script = '', stdin = '', identifyServer = false): string {
   return JSON.stringify({
     pipe: broker.pipeName,
     command,
@@ -61,19 +77,21 @@ function payload(broker: Broker, command: Command, script = '', stdin = ''): str
     stdin: Buffer.from(stdin, 'utf8').toString('base64'),
     ownerPid: broker.ownerPid,
     ownerStartTicks: broker.ownerStartTicks,
+    connectMs: Math.min(15_000, Math.max(50, timeoutMs - 750)),
+    identifyServer,
   })
 }
 
 function transactSync(broker: Broker, command: Command, timeoutMs: number, script = '', stdin = ''): string {
   if (transactionCount > 0) throw new Error('Another Computer Use action is still in progress. No new input was sent.')
-  return runPowerShellSync(CLIENT_SCRIPT, timeoutMs, payload(broker, command, script, stdin))
+  return runPowerShellSync(CLIENT_SCRIPT, timeoutMs, payload(broker, command, timeoutMs, script, stdin))
 }
 
-function transact(broker: Broker, command: Command, timeoutMs: number, script = '', stdin = '', signal?: AbortSignal): Promise<string> {
+function transact(broker: Broker, command: Command, timeoutMs: number, script = '', stdin = '', signal?: AbortSignal, identifyServer = false): Promise<string> {
   transactionCount++
   const result = transactionTail.then(() => {
     signal?.throwIfAborted()
-    return runPowerShell(CLIENT_SCRIPT, timeoutMs, payload(broker, command, script, stdin), signal)
+    return runPowerShell(CLIENT_SCRIPT, timeoutMs, payload(broker, command, timeoutMs, script, stdin, identifyServer), signal)
   })
   transactionTail = result.then(() => undefined, () => undefined).finally(() => { transactionCount-- })
   return result
@@ -84,6 +102,19 @@ let starting: Promise<void> | undefined
 let targetElevated = false
 let transactionTail: Promise<void> = Promise.resolve()
 let transactionCount = 0
+
+async function pingBroker(broker: Broker, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  const identifying = broker.permanent && broker.pid === 0
+  const reply = await transact(broker, 'ping', timeoutMs, '', '', signal, identifying)
+  if (identifying) {
+    const pid = /^ready\|([1-9]\d*)$/.exec(reply)?.[1]
+    if (pid && Number(pid) <= 0xffffffff) {
+      broker.pid = Number(pid)
+      return
+    }
+  } else if (reply === 'ready') return
+  throw new Error('The Windows Computer Use helper failed its readiness check.')
+}
 
 async function startBroker(elevated: boolean, signal?: AbortSignal, permanent = false): Promise<void> {
   if (active) return
@@ -140,10 +171,8 @@ try {
         broker.pid = broker.localProcess.pid
       }
       if (!Number.isInteger(broker.pid) || broker.pid <= 0) throw new Error('The Windows Computer Use helper did not return a process ID.')
+      await pingBroker(broker, 20_000, signal)
       active = broker
-      if (await transact(broker, 'ping', 20_000, '', '', signal) !== 'ready') {
-        throw new Error('The Windows Computer Use helper failed its readiness check.')
-      }
     } catch (error) {
       if (active === broker) active = undefined
       if (broker.pid > 0) {
@@ -186,12 +215,10 @@ async function attachPermanentBroker(signal?: AbortSignal): Promise<boolean> {
       ownerStartTicks,
       permanent: true,
     }
-    active = broker
     try {
       if (!status.running) await startPermanentElevationTask()
-      if (await transact(broker, 'ping', 20_000, '', '', signal) !== 'ready') {
-        throw new Error('The permanent Windows Computer Use helper failed its readiness check.')
-      }
+      await pingBroker(broker, 20_000, signal)
+      active = broker
     } catch (error) {
       if (active === broker) active = undefined
       throw new Error(`The permanent Windows Computer Use helper is unavailable. No input was sent. Enable it again from Settings if this persists. ${error instanceof Error ? error.message : String(error)}`)
@@ -210,7 +237,8 @@ export async function ensureElevatedPowerShell(signal?: AbortSignal): Promise<vo
   const broker = active
   if (broker) {
     try {
-      await transact(broker, 'ping', 5000, '', '', signal)
+      if (broker.permanent && getElevatedPowerShellPid() === null) broker.pid = 0
+      await pingBroker(broker, broker.pid ? 5000 : 10_000, signal)
       return
     } catch (error) {
       if (signal?.aborted) throw error
@@ -239,7 +267,7 @@ export async function prepareComputerUseRelease(): Promise<void> {
     return
   }
   try {
-    await transact(broker, 'ping', 2000)
+    await pingBroker(broker, 2000)
   } catch {
     forgetBroker(broker)
   }
@@ -272,10 +300,23 @@ export function runComputerUsePowerShellSync(script: string, timeoutMs = 10_000)
 }
 
 export async function runComputerUsePowerShell(script: string, timeoutMs = 15_000, stdin?: string, signal?: AbortSignal): Promise<string> {
-  const broker = active
   if (!targetElevated) return runPowerShell(script, timeoutMs, stdin, signal)
+  return runElevatedPowerShell(script, timeoutMs, stdin, signal)
+}
+
+/** Use the already authorized broker for a specific operation, without changing the session route. */
+export async function runElevatedPowerShell(script: string, timeoutMs: number, stdin?: string, signal = windowsActionSignal.getStore()): Promise<string> {
+  const broker = active
   if (!broker) throw new Error('The required Windows Computer Use helper is unavailable. No action was sent.')
-  return transact(broker, 'execute', timeoutMs, script, stdin, signal)
+  // Reserve bounded time for starting the pipe client and dispatching on the broker.
+  try {
+    return await transact(broker, 'execute', timeoutMs + 4000, script, stdin, signal)
+  } catch (error) {
+    if (error instanceof PowerShellTimeoutError) {
+      throw new Error('[CU_HELPER_TIMEOUT] The Windows Computer Use helper did not return the action result in time. The outcome is unknown; inspect the target before retrying.', { cause: error })
+    }
+    throw error
+  }
 }
 
 export async function stopElevatedPowerShell(): Promise<void> {
@@ -333,9 +374,9 @@ export const _test = {
   attachPersistentLocal: async (pipeName: string) => {
     const { ownerStartTicks } = getWindowsOwnerIdentity()
     const broker: Broker = { pipeName, pid: 0, ownerPid: process.pid, ownerStartTicks, permanent: true }
+    await pingBroker(broker, 10_000)
     active = broker
     targetElevated = true
-    await transact(broker, 'ping', 5000)
   },
   stopPipe: async (pipeName: string) => {
     const broker = active?.pipeName === pipeName ? active : undefined

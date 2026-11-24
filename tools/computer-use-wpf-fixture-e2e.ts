@@ -81,11 +81,15 @@ try {
   if (!existsSync(hwndFile)) throw new Error(`WPF fixture did not appear (${fixtureErr.slice(-500)})`)
   const hwnd = Number(readFileSync(hwndFile, 'utf8').trim())
   const { platform, bindWindow, unbindWindow, getBoundInputChannel } = await import('../src/utils/computerUse/platforms/win32.js')
+  const { activateObservedWindow } = await import('../src/utils/computerUse/win32/windowGuard.js')
 
   bindWindow(hwnd, fixture.pid)
   const channel = getBoundInputChannel()
   check('WPF HwndWrapper classified as real-input', channel.framework === 'wpf' && channel.realMouse && channel.realKeyboard, JSON.stringify(channel))
 
+  if (!fixture.pid || !await activateObservedWindow(hwnd, fixture.pid)) {
+    throw new Error('Could not bring the isolated WPF fixture to the foreground before testing real input.')
+  }
   await platform.input.click(320, 270, 'left', 1)
   await pause(700)
   const clicked = existsSync(logFile) ? readFileSync(logFile, 'utf8') : ''

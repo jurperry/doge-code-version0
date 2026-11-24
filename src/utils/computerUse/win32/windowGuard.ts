@@ -12,7 +12,8 @@
  * 只有显式激活窗口才尝试恢复和置前。
  */
 
-import { runComputerUsePowerShellSync as runPowerShellSync } from './elevatedPowerShell.js'
+import { ensureElevatedPowerShell, runComputerUsePowerShellSync as runPowerShellSync, runElevatedPowerShell } from './elevatedPowerShell.js'
+import { getCurrentProcessIL, getProcessIL, needsElevatedHelper } from './elevation.js'
 import { runPowerShell } from './powerShell.js'
 import { foregroundWindow, isWindowForeground, isWindowMinimized, windowProcessId, windowText } from './nativeWindows.js'
 
@@ -26,9 +27,8 @@ using System.Text;
 public class CuGuard {
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int cmd);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
@@ -49,7 +49,7 @@ public class CuGuard {
         return sb.ToString();
     }
     public static bool TryForeground(IntPtr target) {
-        if (IsFg(target)) return true;
+        if (IsFg(target) || SetForegroundWindow(target)) return true;
         // SetForegroundWindow is refused unless the caller is/recently was the
         // foreground process. Attaching to the current foreground thread's
         // input queue makes us eligible — the classic workaround (pywinauto /
@@ -63,7 +63,6 @@ public class CuGuard {
             attached = AttachThreadInput(ourTid, fgTid, true);
         }
         try {
-            BringWindowToTop(target);
             SetForegroundWindow(target);
         } finally {
             if (attached) AttachThreadInput(ourTid, fgTid, false);
@@ -92,15 +91,18 @@ export function buildEnsureWindowScript(
   const fgBlock = needForeground
     ? `
 if ([CuGuard]::IsIconic([IntPtr]${hwnd})) {
-    [CuGuard]::ShowWindow([IntPtr]${hwnd}, 9) | Out-Null
+    [CuGuard]::ShowWindowAsync([IntPtr]${hwnd}, 9) | Out-Null
     Start-Sleep -Milliseconds 250
 }
 \$ok = \$false
 for (\$i = 0; \$i -lt 3 -and -not \$ok; \$i++) {
+    ${expectedPid === undefined ? '' : `
+    [CuGuard]::GetWindowThreadProcessId([IntPtr]${hwnd}, [ref]\$currentPid) | Out-Null
+    if (\$currentPid -ne ${expectedPid}) { 'PIDMISMATCH|' + \$currentPid; return }
+    `}
     \$ok = [CuGuard]::TryForeground([IntPtr]${hwnd})
-    if (-not \$ok) {
-        Start-Sleep -Milliseconds 200
-    }
+    Start-Sleep -Milliseconds 100
+    \$ok = [CuGuard]::IsFg([IntPtr]${hwnd}) -and -not [CuGuard]::IsIconic([IntPtr]${hwnd})
 }
 if (\$ok) { 'OK' } else { 'NOFG|' + [CuGuard]::FgTitle() }
 `
@@ -156,14 +158,19 @@ export function parseEnsureOutput(raw: string): EnsureWindowResult {
 
 // ── Guard entry point ───────────────────────────────────────────────────────
 
-/** Foreground an observed window using only local window-manager operations. */
+/** Foreground the observed window in the same integrity context used for its input. */
 export async function activateObservedWindow(hwnd: number, pid: number, signal?: AbortSignal): Promise<boolean> {
   if (!Number.isSafeInteger(hwnd) || hwnd <= 0 || !Number.isSafeInteger(pid) || pid <= 0) return false
   signal?.throwIfAborted()
   if (windowProcessId(hwnd) !== pid) return false
   if (isWindowForeground(hwnd) && !isWindowMinimized(hwnd)) return true
-  const result = await runPowerShell(buildEnsureWindowScript(hwnd, true, pid), 4000, undefined, signal)
-  return parseEnsureOutput(result).status === 'ok'
+  const elevated = needsElevatedHelper(getCurrentProcessIL(), getProcessIL(pid))
+  if (elevated) await ensureElevatedPowerShell(signal)
+  signal?.throwIfAborted()
+  if (windowProcessId(hwnd) !== pid) return false
+  const run = elevated ? runElevatedPowerShell : runPowerShell
+  const result = await run(buildEnsureWindowScript(hwnd, true, pid), 4000, undefined, signal)
+  return parseEnsureOutput(result).status === 'ok' && windowProcessId(hwnd) === pid && isWindowForeground(hwnd)
 }
 
 export function ensureInputWindow(hwnd: number, needForeground: boolean, expectedPid?: number): EnsureWindowResult {

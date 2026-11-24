@@ -27,6 +27,8 @@ function loadWindows() {
     GetAwarenessFromDpiAwarenessContext: { args: ['isize'], returns: 'i32' },
     IsWindowVisible: { args: ['isize'], returns: 'i32' },
     IsIconic: { args: ['isize'], returns: 'i32' },
+    GetWindowLongW: { args: ['isize', 'i32'], returns: 'i32' },
+    ShowWindowAsync: { args: ['isize', 'i32'], returns: 'i32' },
   }).symbols
   const kernel = dlopen('kernel32.dll', {
     OpenProcess: { args: ['u32', 'i32', 'u32'], returns: 'isize' },
@@ -239,6 +241,22 @@ export function windowDetails(hwnd: number) {
   const { user } = windows()
   const dpi = user.GetAwarenessFromDpiAwarenessContext(user.GetWindowDpiAwarenessContext(hwnd))
   return { className: windowText(hwnd, 'class'), dpiAwareness: dpi >= 0 ? dpi : null, minimized: user.IsIconic(hwnd) !== 0 }
+}
+
+export function hasMinimizeBox(hwnd: number): boolean {
+  const GWL_STYLE = -16
+  const WS_SYSMENU = 0x00080000
+  const WS_MINIMIZEBOX = 0x00020000
+  const WS_CHILD = 0x40000000
+  const WS_DISABLED = 0x08000000
+  const required = WS_SYSMENU | WS_MINIMIZEBOX
+  const style = windows().user.GetWindowLongW(hwnd, GWL_STYLE)
+  return (style & (required | WS_CHILD | WS_DISABLED)) === required
+}
+
+export function requestWindowMinimize(hwnd: number, pid: number): void {
+  const SW_FORCEMINIMIZE = 11
+  if (windowProcessId(hwnd) === pid && hasMinimizeBox(hwnd)) windows().user.ShowWindowAsync(hwnd, SW_FORCEMINIMIZE)
 }
 
 export function isWindowMinimized(hwnd: number): boolean {

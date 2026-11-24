@@ -63,8 +63,8 @@ try {
   const { tools } = await mcpClient.listTools()
   check(
     'MCP ListTools exposes the CU toolset',
-    tools.length === (process.platform === 'win32' ? 27 : 24) &&
-      (process.platform !== 'win32' || ['list_windows', 'activate_window', 'get_window'].every(name => tools.some(t => t.name === name))) &&
+    tools.length === (process.platform === 'win32' ? 28 : 24) &&
+      (process.platform !== 'win32' || ['list_windows', 'activate_window', 'get_window', 'minimize_window'].every(name => tools.some(t => t.name === name))) &&
       !tools.some(t => t.name === 'desktop_info'),
     `${tools.length} tools`,
   )

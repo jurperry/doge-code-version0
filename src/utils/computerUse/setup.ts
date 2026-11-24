@@ -23,7 +23,7 @@ Use built-in Playwright MCP first for browser automation requests such as 浏览
 
 How to work with them:
 1. Call request_access first — it asks the user which application you may control this session.
-2. On Windows, open_application binds the target and returns its first screenshot by default. Use that image directly. If no image was returned, take a screenshot before acting.
+2. On Windows, use the granted bundleId with open_application. It binds the target and returns its first screenshot by default. Use settle_ms when the app needs time to render the first screen.
 3. Act with the precise tools (left_click, type, key, scroll, left_click_drag, ...) using pixel coordinates taken from the screenshot image you received; the origin is the top-left corner of that image.
 4. Verify the effect in the tool's returned image or window status. Take a separate screenshot when the action has no usable visual result.
 
@@ -35,9 +35,10 @@ Choose the coordinate space before acting:
 Guidance:
 - Use zoom to magnify a region when text is small or you need exact coordinates; it returns the cropped region at full resolution.
 - Use computer_batch to replay several already-verified steps in a single call.
-- On Windows, use left_click with screenshot: true for a click whose result determines the next step. For known multi-action sequences, end computer_batch with screenshot. A background window message can reach a bound window while the physical cursor stays elsewhere. Use the returned image and foreground state to verify the effect.
-- For Windows window controls, click a visible minimize button or other caption control using the current image. If you inspected it with zoom, translate the position back to the full image. A left_click with screenshot: true reports minimized=true if the window minimized, so stop there when that was the goal.
-- A bound window can go into the background while you are thinking. When the tool reports foreground=false for a window that needs foreground input, and the user wants you to resume there, call activate_window with the reported hwnd and screenshot: true. Use the returned image for the next action.
+- On Windows, for a named desktop launcher, pass the user's absolute .lnk path or a literal Desktop-relative reference such as Desktop\\game\\Launcher to request_access. Use the returned executable bundleId in open_application. Use switch_display and the Explorer UI when you need to discover a filename visually.
+- On Windows, call minimize_window({}) to minimize the bound window and confirm success. For an explicit request to minimize everything, ask for systemKeyCombos during request_access, then call minimize_window with all: true before opening the next app.
+- On Windows, use left_click with screenshot: true for visual navigation. For games or custom controls that require physical input, use input: foreground on the focused bound window, with settle_ms for a slow visual transition. For known multi-action sequences, end computer_batch with screenshot.
+- If the target reports foreground=false and the user wants to continue in it, call activate_window with the reported hwnd and screenshot: true. Use the returned image for the next action.
 - Do not guess coordinates: re-screenshot or zoom instead. If a click misses, zoom into the target and correct the coordinates before retrying.
 - A dispatched input event is not proof that the application changed state. Always verify the resulting UI before continuing.
 - Read tool errors before retrying. A batch, type action, or timeout may be partially completed or have an unknown outcome; inspect the current screen instead of blindly replaying side effects.

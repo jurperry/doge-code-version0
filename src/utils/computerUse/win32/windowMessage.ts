@@ -147,8 +147,6 @@ public class WinMsg {
     public static bool TryClickMinimize(IntPtr hwnd, uint expectedPid, int x, int y) {
         const int GWL_STYLE = -16;
         const int CaptionWithMinimize = 0x00C00000 | 0x00080000 | 0x00020000;
-        const uint WM_SYSCOMMAND = 0x0112;
-        const int SC_MINIMIZE = 0xF020;
         SetProcessDPIAware();
         RequireProcess(hwnd, expectedPid);
         if (!IsWindowVisible(hwnd) || !IsWindowEnabled(hwnd) || IsIconic(hwnd)) return false;
@@ -164,10 +162,19 @@ public class WinMsg {
         // the original click position in the receiving window's DPI space.
         if (!PhysicalToLogicalPointForPerMonitorDPI(hwnd, ref screen)) return false;
         if (screen.X < short.MinValue || screen.X > short.MaxValue || screen.Y < short.MinValue || screen.Y > short.MaxValue) return false;
-        IntPtr point = MakeLParam(screen.X, screen.Y);
-        RequireProcess(hwnd, expectedPid);
-        SendMessage(hwnd, WM_SYSCOMMAND, (IntPtr)SC_MINIMIZE, point);
+        Minimize(hwnd, expectedPid, MakeLParam(screen.X, screen.Y));
         return true;
+    }
+
+    public static void Minimize(IntPtr hwnd, uint expectedPid, IntPtr point) {
+        const uint WM_SYSCOMMAND = 0x0112;
+        const int SC_MINIMIZE = 0xF020;
+        RequireProcess(hwnd, expectedPid);
+        if (IsIconic(hwnd)) return;
+        if (!IsWindowVisible(hwnd) || !IsWindowEnabled(hwnd)) {
+            throw new InvalidOperationException("The selected window is hidden or disabled.");
+        }
+        SendMessage(hwnd, WM_SYSCOMMAND, (IntPtr)SC_MINIMIZE, point);
     }
 
     public const uint WM_CHAR = 0x0102;
@@ -238,7 +245,7 @@ async function runPs(script: string, inputHwnd?: number, options?: { cancellable
 [CuInputIntegrity]::RequireWindow([IntPtr]${inputHwnd})
 `
   // Keep an already dispatched press/release pair together when Esc arrives.
-  const run = () => runComputerUsePowerShell(WINMSG_TYPE + guard + script, 8000)
+  const run = () => runComputerUsePowerShell(WINMSG_TYPE + guard + script, 8000, undefined, options?.cancellable ? windowsActionSignal.getStore() : undefined)
   return options?.cancellable ? run() : windowsActionSignal.exit(run)
 }
 
@@ -256,6 +263,11 @@ if ([WinMsg]::TryClickMinimize([IntPtr]${hwnd}, ${expectedPid}, ${Math.round(x)}
   if (result === 'MINIMIZE_SENT') return true
   if (result === 'NOT_MINIMIZE') return false
   throw new Error('Could not determine the native minimize result. Inspect the window before retrying.')
+}
+
+export async function sendMinimize(hwnd: number, expectedPid: number, signal?: AbortSignal): Promise<void> {
+  const run = () => runPs(`[WinMsg]::Minimize([IntPtr]${hwnd}, ${expectedPid}, [IntPtr]::Zero)`, hwnd, { cancellable: true })
+  await (signal ? windowsActionSignal.run(signal, run) : run())
 }
 
 /**
