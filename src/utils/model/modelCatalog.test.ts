@@ -166,7 +166,7 @@ test('adding a provider to a non-empty catalog never mutates another connection'
   expect(next.defaultModel).toMatchObject({ connectionId: next.connections.find(c => c.name === 'New')?.id })
 })
 
-test('legacy migration materializes a reasoning policy for known gateways', () => {
+test('legacy migration preserves the context window and materializes the reasoning policy', () => {
   const migrated = endpointToCatalog({
     model: 'DeepSeek-V4.1-Flash',
     modelProfiles: [{
@@ -176,13 +176,28 @@ test('legacy migration materializes a reasoning policy for known gateways', () =
       baseURL: 'https://agi.tongji.edu.cn',
       apiKey: 'k',
       model: 'DeepSeek-V4.1-Flash',
+      contextWindow: 1_000_000,
     }],
   })
   expect(migrated.connections[0]?.models[0]?.reasoning?.preset).toBe('deepseek')
+  expect(migrated.connections[0]?.models[0]?.contextWindow).toBe(1_000_000)
   expect(migrated.connections[0]?.models[0]?.reasoning?.effort).toMatchObject({
     field: 'reasoning_effort',
     levels: ['low', 'medium', 'high', 'xhigh', 'max'],
   })
+})
+
+test('legacy migration gives the active duplicate profile context window priority', () => {
+  const base = {
+    connectionId: 'c-shared', providerName: 'tongji', provider: 'openai' as const, baseURL: 'https://agi.tongji.edu.cn',
+    apiKey: 'k', model: 'DeepSeek-V4.1-Flash', contextWindow: 128_000,
+  }
+  const active = { ...base, id: 'p-active', contextWindow: 1_000_000 }
+  const migrated = endpointToCatalog({
+    model: 'DeepSeek-V4.1-Flash', activeProfileId: active.id,
+    modelProfiles: [{ ...base, id: 'p-first' }, active],
+  })
+  expect(migrated.connections[0]?.models[0]?.contextWindow).toBe(1_000_000)
 })
 
 test('changing connection protocol rewires/rematerializes model policies', () => {

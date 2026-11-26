@@ -6,6 +6,7 @@ import { bindWindow, getBoundInputChannel, unbindWindow } from '../src/utils/com
 import { handleToolCall, DEFAULT_GRANT_FLAGS } from '@ant/computer-use-mcp'
 import { getComputerUseHostAdapter } from '../src/utils/computerUse/hostAdapter.js'
 import { runPowerShellSync } from '../src/utils/computerUse/win32/powerShell.js'
+import { activateWindowsFixture } from './windows-fixture-activation.js'
 
 const box = join(process.cwd(), 'test', 'tmp-cu-chromium-unicode')
 const shortText = '你好，做个自我介绍'
@@ -87,6 +88,7 @@ try {
   check('fixture uses the Chromium input channel', getBoundInputChannel().chromium)
   const executor = createCliExecutor({ getMouseAnimationEnabled: () => false, getHideBeforeActionEnabled: () => false })
 
+  await activateWindowsFixture({ hwnd, pid: proc.pid, appId: 'fixture.app', x: 260, y: 160 })
   await executor.type(shortText, { viaClipboard: false })
   const shortMatched = await waitForText(shortText)
   check('short Chinese prompt is preserved exactly', shortMatched, JSON.stringify(actualText()))

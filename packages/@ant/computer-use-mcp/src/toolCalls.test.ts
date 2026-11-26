@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { buildComputerUseTools } from './tools.js'
 import type { BindingReleaseInfo, ComputerExecutor } from './executor.js'
 import {
+  ComputerUseActionError,
   handleToolCall,
   resetMouseButtonHeld,
   _test,
@@ -590,6 +591,59 @@ describe('failure recovery and argument boundaries', () => {
     })
   })
 
+  test('native cursor failures preserve diagnostics and batch recovery details', async () => {
+    const failure = () => new ComputerUseActionError('[CU_INPUT_CURSOR] SetCursorPos failed before click (Win32 error 5).', 'native_input_failed', {
+      phase: 'cursor_position', nativeApi: 'SetCursorPos', win32Error: 5,
+      route: 'broker', clientIL: 'medium', targetIL: 'high',
+    })
+    const single = await handleToolCall(makeAdapter({
+      click: async () => { throw failure() },
+    }), 'left_click', { coordinate: [10, 10] }, makeOverrides())
+    expect(single.structuredContent).toMatchObject({
+      code: 'native_input_failed', phase: 'cursor_position', nativeApi: 'SetCursorPos',
+      win32Error: 5, route: 'broker', clientIL: 'medium', targetIL: 'high',
+    })
+    const singleText = single.content[0]!.type === 'text' ? single.content[0]!.text : ''
+    expect(singleText).toContain('open_application')
+    expect(singleText).toContain('current action may be partial')
+    expect(singleText).toContain('Do not repeat it blindly')
+
+    for (const [name, args, method] of [
+      ['double_click', { coordinate: [10, 10] }, 'click'],
+      ['left_click_drag', { coordinate: [20, 20], start_coordinate: [10, 10] }, 'drag'],
+    ] as const) {
+      const partial = await handleToolCall(makeAdapter({
+        [method]: async () => { throw failure() },
+      }), name, args, makeOverrides())
+      expect(partial.structuredContent).toMatchObject({ code: 'native_input_failed' })
+      expect(partial.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('current action may be partial') })
+    }
+
+    const batch = await handleToolCall(makeAdapter({
+      click: async () => { throw failure() },
+    }), 'computer_batch', {
+      actions: [{ action: 'left_click', coordinate: [10, 10] }, { action: 'key', text: 'a' }],
+    }, makeOverrides())
+    expect(json(batch).failed).toMatchObject({
+      action: 'left_click', code: 'native_input_failed', phase: 'cursor_position',
+      nativeApi: 'SetCursorPos', win32Error: 5, route: 'broker', clientIL: 'medium', targetIL: 'high',
+    })
+    expect(json(batch).remaining).toBe(1)
+
+    const crossCopy = new Error('SetCursorPos failed in another package instance')
+    crossCopy.name = 'ComputerUseActionError'
+    Object.assign(crossCopy, {
+      errorKind: 'native_input_failed',
+      details: { phase: 'cursor_position', nativeApi: 'SetCursorPos', route: 'broker' },
+    })
+    const structural = await handleToolCall(makeAdapter({
+      click: async () => { throw crossCopy },
+    }), 'left_click', { coordinate: [10, 10] }, makeOverrides())
+    expect(structural.structuredContent).toMatchObject({
+      code: 'native_input_failed', phase: 'cursor_position', nativeApi: 'SetCursorPos', route: 'broker',
+    })
+  })
+
   test('non-finite coordinates fail before direct or batched side effects', async () => {
     let clicks = 0
     let cursorCalls = 0
@@ -743,6 +797,26 @@ describe('failure recovery and argument boundaries', () => {
     expect(text).toContain('may already have started')
     expect(text).toContain('Do not blindly relaunch')
     expect(text).not.toContain('Retry open_application once')
+  })
+
+  test('open_application timeout reconciles only a verified binding', async () => {
+    const adapter = makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      openApp: async () => { throw new Error('PowerShell timed out: no diagnostic output') },
+      getBoundAppId: () => 'app.test',
+      getBoundWindowState: () => ({ hwnd: 42, foreground: false, minimized: false, requiresForeground: true }),
+    })
+    const result = await handleToolCall(adapter, 'open_application', { app: 'app.test' }, makeOverrides())
+    expect(result.structuredContent).toMatchObject({
+      code: 'state_conflict', phase: 'open_outcome_unconfirmed', hwnd: 42,
+    })
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('do not relaunch') })
+
+    const unbound = await handleToolCall(makeAdapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'win32', hostBundleId: 'host.test' },
+      openApp: async () => { throw new Error('PowerShell timed out: no diagnostic output') },
+    }), 'open_application', { app: 'Test App' }, makeOverrides())
+    expect(unbound.telemetry?.error_kind).toBe('executor_threw')
   })
 })
 

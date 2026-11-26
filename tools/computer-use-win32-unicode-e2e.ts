@@ -3,6 +3,7 @@ import { join } from 'path'
 import { runPowerShellSync } from '../src/utils/computerUse/win32/powerShell.js'
 import { createCliExecutor } from '../src/utils/computerUse/executor.js'
 import { bindWindow, getBoundInputChannel, unbindWindow } from '../src/utils/computerUse/platforms/win32.js'
+import { activateWindowsFixture } from './windows-fixture-activation.js'
 import { handleToolCall } from '../packages/@ant/computer-use-mcp/src/toolCalls.js'
 import { DEFAULT_GRANT_FLAGS, type ComputerUseHostAdapter } from '../packages/@ant/computer-use-mcp/src/types.js'
 
@@ -123,7 +124,7 @@ try {
     getAutoUnhideEnabled: () => true,
     cropRawPatch: () => null,
   }
-  await executor.click(65, 100, 'left', 1) // Focus the native EDIT child, independent of WinForms activation.
+  await activateWindowsFixture({ hwnd, pid: proc.pid, appId: 'fixture.app', x: 65, y: 100 })
   const batch = await handleToolCall(adapter, 'computer_batch', {
     actions: [{ action: 'type', text: shortText }, { action: 'screenshot' }],
   }, {

@@ -14,7 +14,7 @@
 
 import { win32 as windowsPath } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { API_RESIZE_PARAMS, resetMouseButtonHeld, targetImageSize } from '@ant/computer-use-mcp'
+import { API_RESIZE_PARAMS, ComputerUseActionError, resetMouseButtonHeld, targetImageSize } from '@ant/computer-use-mcp'
 import type { BindingReleaseInfo, BindingReleaseReason, FrontmostApp, TargetPreparation, WindowsWindow } from '@ant/computer-use-mcp'
 import { logForDebugging } from '../../debug.js'
 import type { Platform } from './index.js'
@@ -45,8 +45,8 @@ import { classifyWindowClasses, type WindowFramework } from '../win32/windowClas
 import { getWin32EscExpectFile, isWin32EscHotkeyRegistered } from '../win32/escHook.js'
 import { runPowerShell, windowsActionSignal } from '../win32/powerShell.js'
 import { childWindowClasses, enumerateDisplays, foregroundTarget, hasMinimizeBox, isWindowClientPoint, isWindowForeground, isWindowMinimized, monitorForWindow, requestWindowMinimize, targetAtPoint, visibleWindowFrame, windowProcessId, windowRectangle, windowText } from '../win32/nativeWindows.js'
-import { ensureElevatedPowerShell, getElevatedPowerShellPid, isElevatedPowerShellActive, prepareComputerUseRelease, runComputerUsePowerShell, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
-import { getCurrentProcessIL, getProcessIL, INPUT_INTEGRITY_TYPES, needsElevatedHelper } from '../win32/elevation.js'
+import { ensureElevatedPowerShell, getElevatedPowerShellPid, isComputerUseTargetElevated, prepareComputerUseRelease, runComputerUsePowerShell, setComputerUseTargetElevated } from '../win32/elevatedPowerShell.js'
+import { getCurrentProcessIL, getProcessIL, INPUT_INTEGRITY_TYPES, needsElevatedHelper, needsElevatedInputHelper } from '../win32/elevation.js'
 import { desktopState } from '../win32/uacProbe.js'
 
 // ---------------------------------------------------------------------------
@@ -105,14 +105,33 @@ $src.Dispose()
 // PowerShell helpers
 // ---------------------------------------------------------------------------
 
-async function psAsync(script: string, timeoutMs = 15_000): Promise<string> {
-  return runComputerUsePowerShell(script, timeoutMs)
+async function psAsync(script: string, timeoutMs = 15_000, authorizedPid?: number): Promise<string> {
+  try {
+    return await runComputerUsePowerShell(script, timeoutMs)
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('[CU_INPUT_CURSOR]')) throw error
+    const targetPid = authorizedPid ?? boundPid
+    const win32Error = Number(/Win32 error (\d+)/.exec(error.message)?.[1])
+    const targetIL = targetPid ? getProcessIL(targetPid) : 'unknown'
+    const foregroundPid = foregroundTarget()?.pid
+    const foregroundIL = foregroundPid ? getProcessIL(foregroundPid) : 'unknown'
+    logForDebugging(`[Computer Use] native cursor failure: authorizedPid=${authorizedPid ?? 'none'} boundPid=${boundPid ?? 'none'} targetPid=${targetPid ?? 'none'} targetIL=${targetIL} foregroundPid=${foregroundPid ?? 'none'} foregroundIL=${foregroundIL} route=${isComputerUseTargetElevated() ? 'broker' : 'local'} win32Error=${Number.isInteger(win32Error) ? win32Error : 'unknown'} desktop=${desktopState()}`)
+    throw new ComputerUseActionError(error.message, 'native_input_failed', {
+      phase: 'cursor_position',
+      nativeApi: 'SetCursorPos',
+      ...(Number.isInteger(win32Error) ? { win32Error } : {}),
+      route: isComputerUseTargetElevated() ? 'broker' : 'local',
+      clientIL: getCurrentProcessIL(),
+      targetIL,
+      foregroundIL,
+    })
+  }
 }
 
 /** Let a short press/release pair finish once started so Escape cannot strand a button or modifier. */
-async function sendAtomicInput(script: string): Promise<void> {
+async function sendAtomicInput(script: string, authorizedPid?: number): Promise<void> {
   windowsActionSignal.getStore()?.throwIfAborted()
-  await windowsActionSignal.exit(() => psAsync(script, 8000))
+  await windowsActionSignal.exit(() => psAsync(script, 8000, authorizedPid))
 }
 
 // ---------------------------------------------------------------------------
@@ -128,9 +147,14 @@ using System.Diagnostics;
 
 public class CuWin32 {
     // --- Cursor ---
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll", SetLastError=true)] public static extern bool SetCursorPos(int X, int Y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    public static void SetCursorPosChecked(int X, int Y, string stage) {
+        if (SetCursorPos(X, Y)) return;
+        int error = Marshal.GetLastWin32Error();
+        throw new InvalidOperationException("[CU_INPUT_CURSOR] SetCursorPos failed " + stage + " (Win32 error " + error + ").");
+    }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 
@@ -342,7 +366,7 @@ export async function prepareWindowsTarget(signal?: AbortSignal, purpose: Target
     }
   }
   if (boundHwnd && boundPid) showBoundWindowIndicator(boundHwnd, boundPid)
-  if (!boundPid && (purpose === 'capture' || purpose === 'hover' || (purpose === 'click' && authorizedPid === undefined))) {
+  if (!boundPid && (purpose === 'capture' || (purpose === 'click' && authorizedPid === undefined))) {
     // Desktop clicks resolve the verified hit target later, after coordinate checks.
     setComputerUseTargetElevated(false)
     return
@@ -354,13 +378,12 @@ export async function prepareWindowsTarget(signal?: AbortSignal, purpose: Target
   }
   const pid = boundPid ?? authorizedPid ?? foreground?.pid
   const target = pid ? getProcessIL(pid) : 'unknown'
-  const required = needsElevatedHelper(current, target)
-  if (required) {
-    if (purpose === 'hover' && !isElevatedPowerShellActive()) {
-      throw new Error('This window requires the Windows Computer Use helper. Capture a fresh screenshot after the user approves it before moving the pointer.')
-    }
-    await ensureElevatedPowerShell(signal)
-  }
+  const foregroundIL = !boundPid && foreground?.pid ? getProcessIL(foreground.pid) : target
+  const required = boundPid
+    ? needsElevatedHelper(current, target)
+    : needsElevatedInputHelper(current, target, foregroundIL)
+  logForDebugging(`[Computer Use] target preparation: purpose=${purpose} authorizedPid=${authorizedPid ?? 'none'} boundPid=${boundPid ?? 'none'} foregroundPid=${foreground?.pid ?? 'none'} targetPid=${pid ?? 'none'} clientIL=${current} targetIL=${target} foregroundIL=${foregroundIL} elevated=${required}`)
+  if (required) await ensureElevatedPowerShell(signal)
   setComputerUseTargetElevated(required)
 }
 
@@ -616,7 +639,7 @@ ${requireForegroundScript(hwnd)}
 for (\$i = 0; \$i -lt ${count}; \$i++) {
     if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw "Foreground changed during click sequence after \$i/${count} clicks; outcome is partial" }
     if (-not [CuWin32]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before click' }
-    if (-not [CuWin32]::SetCursorPos(${rx} + \$r.L, ${ry} + \$r.T)) { throw 'SetCursorPos failed before click' }
+    [CuWin32]::SetCursorPosChecked(${rx} + \$r.L, ${ry} + \$r.T, 'before click')
     Start-Sleep -Milliseconds 20
     if (-not [CuGuard]::IsFg([IntPtr]${hwnd})) { throw "Foreground changed before click \$i/${count}" }
     if (-not [CuWin32]::GetCursorPos([ref]\$p) -or \$p.X -ne (${rx} + \$r.L) -or \$p.Y -ne (${ry} + \$r.T)) {
@@ -647,7 +670,7 @@ ${requireForegroundScript(hwnd)}
 [CuWin32]::SetProcessDPIAware() | Out-Null
 $r = New-Object CuWin32+RECT
 if (-not [CuWin32]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before mouse move' }
-if (-not [CuWin32]::SetCursorPos(${rx} + \$r.L, ${ry} + \$r.T)) { throw 'SetCursorPos failed during mouse move' }
+[CuWin32]::SetCursorPosChecked(${rx} + \$r.L, ${ry} + \$r.T, 'during mouse move')
 `)
 }
 
@@ -693,7 +716,7 @@ ${guard}
 ${hwnd === undefined ? INPUT_INTEGRITY_TYPES : ''}
 [CuWin32]::SetProcessDPIAware() | Out-Null
 ${origin}
-if (-not [CuWin32]::SetCursorPos(${rx} + \$ox, ${ry} + \$oy)) { throw 'SetCursorPos failed before mouse button event' }
+[CuWin32]::SetCursorPosChecked(${rx} + \$ox, ${ry} + \$oy, 'before mouse button event')
 Start-Sleep -Milliseconds 20
 [CuInputIntegrity]::RequireAtCursor()
 [CuWin32]::mouse_event(${flag}, 0, 0, 0, [IntPtr]::Zero)
@@ -745,7 +768,7 @@ ${guard}
 ${hwnd === undefined ? INPUT_INTEGRITY_TYPES : ''}
 [CuWin32]::SetProcessDPIAware() | Out-Null
 ${origin}
-if (-not [CuWin32]::SetCursorPos(${fx} + \$ox, ${fy} + \$oy)) { throw 'SetCursorPos failed at drag start' }
+[CuWin32]::SetCursorPosChecked(${fx} + \$ox, ${fy} + \$oy, 'at drag start')
 Start-Sleep -Milliseconds 40
 ${beforePress}
 [CuInputIntegrity]::RequireAtCursor()
@@ -759,7 +782,7 @@ try {
         \$x = [math]::Round(${fx} + (${tx} - ${fx}) * \$eased) + \$ox
         \$y = [math]::Round(${fy} + (${ty} - ${fy}) * \$eased) + \$oy
         ${duringDrag}
-        if (-not [CuWin32]::SetCursorPos(\$x, \$y)) { throw 'SetCursorPos failed during drag' }
+        [CuWin32]::SetCursorPosChecked(\$x, \$y, 'during drag')
         [CuInputIntegrity]::RequireAtCursor()
         Start-Sleep -Milliseconds ${frameMs}
     }
@@ -953,7 +976,7 @@ public class CuScrollRect {
 '@
 \$r = New-Object CuScrollRect+RECT
 if (-not [CuScrollRect]::GetWindowRect([IntPtr]${hwnd}, [ref]\$r)) { throw 'GetWindowRect failed before scroll' }
-if (-not [CuWin32]::SetCursorPos(${Math.round(x)} + \$r.L, ${Math.round(y)} + \$r.T)) { throw 'SetCursorPos failed before scroll' }
+[CuWin32]::SetCursorPosChecked(${Math.round(x)} + \$r.L, ${Math.round(y)} + \$r.T, 'before scroll')
 `
   await sendAtomicInput(`${WIN32_TYPES}
 ${requireForegroundScript(hwnd)}
@@ -983,7 +1006,7 @@ const input: InputPlatform = {
       }
       return
     }
-    await sendAtomicInput(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed during mouse move' }`)
+    await sendAtomicInput(`${WIN32_TYPES}; [CuWin32]::SetProcessDPIAware() | Out-Null; [CuWin32]::SetCursorPosChecked(${Math.round(x)}, ${Math.round(y)}, 'during mouse move')`)
   },
 
   async click(x, y, button, count = 1, modifiersHeld = false, foreground = false, authorizedPid) {
@@ -1020,7 +1043,7 @@ const input: InputPlatform = {
     await sendAtomicInput(`${WIN32_TYPES}
 ${INPUT_INTEGRITY_TYPES}
 [CuWin32]::SetProcessDPIAware() | Out-Null
-if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed before click' }
+[CuWin32]::SetCursorPosChecked(${Math.round(x)}, ${Math.round(y)}, 'before click')
 Start-Sleep -Milliseconds 20
 $pointer = New-Object CuWin32+POINT
 for ($i = 0; $i -lt ${count}; $i++) {
@@ -1033,7 +1056,7 @@ for ($i = 0; $i -lt ${count}; $i++) {
     [CuWin32]::mouse_event(${upFlag}, 0, 0, 0, [IntPtr]::Zero)
     if ($i + 1 -lt ${count}) { Start-Sleep -Milliseconds 30 }
 }
-`)
+`, authorizedPid)
   },
 
   async mouseDown(x, y) {
@@ -1196,7 +1219,7 @@ ${expectedEscapeScript([name])}[CuWin32]::keybd_event([byte]${vk}, 0, 0, [UIntPt
       return
     }
     const flag = direction === 'vertical' ? '0x0800' : '0x1000' // MOUSEEVENTF_WHEEL / MOUSEEVENTF_HWHEEL
-    const position = x === undefined || y === undefined ? '' : `if (-not [CuWin32]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})) { throw 'SetCursorPos failed before scroll' }; `
+    const position = x === undefined || y === undefined ? '' : `[CuWin32]::SetCursorPosChecked(${Math.round(x)}, ${Math.round(y)}, 'before scroll'); `
     await sendAtomicInput(`${WIN32_TYPES}
 ${INPUT_INTEGRITY_TYPES}
 [CuWin32]::SetProcessDPIAware() | Out-Null

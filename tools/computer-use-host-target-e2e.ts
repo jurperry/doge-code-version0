@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { runPowerShellSync } from '../src/utils/computerUse/win32/powerShell.js'
+import { processImage } from '../src/utils/computerUse/win32/nativeWindows.js'
+import { activateWindowsFixture } from './windows-fixture-activation.js'
 import { join } from 'node:path'
 
 const TMP_DIR = join(process.cwd(), 'test', 'tmp-cu-host-target')
@@ -107,6 +111,13 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
   }
 }
 
+async function stopRenderer(pid: number): Promise<void> {
+  if (processImage(pid).toLowerCase() === RENDERER_EXE.toLowerCase()) {
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+  }
+  for (let i = 0; i < 20 && processImage(pid).toLowerCase() === RENDERER_EXE.toLowerCase(); i++) await Bun.sleep(50)
+}
+
 let failures = 0
 function check(label: string, condition: boolean, detail = ''): void {
   console.log(`[${condition ? 'PASS' : 'FAIL'}] ${label}${detail ? ` — ${detail}` : ''}`)
@@ -122,15 +133,13 @@ try {
   writeFileSync(LOG_FILE, '', 'utf8')
   const sourcePath = join(TMP_DIR, 'renderer.cs')
   writeFileSync(sourcePath, childCs, 'utf8')
-  const { runPowerShellSync } = await import('../src/utils/computerUse/win32/powerShell.js')
   runPowerShellSync(`
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
 & $compiler /nologo /target:winexe /out:'${RENDERER_EXE.replace(/'/g, "''")}' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll '${sourcePath.replace(/'/g, "''")}'
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile renderer fixture' }
 `, 20_000)
 
-  const { platform } = await import('../src/utils/computerUse/platforms/win32.js')
-  const { activateObservedWindow } = await import('../src/utils/computerUse/win32/windowGuard.js')
+  const { platform, unbindWindow } = await import('../src/utils/computerUse/platforms/win32.js')
   const { listWindows } = await import('../src/utils/computerUse/win32/windowEnum.js')
   const { createCliExecutor } = await import('../src/utils/computerUse/executor.js')
   const { getComputerUseHostAdapter } = await import('../src/utils/computerUse/hostAdapter.js')
@@ -160,7 +169,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile renderer fixture' }
     await waitFor(() => existsSync(EMBEDDED_FILE) && existsSync(CHILD_PID_FILE) && listWindows().some(window => window.title === HOST_TITLE), 'embedded host')
     childPid = Number(readFileSync(CHILD_PID_FILE, 'utf8').trim())
     const hostWindow = listWindows().find(window => window.title === HOST_TITLE)!
-    assert.equal(await activateObservedWindow(hostWindow.hwnd, host.pid), true)
+    await activateWindowsFixture({ hwnd: hostWindow.hwnd, pid: host.pid, appId: hostWindow.path ?? 'fixture.app', x: 120, y: 100 })
+    unbindWindow()
+    writeFileSync(LOG_FILE, '', 'utf8')
     const rect = runPowerShellSync(`
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -218,7 +229,7 @@ $r = New-Object CuHostRect+Rect
       await child.exited
       child = undefined
     } else if (childPid > 0) {
-      try { process.kill(childPid, 9) } catch {}
+      await stopRenderer(childPid)
     }
     childPid = 0
   }
@@ -228,14 +239,8 @@ $r = New-Object CuHostRect+Rect
 } finally {
   if (host) { try { host.kill() } catch {}; await host.exited }
   if (child) { try { child.kill() } catch {}; await child.exited }
-  if (childPid > 0) {
-    try { process.kill(childPid, 9) } catch {}
-    for (let i = 0; i < 20; i++) {
-      try { process.kill(childPid, 0) } catch { break }
-      await Bun.sleep(50)
-    }
-  }
-  rmSync(TMP_DIR, { recursive: true, force: true })
+  if (childPid > 0) await stopRenderer(childPid)
+  rmSync(TMP_DIR, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
 }
 
 console.log(failures === 0 ? '\nHOST TARGET E2E RESULT: ALL PASS' : `\nHOST TARGET E2E RESULT: ${failures} FAILURE(S)`)

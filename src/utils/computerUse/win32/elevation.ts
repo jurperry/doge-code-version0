@@ -112,6 +112,10 @@ export function needsElevatedHelper(current: IntegrityLevel, target: IntegrityLe
   return (current === 'low' || current === 'medium') && (target === 'high' || target === 'restricted')
 }
 
+export function needsElevatedInputHelper(current: IntegrityLevel, target: IntegrityLevel, foreground: IntegrityLevel): boolean {
+  return needsElevatedHelper(current, target) || needsElevatedHelper(current, foreground)
+}
+
 let cachedIL: IntegrityLevel | undefined
 
 export function parseIntegrityLevel(value: string): IntegrityLevel {

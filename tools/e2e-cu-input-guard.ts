@@ -162,7 +162,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile exact-window fixture' }
 
   secondProcess.kill()
   await secondProcess.exited
-  await assert.rejects(platform.input.typeText('stale input'), /window no longer exists/)
+  await assert.rejects(platform.input.typeText('stale input'), /bound window closed or its identity changed\. No input was sent/i)
   console.log('PASS exact launch, granted-only discovery, explicit selection, forged and stale target rejection')
 } finally {
   unbindWindow()

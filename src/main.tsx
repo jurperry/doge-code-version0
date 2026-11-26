@@ -1612,22 +1612,11 @@ async function run(): Promise<CommanderCommand> {
       }
     }
 
-    // chicago MCP: guarded Computer Use (app allowlist + frontmost gate +
-    // SCContentFilter screenshots). Ant-only, GrowthBook-gated — failures
-    // are silent (this is dogfooding). Platform + interactive checks inline
-    // so non-macOS / print-mode ants skip the heavy @ant/computer-use-mcp
-    // import entirely. gates.js is light (type-only package import).
-    //
-    // Placed AFTER the enterprise-MCP-config check: that check rejects any
-    // dynamicMcpConfig entry with `type !== 'sdk'`, and our config is
-    // `type: 'stdio'`. An enterprise-config ant with the GB gate on would
-    // otherwise process.exit(1). Chrome has the same latent issue but has
-    // shipped without incident; chicago places itself correctly.
-    //
-    // doge fork: headless opt-in for the builtin MCP servers (see the
-    // Playwright block below for the rationale).
+    // Register the internal Computer Use server after validating external MCP config.
+    // Long-lived desktop sessions opt in to the built-in servers in headless mode.
     const isHeadlessBuiltinMcpEnabled = () => isEnvTruthy(process.env.DOGE_HEADLESS_BUILTIN_MCP);
     const isLinux = process.platform === 'linux';
+    let windowsComputerUse = false;
     if ((getPlatform() === 'macos' || getPlatform() === 'windows' || isLinux) && (!getIsNonInteractiveSession() || isHeadlessBuiltinMcpEnabled())) {
       try {
         const {
@@ -1636,8 +1625,7 @@ async function run(): Promise<CommanderCommand> {
         if (getChicagoEnabled() && (!isLinux || await (await import('src/utils/computerUse/platforms/linux.js')).isLinuxComputerUseAvailable())) {
           const {
             setupComputerUseMCP,
-            COMPUTER_USE_MCP_PROMPT_HINT,
-            LINUX_COMPUTER_USE_MCP_PROMPT_HINT
+            nonWindowsComputerUsePrompt
           } = await import('src/utils/computerUse/setup.js');
           const {
             mcpConfig,
@@ -1648,13 +1636,12 @@ async function run(): Promise<CommanderCommand> {
             ...mcpConfig
           };
           allowedTools.push(...cuTools);
-          // Doge fork: the official Anthropic backend emits a CU availability
-          // hint server-side on seeing mcp__computer-use__* tool names;
-          // custom/translated endpoints (openai/responses bridges) don't.
-          // Append the local hint so the model discovers and drives the CU
-          // tools regardless of provider. Same pattern as the Chrome hint.
-          const hint = isLinux ? LINUX_COMPUTER_USE_MCP_PROMPT_HINT : COMPUTER_USE_MCP_PROMPT_HINT;
-          appendSystemPrompt = appendSystemPrompt ? `${appendSystemPrompt}\n\n${hint}` : hint;
+          windowsComputerUse = process.platform === 'win32';
+          // Windows loads the bundled skill from the active main-session tool list.
+          if (!windowsComputerUse) {
+            const hint = nonWindowsComputerUsePrompt(isLinux);
+            appendSystemPrompt = appendSystemPrompt ? `${appendSystemPrompt}\n\n${hint}` : hint;
+          }
         }
       } catch (error) {
         logForDebugging(`[Computer Use MCP] Setup failed: ${errorMessage(error)}`);
@@ -1993,7 +1980,7 @@ async function run(): Promise<CommanderCommand> {
     // await points, so the parallel getCommands() memoized an empty list.
     if (process.env.CLAUDE_CODE_ENTRYPOINT !== 'local-agent') {
       initBuiltinPlugins();
-      initBundledSkills();
+      initBundledSkills({ windowsComputerUse });
     }
     const setupPromise = setup(preSetupCwd, permissionMode, allowDangerouslySkipPermissions, worktreeEnabled, worktreeName, tmuxEnabled, sessionId ? validateUuid(sessionId) : undefined, worktreePRNumber, messagingSocketPath);
     const commandsPromise = worktreeEnabled ? null : getCommands(preSetupCwd);

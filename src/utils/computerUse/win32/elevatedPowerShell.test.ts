@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { getCurrentProcessIL, getProcessIL, needsElevatedHelper, parseIntegrityLevel } from './elevation.js'
+import { getCurrentProcessIL, getProcessIL, needsElevatedHelper, needsElevatedInputHelper, parseIntegrityLevel } from './elevation.js'
 import {
   _test,
   ensureElevatedPowerShell,
@@ -28,6 +28,15 @@ test('only a higher-integrity target requests the elevated helper', () => {
   expect(needsElevatedHelper('high', 'medium')).toBe(false)
   expect(needsElevatedHelper('unknown', 'high')).toBe(false)
   expect(needsElevatedHelper('medium', 'unknown')).toBe(false)
+})
+
+test('global physical input accounts for both the hit target and foreground integrity', () => {
+  expect(needsElevatedInputHelper('medium', 'medium', 'high')).toBe(true)
+  expect(needsElevatedInputHelper('medium', 'high', 'medium')).toBe(true)
+  expect(needsElevatedInputHelper('medium', 'high', 'high')).toBe(true)
+  expect(needsElevatedInputHelper('medium', 'medium', 'medium')).toBe(false)
+  expect(needsElevatedInputHelper('high', 'medium', 'medium')).toBe(false)
+  expect(needsElevatedInputHelper('system', 'high', 'high')).toBe(false)
 })
 
 test.skipIf(process.platform !== 'win32')('self and PID queries agree on the native integrity SID', () => {

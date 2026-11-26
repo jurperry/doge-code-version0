@@ -80,6 +80,10 @@ function mergePermissionResponse(
 
 // A Linux executor shares one window anchor and clipboard across dispatchers.
 const activeLinuxExecutors = new WeakSet<ComputerUseHostAdapter["executor"]>();
+// Windows input routing is process-scoped. Keep captures and other calls from
+// changing that route between target preparation and native dispatch, even when
+// two dispatchers share the same executor.
+const activeWindowsExecutors = new WeakMap<ComputerUseHostAdapter["executor"], number>();
 
 /**
  * Bind session state to a reusable dispatcher. The returned function is the
@@ -170,6 +174,7 @@ export function bindSessionContext(
   const dispatch = async (name: string, args: unknown, requestSignal?: AbortSignal,
     reportProgress?: (progress: CuToolProgress) => void, beforeAction?: (action: string) => Promise<void>) => {
     const isLinux = adapter.executor.capabilities.platform === "linux";
+    const isWindows = adapter.executor.capabilities.platform === "win32";
     let ticket = isLinux ? 0 : ++callGeneration;
     const boundRevision = adapter.executor.getBoundRevision?.();
     const throwIfAborted = (): void => {
@@ -276,7 +281,7 @@ export function bindSessionContext(
     // ─── Dispatch ────────────────────────────────────────────────────────
     const changesTarget = name === "open_application" || name === "switch_display";
     const changesFocus = changesTarget || name === "activate_window" || name === "minimize_window";
-    if (targetChangesPending > 0 || (changesFocus && activeCalls > 0) ||
+    if (targetChangesPending > 0 || (isWindows ? (activeWindowsExecutors.get(adapter.executor) ?? 0) > 0 : changesFocus && activeCalls > 0) ||
         (isLinux && activeLinuxExecutors.has(adapter.executor))) {
       requestSignal?.removeEventListener("abort", abortDialog);
       dialogAbort.abort();
@@ -286,6 +291,7 @@ export function bindSessionContext(
       ticket = ++callGeneration;
       activeLinuxExecutors.add(adapter.executor);
     }
+    if (isWindows) activeWindowsExecutors.set(adapter.executor, (activeWindowsExecutors.get(adapter.executor) ?? 0) + 1);
     if (changesTarget) targetGeneration++;
     if (changesFocus) targetChangesPending++;
     let callTargetGeneration = targetGeneration;
@@ -317,6 +323,11 @@ export function bindSessionContext(
       if (changesFocus) targetChangesPending--;
       activeCalls--;
       if (isLinux) activeLinuxExecutors.delete(adapter.executor);
+      if (isWindows) {
+        const remaining = (activeWindowsExecutors.get(adapter.executor) ?? 1) - 1;
+        if (remaining <= 0) activeWindowsExecutors.delete(adapter.executor);
+        else activeWindowsExecutors.set(adapter.executor, remaining);
+      }
       requestSignal?.removeEventListener("abort", abortDialog);
       dialogAbort.abort();
     }

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, resolve } from 'node:path'
 import { getDogeConfigDir } from '../../dogeConfigDir.js'
 import { buildBrokerServerScript } from './brokerScript.js'
+import { currentUserSid, processStartTicks } from './nativeWindows.js'
 import { runPowerShell, runPowerShellSync } from './powerShell.js'
 
 const TASK_PREFIX = 'Doge Code Computer Use Elevation'
@@ -39,12 +40,17 @@ let cachedIdentity: WindowsOwnerIdentity | undefined
 
 export function getWindowsOwnerIdentity(): WindowsOwnerIdentity {
   if (cachedIdentity) return cachedIdentity
-  const identity = runPowerShellSync(`[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value + '|' + (Get-Process -Id ${process.pid}).StartTime.Ticks`, 5000).trim()
-  const [callerSid, ownerStartTicks] = identity.split('|')
-  if (!callerSid || !/^\d+$/.test(ownerStartTicks ?? '')) {
+  if (process.platform === 'win32') {
+    cachedIdentity = { callerSid: currentUserSid(), ownerStartTicks: processStartTicks(process.pid) }
+  } else {
+    const identity = runPowerShellSync(`[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value + '|' + (Get-Process -Id ${process.pid}).StartTime.Ticks`, 5000).trim()
+    const [callerSid, ownerStartTicks] = identity.split('|')
+    cachedIdentity = { callerSid, ownerStartTicks }
+  }
+  if (!cachedIdentity.callerSid || !/^[1-9]\d*$/.test(cachedIdentity.ownerStartTicks ?? '')) {
+    cachedIdentity = undefined
     throw new Error('Could not identify the Windows user or owner process for the Computer Use helper.')
   }
-  cachedIdentity = { callerSid, ownerStartTicks }
   return cachedIdentity
 }
 

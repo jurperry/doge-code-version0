@@ -58,10 +58,11 @@ export { ALL_SUB_GATES_OFF, ALL_SUB_GATES_ON } from "./subGates.js";
 export { API_RESIZE_PARAMS, targetImageSize } from "./imageResize.js";
 export type { ResizeParams } from "./imageResize.js";
 
-export { defersLockAcquire, handleToolCall, resetMouseButtonHeld } from "./toolCalls.js";
+export { ComputerUseActionError, defersLockAcquire, handleToolCall, resetMouseButtonHeld } from "./toolCalls.js";
 export type {
   CuCallTelemetry,
   CuCallToolResult,
+  CuErrorDetails,
   CuErrorKind,
 } from "./toolCalls.js";
 

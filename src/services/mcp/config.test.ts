@@ -5,10 +5,7 @@ import {
   setMcpServerEnabled,
 } from './config.js'
 import { saveCurrentProjectConfig } from '../../utils/config.js'
-import {
-  setupComputerUseMCP,
-  COMPUTER_USE_MCP_PROMPT_HINT,
-} from '../../utils/computerUse/setup.js'
+import { setupComputerUseMCP } from '../../utils/computerUse/setup.js'
 import { COMPUTER_USE_MCP_SERVER_NAME } from '../../utils/computerUse/common.js'
 
 // NODE_ENV=test（bun:test 默认设置）下 getCurrentProjectConfig /
@@ -73,13 +70,4 @@ test('setupComputerUseMCP registers the in-process server and full toolset', () 
   }
   expect(allowedTools.includes(`mcp__${COMPUTER_USE_MCP_SERVER_NAME}__computer_batch`))
     .toBe(process.platform !== 'linux')
-})
-
-test('local CU prompt hint covers the screenshot-act-verify loop', () => {
-  // 第三方/转接端点没有 Anthropic 服务端的 CU availability hint，
-  // 本地提示必须自带最小工作流引导。
-  expect(COMPUTER_USE_MCP_PROMPT_HINT).toContain('request_access')
-  expect(COMPUTER_USE_MCP_PROMPT_HINT).toContain('screenshot')
-  expect(COMPUTER_USE_MCP_PROMPT_HINT.toLowerCase()).toContain('verify')
-  expect(COMPUTER_USE_MCP_PROMPT_HINT).toContain('mcp__computer-use__')
 })

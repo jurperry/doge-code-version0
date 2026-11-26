@@ -1,5 +1,24 @@
 # development_logs.md — Doge Code 开发经验与版本索引
 
+## 2026-11-26 Windows 全屏输入的前台完整性路由（2.1.358）
+
+1. 新会话 `0dbea5c0` 再次返回 `SetCursorPos failed / 203 / local / medium`。复查发现，只按命中 PID 选路由漏掉了 high 前台：原任务已授权 Doge Code，完全可能存在 high `launcher_main` 在前台、medium 窗口在点击点的组合。专用回归先启动普通权限置顶窗口，再启动 high 主窗口，旧实现稳定复现同一报错；单独的源码/压缩 EXE 原生 IL 查询都正常，不能再把问题归因于 FFI 或缺少二次准备。
+2. 修复为全屏实体输入同时检查命中目标和前台 IL，任一更高都走已授权 broker；`hover` 不再强制本地。绑定后台消息仍只按实际绑定目标决定，不对无关前台额外提权。错误结果区分 `targetIL` 与 `foregroundIL`。Win32 203 只是残留值：实测 medium 本地调用返回 `False|203`，high broker 返回 `True|203`，不得拿它代替根因。
+3. `computer-use-input-fixture-e2e.ts` 增加 high 前台 + medium 命中、实际鼠标效果、broker 选择、普通目标 local 和 high 前台 hover 断言；`elevatedPowerShell.test.ts` 增加双 IL 单元测试。普通/高完整性夹具及组合场景通过。App 的 `verify-computer-use-elevated-input.mjs` 在显式 `CU_ELEVATED_INPUT_E2E=1` 时验证同一组合及绑定输入，默认跳过人工 UAC 场景。
+4. 2.1.357 的高完整性夹具只验证命中 high 的同源路径，不能覆盖上述混合权限场景；之前“原问题未稳定复现”的边界记录以本轮复现和修复为准。
+5. `bindSessionContext` 以 executor 为粒度互斥全部 Windows 调用，避免截图在准备与派发之间改写进程级路由；跨 dispatcher 的 broker→local、local→broker 交错测试均覆盖，且被拒绝调用不会进入准备或截图。
+6. 编译版还暴露了 `getWindowsOwnerIdentity()` 在真正提权前的同步 PowerShell 超时。当前用户 SID 改为读取进程 Token，属主启动时间改为 `GetProcessTimes`，再按 Windows 当前时区转换为 .NET `Process.StartTime.Ticks` 并保留 100ns 余数。与旧 PowerShell 结果逐字段相等，broker 生命周期测试通过；不要用 Unix epoch 常量代替 .NET/1601 年常量，也不要忽略本地时区。
+7. 真实编译 `doge.exe` 已完成 `initialize`、mock 模型授权、全屏 high 点击、实际窗口效果和清理。最小化后的后台窗口激活另受 Windows 前台锁定约束，不与本轮实体输入路由结论混写。早期一次性探针遗留的 high 窗口曾覆盖后续居中的测试窗口，导致命中错误 PID 和误判激活失败；实机前置必须同时校验命中 PID/IL 并按精确测试命令行清理，不能按进程名批量结束 PowerShell。
+8. 最终裸测试 152 文件 1213 项、隔离测试 148 文件 1105 项、MCP 包 108 项均通过。安装版启动 S1–S5、CU 安全场景 7/7，以及安装目录 CLI 的 high/medium、权限拒绝、后台消息、独立点击、拖拽、键盘和批次均通过。独立复审与最终测试基础设施复审无 Critical/Important。单次 UAC 与真实全局 Esc 仍需用户确认或隔离桌面验证；未直接复跑鸣潮，使用与其相同的权限组合验证。
+
+## 2026-11-25 Windows 内置 Computer Use 技能（2.1.357）
+
+1. Windows 操作规范收在 `src/skills/bundled/computer-use/SKILL.md`，随 CLI 编译。主会话按浏览器分流后的实际 MCP 工具清单加载技能。复用已有的授权、坐标、会话锁和 Esc 中止机制。`/computer-use` 复用同一路径，避免在历史消息里重复写入技能全文。
+2. 全显示器单击后需单独截图。`left_click` 的跟随截图参数只适用当前绑定窗口。批次坐标以开始前的图为准，工具回执仅说明已派发，需验证窗口状态或画面后再继续。`zoom` 只供查看细节，坐标仍取原图。
+3. 显式 Computer Use 可出现在浏览器动作前后。识别 slash 命令要读 CLI 生成的命令标签，也要考虑中英文否定措辞。安装版请求检查须将后台模型调用与带工具清单的主回合区分开。测试覆盖 MCP 关闭、分流、子代理拒绝和已关闭窗口拒绝输入。
+4. 高完整性实机使用现有永久 broker 启动隔离 WinForms 夹具，绑定与全屏实体点击、拖拽、滚动、键盘、独立单击和批次均通过。夹具可用 `CU_FIXTURE_ELEVATED=1 CU_FIXTURE_USE_EXISTING_PERMANENT=1` 复用当前用户授权，启动后切回 test 配置，不修改真实 settings/grants，也不会停止永久 broker；按需启动 broker 时仍会写其运行态 PID/日志文件。不传该环境变量时仍走原人工 UAC 流程。
+5. `SetCursorPosChecked` 统一采集原生阶段与 Win32 错误，`native_input_failed` 携带路由和 IL，单工具与批次均保留恢复信息。`open_application` 超时仅在授权绑定核实后报告 `open_outcome_unconfirmed`，UAC 结束文案不再猜测处理者。CLI 定向 235 项、隔离 148 文件 1103 项及普通/高完整性夹具通过。
+
 ## 2026-11-24 Windows Computer Use 后台单击与原生最小化（2.1.354）
 
 1. 移除按进程名识别游戏并启用真实鼠标和键盘的规则。普通 Win32 窗口的内容单击恢复窗口消息派发。绑定截图返回实时前台状态，后台单击是否生效由目标界面确认。
@@ -58,7 +77,7 @@
 ### 1.4 Computer Use / Windows
 
 - 坐标三条铁律：Windows 命中前必须启用并验证 **Per-Monitor-V2** 再调 `WindowFromPoint`（否则空命中让模型重试到 64+ 次，2.1.336 根因不是 UIPI）；绑定窗口 origin=(0,0) 与全屏两空间，真实输入只加一次 `GetWindowRect` 偏移，`switch_display` 显式解绑并清锚点；输入/zoom 前比较 `boundRevision`、截图返回前复核，迟到旧图不得覆盖新锚点。
-- UAC 永远由用户处理：检测到即起 30 秒期限（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报，提示后必须重新截图；只有高完整性目标才请求管理员 PowerShell 助手（命名管道+属主校验），普通目标切回本地。永久授权只从 App 设置显式启用/撤销，计划任务按用户 + 配置目录隔离；永久代理解绑 CLI 属主生命周期，但每个动作仍校验客户端和请求属主，会话退出不得停止其他会话正在共用的代理。
+- UAC 永远由用户处理：检测到即起 30 秒期限（`src/utils/computerUse/win32/uacWait.ts`），超时中止回合并上报，提示后必须重新截图；高完整性目标或全屏实体输入的高完整性前台才请求管理员 PowerShell 助手（命名管道+属主校验），普通前台与命中都较低时切回本地，绑定后台消息不因无关前台额外提权。永久授权只从 App 设置显式启用/撤销，计划任务按用户 + 配置目录隔离；永久代理解绑 CLI 属主生命周期，但每个动作仍校验客户端和请求属主，会话退出不得停止其他会话正在共用的代理。
 - SendMessage 不是通用协议（Chromium/自绘忽略）；bound HWND 的直接文本必须走真实 Unicode `SendInput + KEYEVENTF_UNICODE`（stdin base64 传文本），不要回后台 `WM_CHAR`；双/三击同一脚本完成，系统 click count 会出现 `1,2,1`。
 - 身份 fail-closed：完整 exe 路径、可信宿主（真实父/根关系+祖先链）、deny 优先、未知前台拒绝；窗口 owner 不是安全边界；便携 exe 用自身目录为 cwd。
 - 验证只看 UI/像素/独立 `GetCursorPos`，不看「已派发」文案。

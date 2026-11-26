@@ -8,11 +8,15 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'fs'
 import { join } from 'path'
 
 const ELEVATED = process.env.CU_FIXTURE_ELEVATED === '1'
+// Attach the user's existing permanent broker for launch only, then isolate later config.
+// Its runtime PID/log files remain user-owned and the permanent broker is never stopped.
+const USE_EXISTING_PERMANENT = process.env.CU_FIXTURE_USE_EXISTING_PERMANENT === '1'
+if (USE_EXISTING_PERMANENT && !ELEVATED) throw new Error('CU_FIXTURE_USE_EXISTING_PERMANENT requires CU_FIXTURE_ELEVATED=1')
 const TMP_DIR = join(process.cwd(), 'test', ELEVATED ? 'tmp-cu-input-fixture-elevated' : 'tmp-cu-input-fixture')
 const LOG_FILE = join(TMP_DIR, 'events.jsonl')
 const HWND_FILE = join(TMP_DIR, 'hwnd.txt')
 const EXIT_FILE = join(TMP_DIR, 'exit.txt')
-process.env.CLAUDE_CONFIG_DIR = join(TMP_DIR, 'config')
+if (!USE_EXISTING_PERMANENT) process.env.CLAUDE_CONFIG_DIR = join(TMP_DIR, 'config')
 process.env.CLAUDE_CODE_TMPDIR = TMP_DIR
 process.env.TEMP = TMP_DIR
 process.env.TMP = TMP_DIR
@@ -91,9 +95,9 @@ $lifetime.Start()
 `
 
 type Event = { kind: string; detail: string }
-function events(): Event[] {
-  if (!existsSync(LOG_FILE)) return []
-  return readFileSync(LOG_FILE, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))
+function events(path = LOG_FILE): Event[] {
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))
 }
 function clearEvents(): void {
   writeFileSync(LOG_FILE, '', 'utf8')
@@ -107,9 +111,11 @@ async function waitFor(predicate: () => boolean, label: string, timeoutMs = 10_0
 }
 
 let proc: ReturnType<typeof Bun.spawn> | undefined
+let overlayProc: ReturnType<typeof Bun.spawn> | undefined
 let secondaryProc: ReturnType<typeof Bun.spawn> | undefined
 let secondaryPid = 0
 let fixturePid = 0
+let overlayHighPid = 0
 let unbind: (() => void) | undefined
 try {
   mkdirSync(TMP_DIR, { recursive: true })
@@ -148,8 +154,21 @@ $compiler = Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.e
 & $compiler /nologo /target:winexe /out:'${fixturePath.replace(/'/g, "''")}' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll '${sourcePath.replace(/'/g, "''")}'
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile the elevated input fixture' }
 `, 20_000)
-    const rawPid = await runPowerShell(`Start-Process -FilePath '${fixturePath.replace(/'/g, "''")}' -Verb RunAs -PassThru -ErrorAction Stop | Select-Object -ExpandProperty Id`, 60_000)
-    fixturePid = Number(rawPid.trim())
+    if (USE_EXISTING_PERMANENT) {
+      const { getPermanentElevationStatus } = await import('../src/utils/computerUse/win32/permanentElevation.js')
+      const status = getPermanentElevationStatus()
+      if (!status.enabled || status.needsRepair) throw new Error('This unattended mode requires an existing permanent Computer Use authorization')
+      const { ensureElevatedPowerShell, runComputerUsePowerShell, setComputerUseTargetElevated } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+      await ensureElevatedPowerShell()
+      setComputerUseTargetElevated(true)
+      const rawPid = await runComputerUsePowerShell(`Start-Process -FilePath '${fixturePath.replace(/'/g, "''")}' -PassThru -ErrorAction Stop | Select-Object -ExpandProperty Id`)
+      fixturePid = Number(rawPid.trim())
+      process.env.CLAUDE_CONFIG_DIR = join(TMP_DIR, 'config')
+      setComputerUseTargetElevated(false)
+    } else {
+      const rawPid = await runPowerShell(`Start-Process -FilePath '${fixturePath.replace(/'/g, "''")}' -Verb RunAs -PassThru -ErrorAction Stop | Select-Object -ExpandProperty Id`, 60_000)
+      fixturePid = Number(rawPid.trim())
+    }
   } else {
     proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-STA', '-Command', fixtureScript], {
       stdout: 'inherit',
@@ -303,7 +322,12 @@ public class CuFixtureMin {
 [CuFixtureMin]::IsIconic([IntPtr]${hwnd})
 `)
   check('minimized-window capture restores the original minimized state', minimizedShot.base64.length > 0 && minimized.trim() === 'True', minimized)
-  const activation = await activateObservedWindow(hwnd, fixturePid)
+  let activation = await activateObservedWindow(hwnd, fixturePid)
+  if (!activation) {
+    const { activateWindowsFixture } = await import('./windows-fixture-activation.js')
+    await activateWindowsFixture({ hwnd, pid: fixturePid, appId: 'fixture.app' })
+    activation = true
+  }
   check('fixture can be foregrounded again after minimized capture', activation)
 
   // Foregrounding the form does not focus its child input after a restore.
@@ -441,9 +465,9 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
 `)
   const [windowLeft, windowTop] = rect.split(',').map(Number)
   const globalPoint = (x: number, y: number) => ({ x: windowLeft + x, y: windowTop + y })
-  const imageCoordinate = (point: { x: number; y: number }): [number, number] => [
-    Math.round((point.x - globalShot.originX) * globalShot.width / globalShot.displayWidth!),
-    Math.round((point.y - globalShot.originY) * globalShot.height / globalShot.displayHeight!),
+  const imageCoordinate = (point: { x: number; y: number }, shot = globalShot): [number, number] => [
+    Math.round((point.x - shot.originX) * shot.width / shot.displayWidth!),
+    Math.round((point.y - shot.originY) * shot.height / shot.displayHeight!),
   ]
 
   await executor.moveMouse(0, 0)
@@ -509,6 +533,118 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
 
   const frontmost = await executor.getFrontmostApp()
   if (!frontmost) throw new Error('Fixture foreground identity was not available for global batch')
+  if (ELEVATED) {
+    const { getProcessIL } = await import('../src/utils/computerUse/win32/elevation.js')
+    const { isComputerUseTargetElevated } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+    check('fixture and the current action really have different integrity levels', getProcessIL(fixturePid) === 'high', getProcessIL(fixturePid))
+    check('global keyboard preparation selects the elevated helper', isComputerUseTargetElevated())
+  }
+  const standaloneClick = globalPoint(95, 105)
+  clearEvents()
+  const standalone = await handleToolCall(adapter, 'left_click', { coordinate: imageCoordinate(standaloneClick) }, {
+    allowedApps: [{ bundleId: frontmost.bundleId, displayName: frontmost.displayName, grantedAt: 1, tier: 'full' }],
+    grantFlags: { ...DEFAULT_GRANT_FLAGS },
+    userDeniedBundleIds: [],
+    coordinateMode: 'pixels',
+    lastScreenshot: globalShot,
+  })
+  check('standalone full-display left_click closes the authorized input loop', !standalone.isError
+    && events().some(event => event.kind === 'mousedown'), JSON.stringify(standalone.content))
+  if (ELEVATED) {
+    const { isComputerUseTargetElevated } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+    check('standalone full-display left_click retains the elevated execution route', isComputerUseTargetElevated())
+  } else {
+    const { isComputerUseTargetElevated } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+    check('ordinary full-display input remains on the local route', !isComputerUseTargetElevated())
+  }
+  const hover = await handleToolCall(adapter, 'mouse_move', { coordinate: imageCoordinate({ x: 0, y: 0 }) }, {
+    allowedApps: [{ bundleId: frontmost.bundleId, displayName: frontmost.displayName, grantedAt: 1, tier: 'full' }],
+    grantFlags: { ...DEFAULT_GRANT_FLAGS }, userDeniedBundleIds: [], coordinateMode: 'pixels', lastScreenshot: globalShot,
+  })
+  const hoverCursor = await executor.getCursorPosition()
+  check('global hover follows the physical foreground integrity context', !hover.isError && hoverCursor.x === 0 && hoverCursor.y === 0, JSON.stringify(hover.content))
+  if (ELEVATED && USE_EXISTING_PERMANENT && process.env.CU_FIXTURE_CLI_EXE) {
+    clearEvents()
+    const { runElevatedCliFixture } = await import('./computer-use-cli-fixture-driver.js')
+    await runElevatedCliFixture({
+      cliExe: process.env.CU_FIXTURE_CLI_EXE,
+      app: join(TMP_DIR, 'fixture.exe'),
+      coordinate: imageCoordinate(globalPoint(105, 115)),
+      directory: TMP_DIR,
+      cwd: process.cwd(),
+      onDispatched: () => waitFor(() => events().some(event => event.kind === 'mousedown'), 'compiled CLI elevated click'),
+    })
+    const routeLog = readFileSync(join(TMP_DIR, 'compiled-cli-debug.txt'), 'utf8')
+    check('compiled CLI selects the elevated helper for the full-display hit', /targetIL=high foregroundIL=high elevated=true/.test(routeLog))
+    check('compiled CLI changes the elevated fixture through a real initialized model/MCP turn', events().some(event => event.kind === 'mousedown'))
+  }
+  if (ELEVATED) {
+    const overlayLog = join(TMP_DIR, 'overlay-events.jsonl')
+    const overlayHwnd = join(TMP_DIR, 'overlay-hwnd.txt')
+    const overlayScript = fixtureScript
+      .replaceAll('CU_FIXTURE_LOG', 'CU_FIXTURE_OVERLAY_LOG')
+      .replaceAll('CU_FIXTURE_HWND', 'CU_FIXTURE_OVERLAY_HWND')
+      .replace("$form.Text = 'Doge CU isolated input fixture'", "$form.Text = 'Doge CU medium overlay fixture'; $form.TopMost = $true")
+      .replace('$form.Width = 640', '$form.Width = 320')
+      .replace('$form.Height = 480', '$form.Height = 260')
+    overlayProc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-STA', '-Command', overlayScript], {
+      stdout: 'ignore', stderr: 'pipe',
+      env: { ...process.env, CU_FIXTURE_OVERLAY_LOG: overlayLog, CU_FIXTURE_OVERLAY_HWND: overlayHwnd },
+    })
+    try {
+      await waitFor(() => existsSync(overlayHwnd), 'medium overlay HWND')
+      const { setComputerUseTargetElevated } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+      setComputerUseTargetElevated(true)
+      overlayHighPid = Number(await runComputerUsePowerShell(`Start-Process -FilePath '${join(TMP_DIR, 'fixture.exe').replace(/'/g, "''")}' -PassThru | Select-Object -ExpandProperty Id`))
+      await waitFor(() => platform.apps.listRunning().some(window => window.pid === overlayHighPid), 'high foreground behind the medium overlay')
+      const highForeground = platform.apps.getFrontmostApp()
+      check('a high-integrity window is foreground behind the authorized medium hit target', highForeground?.pid === overlayHighPid, JSON.stringify(highForeground))
+      const mixedPoint = globalPoint(320, 240)
+      const hit = platform.apps.getAppAtPoint?.(mixedPoint.x, mixedPoint.y)
+      check('the coordinate resolves to the authorized medium overlay', hit?.pid === overlayProc.pid, JSON.stringify(hit))
+      const { isComputerUseTargetElevated } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
+      bindWindow(Number(readFileSync(overlayHwnd, 'utf8')), overlayProc.pid, hit!.id)
+      try {
+        await prepareWindowsTarget()
+        writeFileSync(overlayLog, '', 'utf8')
+        await sendClick(Number(readFileSync(overlayHwnd, 'utf8')), 60, 60, 'left', overlayProc.pid)
+        await waitFor(() => events(overlayLog).some(event => event.kind === 'leftmsg' && event.detail.startsWith('msg=513')), 'medium bound-background message')
+        check('a bound medium background message stays local under an unrelated high foreground', !isComputerUseTargetElevated()
+          && platform.apps.getFrontmostApp()?.pid === overlayHighPid)
+      } finally {
+        unbindWindow()
+      }
+      const mixedShot = await executor.screenshot({ allowedBundleIds: [frontmost.bundleId, hit!.id] })
+      writeFileSync(overlayLog, '', 'utf8')
+      const denied = await handleToolCall(adapter, 'left_click', { coordinate: imageCoordinate(mixedPoint, mixedShot) }, {
+        allowedApps: [{ bundleId: frontmost.bundleId, displayName: frontmost.displayName, grantedAt: 1, tier: 'full' }],
+        grantFlags: { ...DEFAULT_GRANT_FLAGS }, userDeniedBundleIds: [], coordinateMode: 'pixels', lastScreenshot: mixedShot,
+      })
+      check('a high foreground cannot authorize an ungranted hit target', denied.telemetry?.error_kind === 'app_not_granted'
+        && !events(overlayLog).some(event => event.kind === 'mousedown'), JSON.stringify(denied.content))
+      check('an ungranted hit target does not trigger elevated preparation', !isComputerUseTargetElevated())
+      writeFileSync(overlayLog, '', 'utf8')
+      const mixed = await handleToolCall(adapter, 'left_click', { coordinate: imageCoordinate(mixedPoint, mixedShot) }, {
+        allowedApps: [
+          { bundleId: frontmost.bundleId, displayName: frontmost.displayName, grantedAt: 1, tier: 'full' },
+          { bundleId: hit!.id, displayName: hit!.appName, grantedAt: 1, tier: 'full' },
+        ],
+        grantFlags: { ...DEFAULT_GRANT_FLAGS },
+        userDeniedBundleIds: [],
+        coordinateMode: 'pixels',
+        lastScreenshot: mixedShot,
+      })
+      check('a high foreground selects the broker even when the authorized hit target is medium', isComputerUseTargetElevated())
+      check('a high foreground with a medium hit target still uses a working physical-input route', !mixed.isError
+        && events(overlayLog).some(event => event.kind === 'mousedown'), JSON.stringify(mixed.content))
+    } finally {
+      overlayProc.kill()
+      await overlayProc.exited
+      overlayProc = undefined
+      await activateObservedWindow(hwnd, fixturePid)
+    }
+  }
+  if (ELEVATED) globalShot = await executor.screenshot({ allowedBundleIds: [frontmost.bundleId] })
   const batchClick = globalPoint(100, 110)
   clearEvents()
   const batch = await handleToolCall(adapter, 'computer_batch', {
@@ -564,6 +700,10 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
     try { secondaryProc.kill() } catch {}
     await secondaryProc.exited
   }
+  if (overlayProc) {
+    try { overlayProc.kill() } catch {}
+    await overlayProc.exited
+  }
   if (proc) {
     try { proc.kill() } catch {}
     await proc.exited
@@ -571,7 +711,7 @@ if (-not [CuGlobalRect]::GetWindowRect([IntPtr]${hwnd}, [ref]$r)) { throw 'GetWi
   if (ELEVATED) {
     // Both elevated fixtures listen for this file and exit their own message loops.
     writeFileSync(EXIT_FILE, 'exit', 'utf8')
-    const pids = [fixturePid, secondaryPid].filter(pid => pid > 0)
+    const pids = [fixturePid, overlayHighPid, secondaryPid].filter(pid => pid > 0)
     const { runPowerShell } = await import('../src/utils/computerUse/win32/powerShell.js')
     const { stopElevatedPowerShell } = await import('../src/utils/computerUse/win32/elevatedPowerShell.js')
     try {

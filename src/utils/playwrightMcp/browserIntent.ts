@@ -1,5 +1,6 @@
 import { getToolNameForPermissionCheck, mcpInfoFromString } from '../../services/mcp/mcpStringUtils.js'
 import type { Message } from '../../types/message.js'
+import { COMPUTER_USE_MCP_SERVER_NAME } from '../computerUse/common.js'
 import {
   DESKTOP_PLAYWRIGHT_BROWSERS,
   DESKTOP_PLAYWRIGHT_SERVER_MODES,
@@ -15,7 +16,16 @@ const NON_BROWSER = /^\s*(?:branch\b|extension\b|driver\b|分支|扩展|插件|�
 const BRAND_JOIN = /^\s*(?:和|与|及|以及|或者?|、|and|or|versus|vs\.?)\s*$/i
 const NEGATED = /(?:不要|不需要|不使用|不用|不选|别|禁止|避免|而非|而不是|不是|代替|替代)\s*(?:(?:使用|用|选择|切换到|打开|启动|在)\s*)?$|\b(?:not|never|don't|without|instead of|rather than)\s+(?:(?:use|using|choose|open|launch|in|the)\s+)*$/i
 const IN_BROWSER = /^\s*(?:浏览器\s*)?(?:中|里|上)\s*(打开|启动|访问|进入|导航|点击|截图|输入|填写|滚动)/
-const EXPLICIT_DESKTOP = /^(?:请\s*)?(?:使用|用|通过|use|using)?\s*(?:电脑操作|桌面操作|\bcomputer[ -]use\b)/i
+const DESKTOP_USE = /电脑控制|电脑操作|桌面控制|桌面操作|\bcomputer[ -]use\b/gi
+const DESKTOP_DIRECTIVE = /(?:使用|用|通过|调用|借助|\b(?:use|using|with|via))\s*[`"“]?$/i
+const DESKTOP_PREFIX = /^(?:请\s*|please\s+)?[`"“]?$/i
+const DESKTOP_NEGATED = /(?:不|不想|不用|无需|无须)\s*$|\b(?:avoid|except)\s*$/i
+const DESKTOP_EXCLUDED = /^[`"”]?\s*(?:以外|之外|除外)/
+const DESKTOP_ALIAS_NEGATED = /^[`"”]?\s*(?:is\s+not\s+(?:allowed|permitted|wanted|required)|should\s+not\s+be\s+used)/i
+const DESKTOP_SUFFIX_ACTION = /^\s*(?:使用|用|通过|借助|\b(?:use|using|with|via)\b)\s*[`"“]?(?:电脑控制|电脑操作|桌面控制|桌面操作|\bcomputer[ -]use\b)/i
+const DESKTOP_CLAUSE_NEGATED = /\b(?:do\s+not|don't|never|avoid|except)\b/i
+const DESKTOP_CONTRAST = /\b(?:instead|rather than)\s*$|(?:改为|改用|而是)\s*$/i
+const COMPUTER_USE_SLASH_MESSAGE = `<command-message>${COMPUTER_USE_MCP_SERVER_NAME}</command-message>\n<command-name>/${COMPUTER_USE_MCP_SERVER_NAME}</command-name>`
 const MODE_LABEL = /无头|可见|有头|\b(?:headless|visible|headed)\b/gi
 const MODE_NOUN = /^\s*的?\s*(?:浏览器|窗口|模式|\b(?:browser|window|mode|chrome|edge|msedge)\b)/i
 const MODE_CONTEXT = /(?:浏览器|窗口|\b(?:browser|chrome|edge|msedge)\b)(?:\s+(?:in|as))?\s*$/i
@@ -28,9 +38,29 @@ export interface BrowserIntent {
   mode?: BrowserMode
 }
 
+function desktopDirectiveIsNegated(prefix: string): boolean {
+  const clause = prefix.split(/[;；.!！?？,，]/).at(-1) ?? prefix
+  if (DESKTOP_CONTRAST.test(clause)) return false
+  return NEGATED.test(clause) || DESKTOP_NEGATED.test(clause) || DESKTOP_CLAUSE_NEGATED.test(clause)
+}
+
+function explicitlyUsesDesktop(text: string): boolean {
+  if (text.startsWith(COMPUTER_USE_SLASH_MESSAGE)) return true
+  for (const alias of text.matchAll(DESKTOP_USE)) {
+    const suffix = text.slice(alias.index + alias[0].length)
+    if (DESKTOP_EXCLUDED.test(suffix) || DESKTOP_ALIAS_NEGATED.test(suffix)) continue
+    const prefix = text.slice(0, alias.index)
+    if (DESKTOP_PREFIX.test(prefix) && !desktopDirectiveIsNegated(prefix)) return true
+    const directive = DESKTOP_DIRECTIVE.exec(prefix)
+    if (!directive) continue
+    if (!desktopDirectiveIsNegated(prefix.slice(0, directive.index))) return true
+  }
+  return false
+}
+
 export function detectBrowserIntent(raw: string): BrowserIntent | undefined {
   const text = raw.replace(/https?:\/\/[^\s，。！？；、,<>]+/gi, ' ').trim()
-  if (!text || EXPLICIT_DESKTOP.test(text) || NO_BROWSER.test(text)) return
+  if (!text || explicitlyUsesDesktop(text) || NO_BROWSER.test(text)) return
 
   const alias = BROWSER_USE.exec(text)
   const requestedAlias = alias && !NEGATED.test(text.slice(0, alias.index)) && (
@@ -48,7 +78,7 @@ export function detectBrowserIntent(raw: string): BrowserIntent | undefined {
     const before = text.slice(0, brand.index)
     const beforeMode = before.replace(MODE_BEFORE_BRAND, '')
     const after = text.slice(brand.index + brand[0].length)
-    if (NEGATED.test(beforeMode) || NON_BROWSER.test(after)) continue
+    if ((NEGATED.test(beforeMode) && !DESKTOP_SUFFIX_ACTION.test(after)) || NON_BROWSER.test(after)) continue
     const locationAction = /在\s*$/.test(beforeMode) && IN_BROWSER.exec(after)
     if (!requestedAlias && !BRAND_ACTION.test(beforeMode) && !locationAction &&
         !(brand.index === 0 && /^(?:\s*浏览器)?[.!。！]?\s*$/.test(after)) &&

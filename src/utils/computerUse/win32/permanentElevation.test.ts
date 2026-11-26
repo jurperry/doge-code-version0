@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { buildPermanentBrokerScript, createPermanentElevationDescriptor, getPermanentElevationStatus, getWindowsOwnerIdentity } from './permanentElevation.js'
+import { runPowerShellSync } from './powerShell.js'
 
 test('permanent elevation tasks and pipes are scoped to user and config directory', () => {
   const root = process.platform === 'win32' ? 'C:\\Users\\Test\\.doge' : '/tmp/doge'
@@ -16,6 +17,11 @@ test('permanent elevation tasks and pipes are scoped to user and config director
   expect(otherConfig.taskName).not.toBe(first.taskName)
   expect(otherConfig.pipeName).not.toBe(first.pipeName)
   expect(first.scriptPath.toLowerCase().replaceAll('/', '\\')).toContain('computer-use\\elevated-broker-v1.ps1')
+})
+
+test.skipIf(process.platform !== 'win32')('native owner identity matches the Windows token and process start time', () => {
+  const expected = runPowerShellSync(`[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value + '|' + (Get-Process -Id ${process.pid}).StartTime.Ticks`, 5000).trim().split('|')
+  expect(getWindowsOwnerIdentity()).toEqual({ callerSid: expected[0], ownerStartTicks: expected[1] })
 })
 
 test.skipIf(process.platform !== 'win32')('an isolated config has no permanent authorization by default', () => {

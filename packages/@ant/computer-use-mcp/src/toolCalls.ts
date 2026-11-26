@@ -89,6 +89,7 @@ export type CuErrorKind =
   | "teach_mode_conflict"
   | "teach_mode_not_active"
   | "executor_threw"
+  | "native_input_failed"
   | "capture_failed"
   | "app_denied" // no longer emitted (tiered model replaced hard-deny); kept for schema compat
   | "bad_args" // malformed tool args (type/shape/range/unknown value)
@@ -135,6 +136,36 @@ export type CuCallToolResult = CallToolResult & {
 // Small result helpers (mirror of chrome-mcp's inline `{content, isError}`)
 // ---------------------------------------------------------------------------
 
+export type CuErrorDetails = {
+  hwnd?: number;
+  phase?: string;
+  nativeApi?: string;
+  win32Error?: number;
+  route?: "local" | "broker";
+  clientIL?: string;
+  targetIL?: string;
+  foregroundIL?: string;
+};
+
+export class ComputerUseActionError extends Error {
+  constructor(
+    message: string,
+    readonly errorKind: CuErrorKind,
+    readonly details: CuErrorDetails = {},
+  ) {
+    super(message);
+    this.name = "ComputerUseActionError";
+  }
+}
+
+function isComputerUseActionError(value: unknown): value is ComputerUseActionError {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ComputerUseActionError>;
+  return candidate.name === "ComputerUseActionError" &&
+    typeof candidate.errorKind === "string" &&
+    !!candidate.details && typeof candidate.details === "object";
+}
+
 const ERROR_RECOVERY: Partial<Record<CuErrorKind, string>> = {
   allowlist_empty: "request_access",
   app_not_granted: "request_access",
@@ -143,11 +174,12 @@ const ERROR_RECOVERY: Partial<Record<CuErrorKind, string>> = {
   state_conflict: "inspect_state_and_refresh_screenshot",
   capture_failed: "inspect_capture_target",
   executor_threw: "inspect_state_before_retry",
+  native_input_failed: "inspect_state_and_refresh_screenshot",
   cu_lock_held: "wait_for_lock_release",
   bad_args: "correct_arguments",
 };
 
-export function errorResult(text: string, errorKind: CuErrorKind = "other", details: { hwnd?: number; phase?: string } = {}): CuCallToolResult {
+export function errorResult(text: string, errorKind: CuErrorKind = "other", details: CuErrorDetails = {}): CuCallToolResult {
   const error = { code: errorKind, retryable: false, fix: ERROR_RECOVERY[errorKind] ?? "inspect_error", ...details };
   return {
     content: [{ type: "text", text }, { type: "text", text: JSON.stringify(error) }],
@@ -174,9 +206,12 @@ const SIDE_EFFECTING_TOOLS = new Set([
   "left_mouse_down", "left_mouse_up", "write_clipboard",
 ]);
 
-function recoveryGuidanceForFailure(name: string): string {
+function recoveryGuidanceForFailure(name: string, errorKind?: CuErrorKind): string {
   if (name === "computer_batch") {
     return "Do not replay the whole batch: earlier actions may have taken effect and the failed action may be partial. Take a screenshot to inspect the current state, then perform only the missing actions. Later actions were not executed.";
+  }
+  if (errorKind === "native_input_failed" && SIDE_EFFECTING_TOOLS.has(name)) {
+    return "The native cursor-positioning step failed; the current action may be partial and earlier actions may have taken effect. Do not repeat it blindly. Take a screenshot and inspect the input desktop. If the authorized target still needs input, call open_application to bind it and obtain a fresh image before performing only the remaining action.";
   }
   if (SIDE_EFFECTING_TOOLS.has(name)) {
     return "The action may be partial or its outcome may be unknown; do not repeat it blindly. Take a screenshot to inspect the current state. If the target is unavailable, call open_application for an authorized app first, then perform only the remaining needed action.";
@@ -3524,6 +3559,11 @@ async function handleMoveMouse(
   return okText("Pointer movement dispatched.");
 }
 
+function isPowerShellTimeout(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("PowerShell timed out") || message.includes("[CU_HELPER_TIMEOUT]");
+}
+
 async function handleOpenApplication(
   adapter: ComputerUseHostAdapter,
   args: Record<string, unknown>,
@@ -3582,8 +3622,24 @@ async function handleOpenApplication(
 
   throwIfActionAborted(overrides);
   await releaseHeldMouse(adapter);
-  if (typeof windowId === "string") await adapter.executor.openApp(targetBundleId, overrides.requestSignal, windowId);
-  else await adapter.executor.openApp(targetBundleId, overrides.requestSignal);
+  try {
+    if (typeof windowId === "string") await adapter.executor.openApp(targetBundleId, overrides.requestSignal, windowId);
+    else await adapter.executor.openApp(targetBundleId, overrides.requestSignal);
+  } catch (error) {
+    const boundAppId = adapter.executor.getBoundAppId?.();
+    const bound = adapter.executor.getBoundWindowState?.();
+    if (platform === "win32" && isPowerShellTimeout(error) && bound && boundAppId &&
+        normalizeAppId(platform, boundAppId) === normalizeAppId(platform, targetBundleId)) {
+      return errorResult(
+        `Open for "${app}" timed out after the authorized window was bound (hwnd=${bound.hwnd}). ` +
+          "The binding remains available, but activation and follow-up capture are unconfirmed. " +
+          "Take a screenshot before sending input; do not relaunch the application.",
+        "state_conflict",
+        { hwnd: bound.hwnd, phase: "open_outcome_unconfirmed" },
+      );
+    }
+    throw error;
+  }
 
   if (platform === "win32") {
     const opened = `Open dispatched for "${app}".`;
@@ -4459,18 +4515,20 @@ async function handleComputerBatch(
         return finishAbortedBatch(i);
       }
       const message = err instanceof Error ? err.message : String(err);
-      const failed: BatchActionResult = {
+      const actionError = isComputerUseActionError(err) ? err : undefined;
+      const failed = {
         action,
         ok: false,
         output: `actions[${i}] (${action}) threw: ${message}`,
-      };
+        ...actionError?.details,
+      } as BatchActionResult & CuErrorDetails;
       results.push(failed);
       overrides.reportProgress?.({
         progress: results.length,
         total: actions.length,
         message: `${action} threw`,
       });
-      return finishFailedAction(failed, { error_kind: "executor_threw" });
+      return finishFailedAction(failed, { error_kind: actionError?.errorKind ?? "executor_threw" });
     }
 
     const innerImages = inner.content.filter(item => item.type === "image");
@@ -4816,6 +4874,13 @@ export async function handleToolCall(
     // the result is still a tool error, never an implicit success.
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[${serverName}] tool=${name} threw: ${msg}`, err);
+    if (isComputerUseActionError(err)) {
+      return errorResult(
+        `Tool "${name}" failed: ${msg}. Recovery: ${recoveryGuidanceForFailure(name, err.errorKind)}`,
+        err.errorKind,
+        err.details,
+      );
+    }
     const phase = [...msg.matchAll(/\[CU_HELPER_([A-Z_]+)\]/g)].at(-1)?.[1]?.toLowerCase();
     return errorResult(
       `Tool "${name}" failed: ${msg}. Recovery: ${recoveryGuidanceForFailure(name)}`,

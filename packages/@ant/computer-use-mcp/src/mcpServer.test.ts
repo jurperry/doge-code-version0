@@ -132,6 +132,7 @@ describe('bindSessionContext request cancellation', () => {
     let finishFirst: (() => void) | undefined
     const captured: number[] = []
     const dispatch = bindSessionContext(adapter({
+      capabilities: { screenshotFiltering: 'none', platform: 'darwin', hostBundleId: 'host' },
       screenshot: () => {
         calls++
         if (calls === 1) {
@@ -350,19 +351,74 @@ describe('bindSessionContext request cancellation', () => {
     const input = dispatch('left_click', { coordinate: [20, 20] })
     for (let i = 0; i < 100 && !finishGate; i++) await Bun.sleep(1)
     transition = true
-    expect((await dispatch('screenshot', {})).isError).toBeUndefined()
-    expect(events).toEqual([100, 'cleared', 100])
+    expect((await dispatch('screenshot', {})).telemetry?.error_kind).toBe('state_conflict')
+    expect(events).toEqual([100])
     finishGate!()
     expect((await input).telemetry?.error_kind).toBe('state_conflict')
     expect(clicks).toBe(0)
-    expect(events).toEqual([100, 'cleared', 100])
+    expect(events).toEqual([100, 'cleared'])
 
     staleCapture = true
     const stale = dispatch('screenshot', {})
     for (let i = 0; i < 100 && !finishStale; i++) await Bun.sleep(1)
     finishStale!()
     expect((await stale).isError).toBeUndefined()
-    expect(events).toEqual([100, 'cleared', 100])
+    expect(events).toEqual([100, 'cleared'])
+  })
+
+  test('Windows calls cannot change the selected input route across overlapping dispatchers', async () => {
+    let finishClick: (() => void) | undefined
+    let expectedRoute = 'broker'
+    let route = 'local'
+    let hitPid = 30
+    let captures = 0
+    const preparations: Array<number | undefined> = []
+    const shared = adapter({
+      getFrontmostApp: async () => ({ bundleId: 'app.test', displayName: 'Test', pid: hitPid }),
+      appUnderPoint: async () => ({ bundleId: 'app.test', displayName: 'Test', pid: hitPid }),
+      prepareForTarget: async (_signal: AbortSignal | undefined, _purpose: string, authorizedPid?: number) => {
+        preparations.push(authorizedPid)
+        route = authorizedPid === 30 ? 'broker' : 'local'
+      },
+      click: () => new Promise<void>(resolve => {
+        finishClick = () => {
+          expect(route).toBe(expectedRoute)
+          resolve()
+        }
+      }),
+      screenshot: async () => {
+        route = 'local'
+        captures++
+        return {
+          base64: Buffer.alloc(2048, 1).toString('base64'),
+          width: 100, height: 100, displayWidth: 100, displayHeight: 100,
+          originX: 0, originY: 0, displayId: 0,
+        }
+      },
+    })
+    const first = bindSessionContext(shared, 'pixels', context())
+    const second = bindSessionContext(shared, 'pixels', context())
+    const elevated = first('left_click', { coordinate: [20, 20] })
+    for (let i = 0; i < 100 && !finishClick; i++) await Bun.sleep(1)
+    expect((await second('screenshot', {})).telemetry?.error_kind).toBe('state_conflict')
+    expect(captures).toBe(0)
+    finishClick!()
+    expect((await elevated).isError).toBeUndefined()
+
+    expect((await second('screenshot', {})).isError).toBeUndefined()
+    expect(captures).toBe(1)
+    hitPid = 20
+    expectedRoute = 'local'
+    finishClick = undefined
+    const ordinary = first('left_click', { coordinate: [20, 20] })
+    for (let i = 0; i < 100 && !finishClick; i++) await Bun.sleep(1)
+    const preparationCount = preparations.length
+    hitPid = 30
+    expect((await second('left_click', { coordinate: [20, 20] })).telemetry?.error_kind).toBe('state_conflict')
+    expect(preparations).toHaveLength(preparationCount)
+    expect(route).toBe('local')
+    finishClick!()
+    expect((await ordinary).isError).toBeUndefined()
   })
 
   test('open_application failure still invalidates the previous target anchor', async () => {

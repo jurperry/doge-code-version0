@@ -50,7 +50,7 @@ const COORD_DESC: Record<CoordinateMode, { x: string; y: string }> = {
 };
 
 const FRONTMOST_GATE_DESC =
-  "The effective input target and its grant tier must allow the action. macOS checks the frontmost application; Windows checks the bound application, or the real foreground for global input. Rejected actions return an error before new input is sent.";
+  "The effective input target and its grant tier must allow the action. Windows verifies the bound window, or the hit window for global pointer input and foreground window for global keyboard input.";
 
 /**
  * Item schema for the `actions` array in `computer_batch`, `teach_step`, and
@@ -186,9 +186,7 @@ export function buildComputerUseTools(
     {
       name: "request_access",
       description:
-        "Request user permission to control a set of applications for this session. Must be called before any other tool in this server. " +
-        "The user sees a single dialog listing all requested apps and either allows the whole set or denies it. " +
-        "Call this again mid-session to add more apps; previously granted apps remain granted. " +
+        "Request session permission for the applications and optional capabilities the task needs. Reuse existing grants; use list_granted_applications if unsure. " +
         "Returns the granted apps, denied apps, and screenshot filtering capability.",
       inputSchema: {
         type: "object" as const,
@@ -246,8 +244,8 @@ export function buildComputerUseTools(
     {
       name: "zoom",
       description:
-        "Take a higher-resolution screenshot of a specific region of the last full-screen screenshot. Use this liberally to inspect small text, button labels, or fine UI details that are hard to read in the downsampled full-screen image. " +
-        "IMPORTANT: Coordinates in subsequent click calls always refer to the full-screen screenshot, never the zoomed image. This tool is read-only for inspecting detail.",
+        "Inspect a region of the most recent base screenshot (bound window or display) at higher resolution when the original image lacks detail. " +
+        "The base screenshot still provides the coordinate reference for subsequent input.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -257,7 +255,7 @@ export function buildComputerUseTools(
             minItems: 4,
             maxItems: 4,
             description:
-              "(x0, y0, x1, y1): Rectangle to zoom into, in the coordinate space of the most recent full-screen screenshot. x0,y0 = top-left, x1,y1 = bottom-right.",
+              "(x0, y0, x1, y1): Rectangle in base screenshot pixels. x0,y0 = top-left, x1,y1 = bottom-right.",
           },
           save_to_disk: {
             type: "boolean",
@@ -279,7 +277,7 @@ export function buildComputerUseTools(
           coordinate: coordinateTuple,
           text: clickModifierText,
           ...(caps.platform === "win32" ? {
-            screenshot: { type: "boolean" as const, description: "Return the next bound-window image after clicking, or confirm if the window minimized." },
+            screenshot: { type: "boolean" as const, description: "Bound windows only. Return the next window image after clicking or confirm if the window minimized." },
             input: { type: "string", enum: ["auto", "foreground"], description: "Auto preserves background input for standard Win32 controls. Foreground uses the physical pointer on the focused bound window only (no focus change or automatic retry)." },
             settle_ms: renderWait,
           } : {}),
@@ -290,7 +288,7 @@ export function buildComputerUseTools(
 
     {
       name: "double_click",
-      description: `Double-click at the given coordinates. Selects a word in most text editors. ${FRONTMOST_GATE_DESC}`,
+      description: `Send the application's double-click gesture at the given coordinates. ${FRONTMOST_GATE_DESC}`,
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -303,7 +301,7 @@ export function buildComputerUseTools(
 
     {
       name: "triple_click",
-      description: `Triple-click at the given coordinates. Selects a line in most text editors. ${FRONTMOST_GATE_DESC}`,
+      description: `Send the application's triple-click gesture at the given coordinates. ${FRONTMOST_GATE_DESC}`,
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -355,14 +353,14 @@ export function buildComputerUseTools(
     {
       name: "key",
       description:
-        `Press a key or key combination (e.g. "return", "escape", "cmd+a", "ctrl+shift+tab"). ${FRONTMOST_GATE_DESC} ` +
-        "System-level combos (quit app, switch app, lock screen) require the `systemKeyCombos` grant — without it they return an error. All other combos work.",
+        `Press a key or key combination (e.g. "return" or ${caps.platform === "darwin" ? '"cmd+a"' : '"ctrl+a"'}). ${FRONTMOST_GATE_DESC} ` +
+        "Restricted system shortcuts require the `systemKeyCombos` grant.",
       inputSchema: {
         type: "object" as const,
         properties: {
           text: {
             type: "string",
-            description: 'Modifiers joined with "+", e.g. "cmd+shift+a".',
+            description: 'Join modifiers and the key with "+".',
           },
           repeat: {
             type: "integer",
@@ -410,7 +408,7 @@ export function buildComputerUseTools(
           },
           start_coordinate: {
             ...coordinateTuple,
-            description: `(x, y) start point. If omitted, drags from the current cursor position. ${coord.x}`,
+            description: `(x, y) start point. ${caps.platform === "win32" ? "Pass an explicit start or position the pointer with mouse_move first." : "If omitted, drags from the current cursor position."} ${coord.x}`,
           },
         },
         required: ["coordinate"],
@@ -433,7 +431,7 @@ export function buildComputerUseTools(
       name: "open_application",
       description:
         "Bring an application to the front, launching it if necessary. The target application must already be in the session allowlist — call request_access first." +
-        (caps.platform === "win32" ? " Returns a fresh screenshot by default. Use its coordinates directly and inspect captured content before choosing input." : ""),
+        (caps.platform === "win32" ? " Use the granted bundleId. This binds the target and returns a fresh screenshot by default." : ""),
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -589,11 +587,8 @@ export function buildComputerUseTools(
     {
       name: "computer_batch",
       description:
-        "Execute a sequence of actions in ONE tool call. Each individual tool call requires a model→API round trip (seconds); " +
-        "batching a predictable sequence eliminates all but one. Use this whenever you can predict the outcome of several actions ahead — " +
-        "e.g. click a field, type into it, press Return. Arguments and system-shortcut grants are checked before any action. Actions execute sequentially and stop on the first runtime error. " +
-        `${FRONTMOST_GATE_DESC} The frontmost check runs before EACH action inside the batch — if an action opens a non-allowed app, the next action's gate fires and the batch stops there. ` +
-        "Coordinates for every action in the batch refer to the pre-batch screenshot. " +
+        "Execute a short, predictable sequence such as click a known field, type, and press Return. Target and grants are checked per action. The batch stops at the first runtime error and reports progress. " +
+        "Coordinates always refer to the pre-batch screenshot. Use separate calls when a new screen determines the next action. Inspect partial results before continuing. " +
         (caps.platform === "win32" ? "End the batch with a screenshot to get the next coordinate reference without making a separate call." : "Mid-batch screenshots are for inspection."),
       inputSchema: {
         type: "object" as const,

@@ -554,6 +554,12 @@ export function endpointToCatalog(endpoint: CatalogEndpoint, existing?: ModelCat
     for (const profile of group) {
       if (profile.model?.trim()) {
         const modelId = ensureConnectionModel(connection, profile.model)
+        if (!existing && typeof profile.contextWindow === 'number' && Number.isFinite(profile.contextWindow) && profile.contextWindow > 0) {
+          const main = connection.models.find(model => model.id === modelId)!
+          if (main.contextWindow === undefined || profile.id === endpoint.activeProfileId) {
+            main.contextWindow = profile.contextWindow
+          }
+        }
         if (!connection.defaultModelId || profile.id === endpoint.activeProfileId) {
           connection.defaultModelId = modelId
         }

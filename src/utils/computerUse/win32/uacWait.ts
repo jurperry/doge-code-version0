@@ -5,7 +5,7 @@ export const UAC_WAIT_MESSAGE = '请在 Windows 用户账户控制（UAC）提�
 export const UAC_DECISION_TIMEOUT_MS = 30_000
 
 const DESKTOP_UNAVAILABLE = 'The Windows input desktop is unavailable. Unlock the desktop before continuing Computer Use.'
-export const UAC_FRESH_SCREENSHOT = 'Windows UAC was handled. Take a fresh screenshot before performing another action.'
+export const UAC_FRESH_SCREENSHOT = 'The Windows UAC secure-desktop interval has ended; who dismissed it is not observable. Take a fresh screenshot before performing another action.'
 
 export class UacTimeoutError extends Error {
   constructor() { super(UAC_TIMEOUT_MESSAGE) }

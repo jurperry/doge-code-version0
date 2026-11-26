@@ -123,6 +123,7 @@ import { TASK_STOP_TOOL_NAME } from './tools/TaskStopTool/prompt.js'
 import { desktopBrowserPreference } from './utils/playwrightMcp/common.js'
 import { browserTurnRoute, latestBrowserIntent } from './utils/playwrightMcp/browserIntent.js'
 import { getToolNameForPermissionCheck } from './services/mcp/mcpStringUtils.js'
+import { windowsComputerUsePrompt } from './skills/bundled/computerUse.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const snipModule = feature('HISTORY_SNIP')
@@ -292,8 +293,9 @@ async function* queryLoop(
   // No-op unless the session attached to `doge im`.
   const context = params.toolUseContext
   const preference = desktopBrowserPreference()
-  const intent = preference && !context.agentId &&
+  const mainSession = !context.agentId &&
     (querySource === 'sdk' || querySource.startsWith('repl_main_thread'))
+  const intent = preference && mainSession
     ? latestBrowserIntent(params.messages)
     : undefined
   const browserRoute = preference
@@ -495,9 +497,13 @@ async function* queryLoop(
       messagesForQuery = collapseResult.messages
     }
 
+    const computerUsePrompt = mainSession
+      ? windowsComputerUsePrompt(toolUseContext.options.tools)
+      : undefined
     const fullSystemPrompt = asSystemPrompt([
       ...appendSystemContext(systemPrompt, systemContext),
       ...(intent && browserRoute ? [browserRoute.prompt(toolUseContext.options.tools)] : []),
+      ...(computerUsePrompt ? [computerUsePrompt] : []),
     ])
 
     queryCheckpoint('query_autocompact_start')

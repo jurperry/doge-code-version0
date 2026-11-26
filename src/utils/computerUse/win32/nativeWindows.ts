@@ -1,8 +1,9 @@
-import { dlopen, JSCallback, read, type Pointer } from 'bun:ffi'
+import { dlopen, JSCallback, read, toArrayBuffer, type Pointer } from 'bun:ffi'
 import { win32 as path } from 'node:path'
 import type { DisplayInfo, FrontmostAppInfo } from '../platforms/types.js'
 
 const FILETIME_EPOCH_MS = 11_644_473_600_000
+const DOTNET_EPOCH_TICKS = 504_911_232_000_000_000n
 const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 const GA_ROOT = 2
 
@@ -33,9 +34,14 @@ function loadWindows() {
   const kernel = dlopen('kernel32.dll', {
     OpenProcess: { args: ['u32', 'i32', 'u32'], returns: 'isize' },
     CloseHandle: { args: ['isize'], returns: 'i32' },
+    GetCurrentProcess: { args: [], returns: 'isize' },
+    LocalFree: { args: ['isize'], returns: 'isize' },
     GetLastError: { args: [], returns: 'u32' },
     QueryFullProcessImageNameW: { args: ['isize', 'u32', 'ptr', 'ptr'], returns: 'i32' },
     GetProcessTimes: { args: ['isize', 'ptr', 'ptr', 'ptr', 'ptr'], returns: 'i32' },
+    FileTimeToSystemTime: { args: ['ptr', 'ptr'], returns: 'i32' },
+    SystemTimeToTzSpecificLocalTime: { args: ['ptr', 'ptr', 'ptr'], returns: 'i32' },
+    SystemTimeToFileTime: { args: ['ptr', 'ptr'], returns: 'i32' },
     CreateToolhelp32Snapshot: { args: ['u32', 'u32'], returns: 'isize' },
     Process32FirstW: { args: ['isize', 'ptr'], returns: 'i32' },
     Process32NextW: { args: ['isize', 'ptr'], returns: 'i32' },
@@ -45,6 +51,7 @@ function loadWindows() {
     GetTokenInformation: { args: ['isize', 'i32', 'ptr', 'u32', 'ptr'], returns: 'i32' },
     GetSidSubAuthorityCount: { args: ['ptr'], returns: 'ptr' },
     GetSidSubAuthority: { args: ['ptr', 'u32'], returns: 'ptr' },
+    ConvertSidToStringSidW: { args: ['ptr', 'ptr'], returns: 'i32' },
   }).symbols
   return { user, kernel, security }
 }
@@ -118,6 +125,50 @@ function processIdentity(pid: number) {
 
 export function processImage(pid: number): string {
   return processIdentity(pid)?.id ?? ''
+}
+
+export function processStartTicks(pid: number): string {
+  return withProcess(pid, '0', handle => {
+    const { kernel } = windows()
+    const created = Buffer.alloc(8)
+    const other = Buffer.alloc(8)
+    if (!kernel.GetProcessTimes(handle, created, other, other, other)) return '0'
+    // Process.StartTime.Ticks is local .NET time; SYSTEMTIME alone loses the 100ns remainder.
+    const utc = Buffer.alloc(16)
+    const local = Buffer.alloc(16)
+    const converted = Buffer.alloc(8)
+    if (!kernel.FileTimeToSystemTime(created, utc) ||
+        !kernel.SystemTimeToTzSpecificLocalTime(null, utc, local) ||
+        !kernel.SystemTimeToFileTime(local, converted)) return '0'
+    return (converted.readBigUInt64LE() + DOTNET_EPOCH_TICKS + created.readBigUInt64LE() % 10_000n).toString()
+  })
+}
+
+export function currentUserSid(): string {
+  const { kernel, security } = windows()
+  const value = Buffer.alloc(8)
+  if (!security.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, value)) return ''
+  const token = value.readBigUInt64LE()
+  try {
+    const length = Buffer.alloc(4)
+    security.GetTokenInformation(token, 1, null, 0, length) // TokenUser
+    const size = length.readUInt32LE()
+    if (size < 16 || size > 1024) return ''
+    const data = Buffer.alloc(size)
+    if (!security.GetTokenInformation(token, 1, data, size, length)) return ''
+    const sid = Number(data.readBigUInt64LE()) as Pointer
+    const text = Buffer.alloc(8)
+    if (!security.ConvertSidToStringSidW(sid, text)) return ''
+    const address = text.readBigUInt64LE()
+    try {
+      const bytes = Buffer.from(toArrayBuffer(Number(address), 0, 512))
+      let length = 0
+      while (length + 1 < bytes.length && bytes.readUInt16LE(length) !== 0) length += 2
+      return bytes.toString('utf16le', 0, length)
+    } finally { kernel.LocalFree(Number(address)) }
+  } finally {
+    kernel.CloseHandle(token)
+  }
 }
 
 export function processIntegrityRid(pid: number): number {

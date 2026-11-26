@@ -3,6 +3,7 @@ import { shouldAutoEnableClaudeInChrome } from 'src/utils/claudeInChrome/setup.j
 import { initAnthropicSkills } from './anthropic/index.js'
 import { registerBatchSkill } from './batch.js'
 import { registerClaudeInChromeSkill } from './claudeInChrome.js'
+import { registerComputerUseSkill } from './computerUse.js'
 import { registerDebugSkill } from './debug.js'
 import { registerKeybindingsSkill } from './keybindings.js'
 import { registerLoremIpsumSkill } from './loremIpsum.js'
@@ -22,7 +23,7 @@ import { registerVerifySkill } from './verify.js'
  * 2. Export a register function that calls registerBundledSkill()
  * 3. Import and call that function here
  */
-export function initBundledSkills(): void {
+export function initBundledSkills({ windowsComputerUse = false } = {}): void {
   registerUpdateConfigSkill()
   registerKeybindingsSkill()
   registerVerifySkill()
@@ -33,6 +34,7 @@ export function initBundledSkills(): void {
   registerSimplifySkill()
   registerBatchSkill()
   registerStuckSkill()
+  if (windowsComputerUse) registerComputerUseSkill()
   if (feature('REVIEW_ARTIFACT')) {
     /* eslint-disable @typescript-eslint/no-require-imports */
     const { registerHunterSkill } = require('./hunter.js')

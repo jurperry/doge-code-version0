@@ -221,7 +221,7 @@ async function attachPermanentBroker(signal?: AbortSignal): Promise<boolean> {
       active = broker
     } catch (error) {
       if (active === broker) active = undefined
-      throw new Error(`The permanent Windows Computer Use helper is unavailable. No input was sent. Enable it again from Settings if this persists. ${error instanceof Error ? error.message : String(error)}`)
+      throw new Error(`[CU_HELPER_ATTACH] The permanent Windows Computer Use helper is unavailable. No input was sent. Enable it again from Settings if this persists. ${error instanceof Error ? error.message : String(error)}`)
     }
   })()
   starting = operation
@@ -244,7 +244,7 @@ export async function ensureElevatedPowerShell(signal?: AbortSignal): Promise<vo
       if (signal?.aborted) throw error
       forgetBroker(broker)
       if (!broker.permanent) {
-        throw new Error(`The Windows Computer Use helper is unavailable. No input was sent; retry only after inspecting the target. ${error instanceof Error ? error.message : String(error)}`)
+        throw new Error(`[CU_HELPER_SESSION_PING] The Windows Computer Use helper is unavailable. No input was sent; retry only after inspecting the target. ${error instanceof Error ? error.message : String(error)}`)
       }
     }
   }
@@ -275,6 +275,10 @@ export async function prepareComputerUseRelease(): Promise<void> {
 
 export function setComputerUseTargetElevated(elevated: boolean): void {
   targetElevated = elevated
+}
+
+export function isComputerUseTargetElevated(): boolean {
+  return targetElevated
 }
 
 export function isElevatedPowerShellActive(): boolean {

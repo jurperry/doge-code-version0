@@ -27,11 +27,11 @@ function summarize(value: string): string {
 
 export class PowerShellTimeoutError extends Error {}
 
-function assertPowerShellSuccess(result: PowerShellResult, timedOut = false): string {
+function assertPowerShellSuccess(result: PowerShellResult, timedOut = false, timeoutMs?: number): string {
   if (timedOut || result.exitCode !== 0) {
     const detail = summarize(result.stderr) || summarize(result.stdout) || 'no diagnostic output'
     const reason = timedOut
-      ? 'PowerShell timed out'
+      ? `PowerShell timed out${timeoutMs === undefined ? '' : ` after ${timeoutMs}ms`}`
       : `PowerShell exited with code ${result.exitCode ?? 'unknown'}`
     const message = `${reason}: ${detail}. The action outcome is unknown; do not blindly retry operations with side effects.`
     if (timedOut) throw new PowerShellTimeoutError(message)
@@ -62,7 +62,7 @@ export function runPowerShellSync(script: string, timeoutMs = 10_000, stdin?: st
   } catch (error) {
     throw new Error(`PowerShell could not start or be awaited: ${error instanceof Error ? error.message : String(error)}. The action outcome is unknown; do not blindly retry operations with side effects.`)
   }
-  return assertPowerShellSuccess(result, timedOut)
+  return assertPowerShellSuccess(result, timedOut, timeoutMs)
 }
 
 export async function runPowerShell(script: string, timeoutMs = 15_000, stdin?: string, signal?: AbortSignal): Promise<string> {
@@ -98,7 +98,7 @@ export async function runPowerShell(script: string, timeoutMs = 15_000, stdin?: 
     ])
     completed = true
     signal?.throwIfAborted()
-    return assertPowerShellSuccess({ exitCode, stdout, stderr }, timedOut)
+    return assertPowerShellSuccess({ exitCode, stdout, stderr }, timedOut, timeoutMs)
   } finally {
     if (!completed) stop()
     clearTimeout(timer)
