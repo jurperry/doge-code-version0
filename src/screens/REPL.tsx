@@ -1520,6 +1520,8 @@ export function REPL({
 
   // Use whichever remote mode is active
   const activeRemote = sshRemote.isRemoteMode ? sshRemote : directConnect.isRemoteMode ? directConnect : remoteSession;
+  const remoteAbortControllerRef = useRef(new AbortController());
+  const remoteAbortSignal = activeRemote.isRemoteMode && isLoading ? remoteAbortControllerRef.current.signal : undefined;
   const [pastedContents, setPastedContents] = useState<Record<number, PastedContent>>({});
   const [submitCount, setSubmitCount] = useState(0);
   // Ref instead of state to avoid triggering React re-renders on every
@@ -2290,7 +2292,7 @@ export function REPL({
     onAgentsKilled: () => setMessages(prev => [...prev, createAgentsKilledMessage()]),
     isMessageSelectorVisible: isMessageSelectorVisible || !!showBashesDialog,
     screen,
-    abortSignal: abortController?.signal,
+    abortSignal: abortController?.signal ?? remoteAbortSignal,
     popCommandFromQueue: handleQueuedCommandOnCancel,
     vimMode,
     isLocalJSXCommand: toolJSX?.isLocalJSXCommand,

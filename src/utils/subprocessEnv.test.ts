@@ -64,3 +64,29 @@ describe('subprocessEnv — fork credential scrub (audit fix)', () => {
     expect(process.env.DOGE_API_KEY).toBe('sk-secret')
   })
 })
+
+test('scrubs SSH tunnel capability variables in default and full modes', () => {
+  process.env.DOGE_SSH_PROXY_TOKEN = 'tunnel-secret'
+  process.env.ANTHROPIC_UNIX_SOCKET = '/tmp/doge-ssh-test.sock'
+  process.env.INPUT_DOGE_SSH_PROXY_TOKEN = 'input-tunnel-secret'
+  delete process.env[FLAG]
+  const defaults = subprocessEnv()
+  expect(defaults.DOGE_SSH_PROXY_TOKEN).toBeUndefined()
+  expect(defaults.ANTHROPIC_UNIX_SOCKET).toBeUndefined()
+  expect(defaults.INPUT_DOGE_SSH_PROXY_TOKEN).toBeUndefined()
+  process.env[FLAG] = '1'
+  const full = subprocessEnv()
+  expect(full.DOGE_SSH_PROXY_TOKEN).toBeUndefined()
+  expect(full.ANTHROPIC_UNIX_SOCKET).toBeUndefined()
+  expect(process.env.DOGE_SSH_PROXY_TOKEN).toBe('tunnel-secret')
+  expect(process.env.ANTHROPIC_UNIX_SOCKET).toBe('/tmp/doge-ssh-test.sock')
+})
+
+test('explicit opt-out retains SSH tunnel variables', () => {
+  process.env[FLAG] = '0'
+  process.env.DOGE_SSH_PROXY_TOKEN = 'tunnel-secret'
+  process.env.ANTHROPIC_UNIX_SOCKET = '/tmp/doge-ssh-test.sock'
+  const env = subprocessEnv()
+  expect(env.DOGE_SSH_PROXY_TOKEN).toBe('tunnel-secret')
+  expect(env.ANTHROPIC_UNIX_SOCKET).toBe('/tmp/doge-ssh-test.sock')
+})

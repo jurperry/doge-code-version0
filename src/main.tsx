@@ -573,19 +573,27 @@ type PendingSSH = {
   cwd: string | undefined;
   permissionMode: string | undefined;
   dangerouslySkipPermissions: boolean;
-  /** --local: spawn the child CLI directly, skip ssh/probe/deploy. e2e test mode. */
+  /** --local: spawn the child CLI directly, skip ssh/probe. e2e test mode. */
   local: boolean;
+  probe: boolean;
+  identityFile: string | undefined;
+  remoteCliPath: string | undefined;
+  port: number | undefined;
   /** Extra CLI args to forward to the remote CLI on initial spawn (--resume, -c). */
   extraCliArgs: string[];
 };
-const _pendingSSH: PendingSSH | undefined = feature('SSH_REMOTE') ? {
+const _pendingSSH: PendingSSH = {
   host: undefined,
   cwd: undefined,
   permissionMode: undefined,
   dangerouslySkipPermissions: false,
   local: false,
+  probe: false,
+  identityFile: undefined,
+  remoteCliPath: undefined,
+  port: undefined,
   extraCliArgs: []
-} : undefined;
+};
 export async function main() {
   profileCheckpoint('main_function_start');
 
@@ -713,7 +721,7 @@ export async function main() {
   // runs (full interactive TUI), stash the host/dir for the REPL branch at
   // ~line 3720 to pick up. Headless (-p) mode not supported in v1: SSH
   // sessions need the local REPL to drive them (interrupt, permissions).
-  if (feature('SSH_REMOTE') && _pendingSSH) {
+  {
     const rawCliArgs = process.argv.slice(2);
     // SSH-specific flags can appear before the host positional (e.g.
     // `ssh --permission-mode auto host /tmp` — standard POSIX flags-before-
@@ -727,6 +735,29 @@ export async function main() {
         _pendingSSH.local = true;
         rawCliArgs.splice(localIdx, 1);
       }
+      const probeIdx = rawCliArgs.indexOf('--probe');
+      if (probeIdx !== -1) {
+        _pendingSSH.probe = true;
+        rawCliArgs.splice(probeIdx, 1);
+      }
+      const extractSSHOption = (flag: string, apply: (value: string) => void) => {
+        const index = rawCliArgs.findIndex(arg => arg === flag || arg.startsWith(`${flag}=`));
+        if (index === -1) return;
+        const arg = rawCliArgs[index]!;
+        const inlineValue = arg.startsWith(`${flag}=`) ? arg.slice(flag.length + 1) : undefined;
+        const value = inlineValue ?? rawCliArgs[index + 1];
+        if (value && !value.startsWith('-')) {
+          apply(value);
+          rawCliArgs.splice(index, inlineValue === undefined ? 2 : 1);
+        }
+      };
+      extractSSHOption('--identity-file', value => { _pendingSSH.identityFile = value; });
+      extractSSHOption('--cli-path', value => { _pendingSSH.remoteCliPath = value; });
+      extractSSHOption('--port', value => {
+        const port = Number(value);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('--port must be between 1 and 65535');
+        _pendingSSH.port = port;
+      });
       const dspIdx = rawCliArgs.indexOf('--dangerously-skip-permissions');
       if (dspIdx !== -1) {
         _pendingSSH.dangerouslySkipPermissions = true;
@@ -801,6 +832,19 @@ export async function main() {
 
       // Rewrite argv so the main command sees remaining flags but not `ssh`.
       process.argv = [process.argv[0]!, process.argv[1]!, ...rest];
+      if (_pendingSSH.probe) {
+        const { probeSSHHost } = await import('./ssh/createSSHSession.js');
+        const result = await probeSSHHost({
+          host: _pendingSSH.host,
+          cwd: _pendingSSH.cwd,
+          identityFile: _pendingSSH.identityFile,
+          remoteCliPath: _pendingSSH.remoteCliPath,
+          port: _pendingSSH.port
+        });
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+        if (!result.ok) process.exitCode = 1;
+        return;
+      }
     }
   }
 
@@ -3287,12 +3331,10 @@ async function run(): Promise<CommanderCommand> {
         thinkingConfig
       }, renderAndRun);
       return;
-    } else if (feature('SSH_REMOTE') && _pendingSSH?.host) {
-      // `claude ssh <host> [dir]` — probe remote, deploy binary if needed,
-      // spawn ssh with unix-socket -R forward to a local auth proxy, hand
-      // the REPL an SSHSession. Tools run remotely, UI renders locally.
-      // `--local` skips probe/deploy/ssh and spawns the current binary
-      // directly with the same env — e2e test of the proxy/auth plumbing.
+    } else if (_pendingSSH.host) {
+      // `claude ssh <host> [dir]` — probe the remote doge CLI, then spawn ssh
+      // with unix-socket -R forwarding to a local auth proxy. Tools run remotely,
+      // the REPL renders locally. `--local` skips SSH for protocol e2e tests.
       const {
         createSSHSession,
         createLocalSSHSession,
@@ -3305,7 +3347,8 @@ async function run(): Promise<CommanderCommand> {
           sshSession = createLocalSSHSession({
             cwd: _pendingSSH.cwd,
             permissionMode: _pendingSSH.permissionMode,
-            dangerouslySkipPermissions: _pendingSSH.dangerouslySkipPermissions
+            dangerouslySkipPermissions: _pendingSSH.dangerouslySkipPermissions,
+            extraCliArgs: _pendingSSH.extraCliArgs
           });
         } else {
           process.stderr.write(`Connecting to ${_pendingSSH.host}…\n`);
@@ -3317,10 +3360,12 @@ async function run(): Promise<CommanderCommand> {
           sshSession = await createSSHSession({
             host: _pendingSSH.host,
             cwd: _pendingSSH.cwd,
-            localVersion: MACRO.VERSION,
             permissionMode: _pendingSSH.permissionMode,
             dangerouslySkipPermissions: _pendingSSH.dangerouslySkipPermissions,
-            extraCliArgs: _pendingSSH.extraCliArgs
+            extraCliArgs: _pendingSSH.extraCliArgs,
+            identityFile: _pendingSSH.identityFile,
+            remoteCliPath: _pendingSSH.remoteCliPath,
+            port: _pendingSSH.port
           }, isTTY ? {
             onProgress: msg => {
               hadProgress = true;
@@ -3335,7 +3380,7 @@ async function run(): Promise<CommanderCommand> {
       } catch (err) {
         return await exitWithError(root, err instanceof SSHSessionError ? err.message : String(err), () => gracefulShutdown(1));
       }
-      const sshInfoMessage = createSystemMessage(_pendingSSH.local ? `Local ssh-proxy test session\ncwd: ${sshSession.remoteCwd}\nAuth: unix socket → local proxy` : `SSH session to ${_pendingSSH.host}\nRemote cwd: ${sshSession.remoteCwd}\nAuth: unix socket -R → local proxy`, 'info');
+      const sshInfoMessage = createSystemMessage(_pendingSSH.local ? `Local ssh-proxy test session\ncwd: ${sshSession.remoteCwd}\nAuth: direct local test process` : `SSH session to ${_pendingSSH.host}\nRemote cwd: ${sshSession.remoteCwd}\nAuth: unix socket -R → local proxy`, 'info');
       await launchRepl(root, {
         getFpsMetrics,
         stats,
@@ -4150,12 +4195,12 @@ async function run(): Promise<CommanderCommand> {
   // (parallels the DIRECT_CONNECT/cc:// pattern above). If commander reaches
   // this action it means the argv rewrite didn't fire (e.g. user ran
   // `claude ssh` with no host) — just print usage.
-  if (feature('SSH_REMOTE')) {
-    program.command('ssh <host> [dir]').description('Run Claude Code on a remote host over SSH. Deploys the binary and ' + 'tunnels API auth back through your local machine — no remote setup needed.').option('--permission-mode <mode>', 'Permission mode for the remote session').option('--dangerously-skip-permissions', 'Skip all permission prompts on the remote (dangerous)').option('--local', 'e2e test mode — spawn the child CLI locally (skip ssh/deploy). ' + 'Exercises the auth proxy and unix-socket plumbing without a remote host.').action(async () => {
+  {
+    program.command('ssh <host> [dir]').description('Run Doge Code on a remote host over SSH. Uses the remote doge CLI and tunnels model API auth through your local machine.').option('--permission-mode <mode>', 'Permission mode for the remote session').option('--dangerously-skip-permissions', 'Skip all permission prompts on the remote (dangerous)').option('--identity-file <path>', 'SSH private key file (defaults to ssh config or ssh-agent)').option('--cli-path <path>', 'Remote doge executable (defaults to PATH, ~/.doge/bin/doge, ~/.local/bin/doge)').option('--port <port>', 'SSH port').option('--probe', 'Probe SSH and remote CLI availability, then print JSON').option('--local', 'e2e test mode — spawn the child CLI locally without SSH').action(async () => {
       // Argv rewriting in main() should have consumed `ssh <host>` before
       // commander runs. Reaching here means host was missing or the
       // rewrite predicate didn't match.
-      process.stderr.write(`Usage: ${CLI_BINARY_NAME} ssh <user@host | ssh-config-alias> [dir]\n\n` + "Runs Claude Code on a remote Linux host. You don't need to install\n" + `anything on the remote or run \`${CLI_BINARY_NAME} auth login\` there — the binary is\n` + 'deployed over SSH and API auth tunnels back through your local machine.\n');
+      process.stderr.write(`Usage: ${CLI_BINARY_NAME} ssh <user@host | ssh-config-alias> [dir]\n\n` + 'Runs Doge Code on a remote host with a preinstalled doge CLI.\n' + 'Model API authentication tunnels back through your local machine.\n');
       process.exit(1);
     });
   }

@@ -24,7 +24,8 @@ Doge Code（`@doge-code/cli`，命令 `doge`）是 Claude Code 的第三方 Fork
 | headless / SDK 子进程 | `src/cli/print.ts` `runHeadless()` | `-p`；`--output-format text/json/stream-json`、`--input-format stream-json`、`--resume`；stream-json 强制 `--verbose`（print.ts:825） |
 | 协议层 | `src/cli/structuredIO.ts`、`src/cli/remoteIO.ts` | control_request/response、权限询问、SDK 事件下发 |
 | MCP server | `src/entrypoints/mcp.ts`（`doge mcp serve`） | stdio MCP server |
-| HTTP/SSH/直连 | `main.tsx` `server`/`ssh`/`open` | `feature('DIRECT_CONNECT')`/`feature('SSH_REMOTE')` 门后；**恢复缺口**：`src/server/` 仅 direct-connect 三件套，`server.ts`/`sessionManager.ts`/`backends/` 缺失，未实测 |
+| HTTP/直连 | `main.tsx` `server`/`open` | `feature('DIRECT_CONNECT')` 门后；**恢复缺口**：`src/server/` 仅 direct-connect 三件套，`server.ts`/`sessionManager.ts`/`backends/` 缺失，未实测 |
+| SSH | `main.tsx` `ssh` + `src/ssh/` | 已对外开放：系统 OpenSSH（Windows App 安装版随包提供）+ 远端预装 `doge`（默认查 PATH、`~/.bun/bin/doge`、`~/.doge/bin/doge`、`~/.local/bin/doge`）；`sshRemoteCommand` 将完整多行脚本作为 POSIX 引号保护的单一 `sh -c` 参数传输，远端脚本显式补充 Bun 常见 bin 路径；Linux 源码入口为 LF 的 `#!/usr/bin/env bun`，`bun install && bun link` 后可直接执行；本地 REPL 经 SSH 驱动远端 headless stream-json；认证经带随机令牌的反向隧道代理注入，令牌只在 initialize 成功后经 `update_environment_variables` 下发（不进入 argv，且默认从工具子进程环境清除），支持 anthropic/openai/responses；`--probe` 输出结构化诊断，`--local` 供协议 E2E；清理对根退出后代做幂等回收，但中间父进程提前退出或双重 fork/setsid 的归属跟踪仍需 OS Job/cgroup 级机制，当前未覆盖 |
 | IM 远程 | `im` 子命令 + `src/utils/imRemote/` | Telegram/飞书/企业微信/扫码网页；状态 `~/.doge/im-remote*.json`、`im-remote-daemon.log` |
 | SDK 类型 | `src/entrypoints/sdk/{coreSchemas,controlSchemas}.ts` + `src/entrypoints/agentSdkTypes.ts` | 只有 schema；SDK 运行时在外部 `@anthropic-ai/claude-agent-sdk`，由它 spawn 本 CLI |
 
@@ -110,9 +111,9 @@ Doge Code（`@doge-code/cli`，命令 `doge`）是 Claude Code 的第三方 Fork
 
 - **macOS CU 不可用**：`@ant/computer-use-swift` 解析到 `shims/ant-computer-use-swift`（固定 1440×900 空白 JPEG、`tcc` 检查恒 false），input 侧只有 osascript 实现；实机未验证。
 - **Linux CU 限于 X11 窗口**：授权、截图和输入以已打开的窗口为目标，Wayland 和整屏操作尚未支持。
-- **server/ssh/open 恢复不完整**：见 §2；相关子命令未实测。
+- **server/open 恢复不完整**：见 §2；相关子命令未实测。SSH 已通过 `--local` 真实 REPL 问答、模拟探测和认证代理测试，并通过真实 Linux/OpenSSH 主机的默认与显式路径探测、指定工作目录、反向隧道模型回合及正常退出；远端 CLI 自动部署未实现。
 - **ANT-ONLY**：`up/rollback/task/log/error/export`、部分工具与提示在本树不注册；`USER_TYPE=ant` 运行时分支仍存在。
 - **SDK**：本仓只有 schema + stream-json 子进程协议；SDK 运行时在外部包。
 - **Playwright**：依赖 Node 与 `@playwright/mcp`（任一缺失不注册）；桌面镜像还需 App 侧 `bridge.cjs`。
 - **目录边界**：`best` 上下文后缀、opusplan 启动配置条件、队友 tmux 环境白名单按 §4 现状，不要写成已修复。
-- **未实测**：macOS CU、混合 DPI 多屏、无管理员账户/受限令牌 CU、旧 catalog 迁移全部变体、server/ssh 端到端、IM 真实账号链路。
+- **未实测**：macOS CU、混合 DPI 多屏、无管理员账户/受限令牌 CU、旧 catalog 迁移全部变体、server/open 端到端、SSH ProxyJump/ProxyCommand 与长时 OAuth 会话、IM 真实账号链路。

@@ -19,6 +19,8 @@ const GHA_SUBPROCESS_SCRUB = [
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_FOUNDRY_API_KEY',
   'ANTHROPIC_CUSTOM_HEADERS',
+  'DOGE_SSH_PROXY_TOKEN',
+  'ANTHROPIC_UNIX_SOCKET',
 
   // OTLP exporter headers — documented to carry Authorization=Bearer tokens
   // for monitoring backends; read in-process by OTEL SDK, subprocesses never need them
@@ -72,6 +74,8 @@ const DEFAULT_SUBPROCESS_SCRUB = [
   'CLAUDE_CODE_OAUTH_TOKEN',
   'ANTHROPIC_FOUNDRY_API_KEY',
   'ANTHROPIC_CUSTOM_HEADERS',
+  'DOGE_SSH_PROXY_TOKEN',
+  'ANTHROPIC_UNIX_SOCKET',
 ] as const
 
 /**

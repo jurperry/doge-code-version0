@@ -58,6 +58,19 @@ doge                 # 或 bun run dev
 
 更新：`git pull && bun install && bun link`。**改 `packages/@ant/*` 后必须 `bun install`**，否则单测过而 CLI 仍跑 node_modules 旧副本。
 
+## SSH 远程会话
+
+源码运行需本机有 OpenSSH 客户端（Windows 桌面安装版已随包内置）；远端 Linux 主机需预装 `doge`（默认查 PATH、`~/.bun/bin/doge`、`~/.doge/bin/doge`、`~/.local/bin/doge`）。Linux 源码入口带 LF 换行的 `#!/usr/bin/env bun`，执行 `bun install && bun link` 后可直接运行 `doge`；SSH 远端脚本会显式补充 Bun 常见 bin 路径，避免非交互 shell 找不到解释器。模型请求经带随机令牌的反向隧道转发，本地代理注入凭据，不向远端配置文件或命令行写入真实 API Key；隧道令牌也只在 initialize 成功后经控制通道下发，不进入 argv。
+
+```bash
+doge ssh ubuntu@example.com /srv/project
+doge ssh build-box --identity-file ~/.ssh/id_ed25519 --cli-path ~/.doge/bin/doge
+doge ssh build-box --probe   # 结构化连接/远端 CLI 诊断
+doge ssh --local localhost  # 无 SSH 的本地协议 E2E
+```
+
+`build-box` 也可以是 `~/.ssh/config` 的 Host 别名。密钥密码、私钥密码交互和远端 CLI 自动部署当前不支持；认证失败或 CLI 缺失时按 `--probe` 的诊断处理。已用真实 Linux/OpenSSH 主机验证默认与显式路径探测、指定工作目录、反向隧道模型回合及正常退出；ProxyJump/ProxyCommand 与长时 OAuth 会话仍需另行实测。
+
 ## 常用命令
 
 ```bash

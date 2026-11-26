@@ -9,7 +9,6 @@
  * handed in; useDirectConnect creates its WebSocket inside the effect.
  */
 
-import { randomUUID } from 'crypto'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { ToolUseConfirm } from '../components/permissions/PermissionRequest.js'
 import {
@@ -28,11 +27,12 @@ import type { Message as MessageType } from '../types/message.js'
 import type { PermissionAskDecision } from '../types/permissions.js'
 import { logForDebugging } from '../utils/debug.js'
 import { gracefulShutdown } from '../utils/gracefulShutdown.js'
+import { createSystemMessage } from '../utils/messages.js'
 import type { RemoteMessageContent } from '../utils/teleport/api.js'
 
 type UseSSHSessionResult = {
   isRemoteMode: boolean
-  sendMessage: (content: RemoteMessageContent) => Promise<boolean>
+  sendMessage: (content: RemoteMessageContent, opts?: { uuid?: string }) => Promise<boolean>
   cancelRequest: () => void
   disconnect: () => void
 }
@@ -155,29 +155,13 @@ export function useSSHSession({
         setToolUseConfirmQueue(q => [...q, toolUseConfirm])
         setIsLoading(false)
       },
+      onPermissionCancelled: (_requestId, toolUseId) => {
+        if (toolUseId) setToolUseConfirmQueue(q => q.filter(i => i.toolUseID !== toolUseId))
+        setIsLoading(true)
+      },
       onConnected: () => {
         logForDebugging('[useSSHSession] connected')
         isConnectedRef.current = true
-      },
-      onReconnecting: (attempt, max) => {
-        logForDebugging(
-          `[useSSHSession] ssh dropped, reconnecting (${attempt}/${max})`,
-        )
-        isConnectedRef.current = false
-        // Surface a transient system message in the transcript so the user
-        // knows what's happening — the next onConnected clears the state.
-        // Any in-flight request is lost; the remote's --continue reloads
-        // history but there's no turn in progress to resume.
-        setIsLoading(false)
-        const msg: MessageType = {
-          type: 'system',
-          subtype: 'informational',
-          content: `SSH connection dropped — reconnecting (attempt ${attempt}/${max})...`,
-          timestamp: new Date().toISOString(),
-          uuid: randomUUID(),
-          level: 'warning',
-        }
-        setMessages(prev => [...prev, msg])
       },
       onDisconnected: () => {
         logForDebugging('[useSSHSession] ssh process exited (giving up)')
@@ -199,6 +183,8 @@ export function useSSHSession({
       },
       onError: error => {
         logForDebugging(`[useSSHSession] error: ${error.message}`)
+        setIsLoading(false)
+        setMessages(prev => [...prev, createSystemMessage(`SSH error: ${error.message}`, 'warning')])
       },
     })
 
@@ -214,11 +200,13 @@ export function useSSHSession({
   }, [session, setMessages, setIsLoading, setToolUseConfirmQueue])
 
   const sendMessage = useCallback(
-    async (content: RemoteMessageContent): Promise<boolean> => {
+    async (content: RemoteMessageContent, opts?: { uuid?: string }): Promise<boolean> => {
       const m = managerRef.current
       if (!m) return false
       setIsLoading(true)
-      return m.sendMessage(content)
+      const sent = await m.sendMessage(content, opts)
+      if (!sent) setIsLoading(false)
+      return sent
     },
     [setIsLoading],
   )

@@ -1,5 +1,5 @@
 /** Reclaim descendants even when shell tools start their own process group. */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 
 export function descendantPids(rootPid: number, processList: string): number[] {
   const children = new Map<number, number[]>()
@@ -32,4 +32,30 @@ export function killPosixProcessTree(rootPid: number): void {
   try { process.kill(-rootPid, 'SIGKILL') } catch {
     try { process.kill(rootPid, 'SIGKILL') } catch { /* already exited */ }
   }
+}
+
+function windowsDescendantPids(rootPid: number): number[] {
+  try {
+    const listing = execFileSync('powershell.exe', [
+      '-NoProfile', '-Command',
+      'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
+    ], { encoding: 'utf8', windowsHide: true, timeout: 5000 })
+    return descendantPids(rootPid, listing)
+  } catch {
+    return []
+  }
+}
+
+export function killProcessTree(child: ChildProcess): void {
+  if (!child.pid) return
+  if (process.platform === 'win32') {
+    const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    killer.once('error', () => { try { child.kill() } catch { /* already exited */ } })
+    for (const pid of windowsDescendantPids(child.pid)) {
+      spawn('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore', windowsHide: true })
+    }
+  } else {
+    killPosixProcessTree(child.pid)
+  }
+  child.stdin?.destroy()
 }

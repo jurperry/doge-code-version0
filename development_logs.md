@@ -1,5 +1,11 @@
 # development_logs.md — Doge Code 开发经验与版本索引
 
+## 2026-11-26 SSH 远程会话与协议安全（2.1.359）
+
+1. 遇到问题：`doge ssh` 的会话创建和管理器均为空实现，无法完成远端探测、协议通信、认证或进程回收；三协议转发及初始化前取消也存在缺口。Linux 源码直接 `bun link` 后因入口缺 shebang 和 CRLF 无法执行；OpenSSH 二次拼接使多行脚本丢失配置路径，非交互 PATH 又找不到 Bun。
+2. 解决方法：以 OpenSSH 驱动远端预装 doge 的 headless stream-json，补齐 initialize、权限/取消、Esc interrupt、初始化前取消、超时与可见失败。认证代理由随机令牌保护，令牌只在 initialize 后下发且不进入 argv；默认及完整 subprocess scrub 均清除隧道变量。Linux 入口固定 LF 的 `#!/usr/bin/env bun`；`sshRemoteCommand` 用 POSIX 引号保护完整脚本并统一使用非登录 `sh -c`，探测与会话均显式补充 `~/.bun/bin`、`~/.local/bin`，默认候选加入 Bun link 路径。上游 path 与 base/request query 按 request 优先、base 补齐合并，重复不同键及空值保留。session 与 manager 共享幂等 cleanup；中间父进程退出和 setsid 仍未覆盖。验证：裸测 156 文件 1236 项、隔离 152 文件 1128 项全过，含真实根退出孙代回收、生产 argv 不含真实 token、三协议 query 与初始化/写失败专项。独立多轮 review 与 Minor 复核均无 Critical/Important。增量定向 31/31；真实 gb10 的默认/显式探测、指定 cwd、反向隧道模型回合与 `/exit` 均通过，Linux 隔离 `bun install && bun link` 后直接 `doge --version` 通过。审查发现 login profile 污染风险后改为 `sh -c` 并补恶意字符回转测试，Important/Minor 均闭环；ProxyJump/ProxyCommand 与长时 OAuth 会话仍未覆盖。
+3. 代码位置：`.gitattributes`、`src/bootstrap-entry.ts`（Linux 可执行入口与 LF）；`src/ssh/SSHSessionManager.ts`（NDJSON、排队消息、权限/中断与失败生命周期）；`src/ssh/createSSHSession.ts`（探测、OpenSSH 参数、会话与幂等清理）；`src/ssh/sshAuthProxy.ts`（令牌校验、上游 URL/query 与本地凭据注入）；`src/ssh/sshCommand.ts`（安全的远端命令构造及探测结果解析）；`src/hooks/useSSHSession.ts`、`src/screens/REPL.tsx`（REPL 集成与 Esc 取消）；`src/utils/subprocessEnv.ts`（隧道变量清理）。对应测试位于 `src/ssh/*.test.ts` 与 `src/utils/subprocessEnv.test.ts`。
+
 ## 2026-11-26 Windows 全屏输入的前台完整性路由（2.1.358）
 
 1. 新会话 `0dbea5c0` 再次返回 `SetCursorPos failed / 203 / local / medium`。复查发现，只按命中 PID 选路由漏掉了 high 前台：原任务已授权 Doge Code，完全可能存在 high `launcher_main` 在前台、medium 窗口在点击点的组合。专用回归先启动普通权限置顶窗口，再启动 high 主窗口，旧实现稳定复现同一报错；单独的源码/压缩 EXE 原生 IL 查询都正常，不能再把问题归因于 FFI 或缺少二次准备。
@@ -119,6 +125,7 @@
 
 | 版本 | 里程碑 |
 |---|---|
+| 2.1.359 | SSH 远程会话与协议安全；修复 Linux bun link 入口、OpenSSH 多行脚本传参及非交互 Bun 路径。 |
 | 2.1.340 | 中断的 headless 回合显式上报 |
 | 2.1.343 | Browser Use 路由到指定浏览器并保留 shell 工具 |
 | 2.1.345 | 模型目录/思考策略回归修复（目录默认档、输出上限、Responses 思考、重试显示）；桌面壳 headless Playwright bridge + `task_started` command/output_file |
@@ -141,7 +148,8 @@
 1. **macOS CU 实机**：`@ant/computer-use-swift` 为 shim（空白截图、TCC 恒 false），macOS CU 不可用且未实测。
 2. **Windows 受限场景**：无管理员账户、受限令牌/低完整性、混合 DPI 多屏、UAC 后仍提权窗口的绑定输入未覆盖。
 3. **旧 catalog 迁移遗留**：只覆盖 `customApiEndpoint` 的 `modelProfiles`/`model`；同名 provider 重复由 `dedupeModelProfiles` 兜底，手工异常 catalog/`settings.model` 残留未逐一实测。
-4. **恢复缺口**：`src/server/`（server/sessionManager/backends）与 `src/ssh/` 端到端未通；`server`/`ssh`/`open` 属设计保留面。
+4. **恢复缺口**：`src/server/`（server/sessionManager/backends）与 `server`/`open` 仍属设计保留面；SSH 已实现并通过本地 REPL 端到端与模拟探测，真实外部主机及自动部署未覆盖。
 5. **Playwright 镜像**：依赖 App 侧 `bridge.cjs` 与 `DOGE_APP_PLAYWRIGHT_BRIDGE`，CLI 只透传；无 App 不能验证镜像链路。
 6. **IM**：Telegram/飞书/企业微信真实账号长连接、扫码网页频道的防火墙/多网卡排序仍需安装版实测。
 7. **其他**：Linux CU 尚未支持 Wayland；本树 ANT-ONLY 面（`up/rollback/task/log/error/export` 等）不注册；SDK 运行时在外部包。
+8. **SSH 进程归属边界**：根退出后的存活后代可按清单幂等回收；若中间父进程也提前退出，或远端工具双重 fork/setsid，当前清单无法完整重建归属，需 Windows Job Object 或 Unix 进程组/cgroup 级机制，尚未覆盖。真实外部 Linux/OpenSSH 服务端、ProxyJump/ProxyCommand 与长时 OAuth 会话仍需实机验证。

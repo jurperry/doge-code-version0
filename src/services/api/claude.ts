@@ -249,6 +249,7 @@ import { getInitializationStatus } from '../lsp/manager.js'
 import { isToolFromMcpServer } from '../mcp/utils.js'
 import { withStreamingVCR, withVCR } from '../vcr.js'
 import { CLIENT_REQUEST_ID_HEADER, getAnthropicClient, getGlobalCompatProvider } from './client.js'
+import { modelCompatFetch } from '../../utils/proxy.js'
 import {
   API_ERROR_MESSAGE_PREFIX,
   CUSTOM_OFF_SWITCH_MESSAGE,
@@ -569,7 +570,7 @@ export async function verifyApiKey(
         {
           apiKey,
           baseURL: getModelConnection().baseURL,
-          fetch: globalThis.fetch,
+          fetch: modelCompatFetch,
         },
         {
           model: getSmallFastModel(),
@@ -1977,7 +1978,7 @@ async function* queryModel(
                 headers: clientRequestId
                   ? { [CLIENT_REQUEST_ID_HEADER]: clientRequestId }
                   : undefined,
-                fetch: globalThis.fetch,
+                fetch: modelCompatFetch,
               },
               openAIRequest,
               signal,
@@ -2013,7 +2014,7 @@ async function* queryModel(
               headers: clientRequestId
                 ? { [CLIENT_REQUEST_ID_HEADER]: clientRequestId }
                 : undefined,
-              fetch: globalThis.fetch,
+              fetch: modelCompatFetch,
             },
             responsesRequest,
             signal,

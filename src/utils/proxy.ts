@@ -285,6 +285,18 @@ export function getWebSocketProxyUrl(url: string): string | undefined {
  *   requests get misrouted to api.anthropic.com. Only the Anthropic SDK client
  *   should pass `true` here.
  */
+export function modelCompatFetch(input: Parameters<typeof fetch>[0], init?: RequestInit): ReturnType<typeof fetch> {
+  const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
+  if (process.env.ANTHROPIC_UNIX_SOCKET && process.env.DOGE_SSH_PROXY_TOKEN) {
+    headers.set('x-doge-ssh-proxy', process.env.DOGE_SSH_PROXY_TOKEN)
+  }
+  return globalThis.fetch(input, {
+    ...init,
+    ...getProxyFetchOptions({ forAnthropicAPI: true }),
+    headers,
+  } as RequestInit)
+}
+
 export function getProxyFetchOptions(opts?: { forAnthropicAPI?: boolean }): {
   tls?: TLSConfig
   dispatcher?: undici.Dispatcher
