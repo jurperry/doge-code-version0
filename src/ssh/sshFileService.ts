@@ -16,12 +16,21 @@ import {
  * 宿主（桌面壳）经 stdin/stdout 与本进程按 NDJSON 一问一答；本进程把请求
  * 翻译成 remoteFileServiceScript 认得的单行指令。远端循环串行处理，应答
  * 因此与请求同序——这里按先进先出配对，不依赖远端回显 id。
+ *
+ * 读取面（home/list/stat/read/gitRoot）收任意绝对路径；项目管理面（归档、删除
+ * 会话/项目/记忆）只收结构化参数——单段项目目录名与会话号，路径由远端循环按
+ * 固定布局拼出，改动因此钉在 <配置目录>/projects 与以会话号命名的附属数据之内。
  */
 export type FileServiceRequest =
   | { id: number; op: 'home' }
   | { id: number; op: 'list'; path: string }
   | { id: number; op: 'stat'; path: string }
   | { id: number; op: 'read'; path: string; offset: number; limit: number }
+  | { id: number; op: 'gitRoot'; path: string }
+  | { id: number; op: 'projects' }
+  | { id: number; op: 'archive'; dir: string; sessionId: string; restore: boolean }
+  | { id: number; op: 'removeSession'; dir: string; sessionId: string }
+  | { id: number; op: 'removeProject' | 'removeMemory'; dir: string }
 
 export type FileServiceResponse =
   | { event: 'ready' }
@@ -30,6 +39,9 @@ export type FileServiceResponse =
   | { id: number; ok: true; entries: { name: string; dir: boolean; size: number; mtimeMs: number }[] }
   | { id: number; ok: true; size: number; mtimeMs: number; dir: boolean }
   | { id: number; ok: true; size: number; data: string }
+  | { id: number; ok: true; root: string | null }
+  | { id: number; ok: true; projects: { dir: string; memory: boolean; archived: boolean }[] }
+  | { id: number; ok: true }
   | { id: number; ok: false; error: string }
 
 export type FileServiceIO = {
@@ -49,19 +61,31 @@ const EXIT_GRACE_MS = 1500
 /** 远端循环就绪时打出的问候行 */
 const GREETING = '@ready'
 
+/** 项目目录名是 CLI 的 v2 编码（字母数字与 ~ % . _ -）；单独的 . 与 .. 另行拒绝 */
+const SAFE_PROJECT_DIR = /^(?!\.\.?$)[A-Za-z0-9~%._-]+$/
+/** memory 与 archived 是项目目录里另有含义的子目录名，不能当会话号 */
+const SAFE_SESSION_ID = /^(?!memory$|archived$)[A-Za-z0-9_-]+$/
+
 export function parseFileServiceRequest(value: unknown): FileServiceRequest | undefined {
   if (!value || typeof value !== 'object') return undefined
-  const { id, op, path, offset, limit } = value as Record<string, unknown>
+  const { id, op, path, offset, limit, dir, sessionId, restore } = value as Record<string, unknown>
   if (!Number.isSafeInteger(id) || (id as number) < 0) return undefined
-  if (op === 'home') return { id: id as number, op }
+  if (op === 'home' || op === 'projects') return { id: id as number, op }
+  if (op === 'archive' || op === 'removeSession' || op === 'removeProject' || op === 'removeMemory') {
+    if (typeof dir !== 'string' || !SAFE_PROJECT_DIR.test(dir)) return undefined
+    if (op === 'removeProject' || op === 'removeMemory') return { id: id as number, op, dir }
+    if (typeof sessionId !== 'string' || !SAFE_SESSION_ID.test(sessionId)) return undefined
+    if (op === 'removeSession') return { id: id as number, op, dir, sessionId }
+    return typeof restore === 'boolean' ? { id: id as number, op, dir, sessionId, restore } : undefined
+  }
   if (typeof path !== 'string' || !path.startsWith('/') || path.includes('\0')) return undefined
-  if (op === 'list' || op === 'stat') return { id: id as number, op, path }
+  if (op === 'list' || op === 'stat' || op === 'gitRoot') return { id: id as number, op, path }
   if (op !== 'read' || !Number.isSafeInteger(offset) || (offset as number) < 0) return undefined
   const bounded = Math.min(Math.max(Math.trunc((limit as number) || 0), 1), MAX_READ_BYTES)
   return { id: id as number, op, path, offset: offset as number, limit: bounded }
 }
 
-/** 远端一行指令：路径恒 base64，shell 元字符不进入命令行。 */
+/** 远端一行指令：路径与目录名恒 base64，shell 元字符不进入命令行。 */
 export function fileServiceCommand(request: FileServiceRequest): string {
   const encode = (value: string): string => Buffer.from(value, 'utf8').toString('base64')
   switch (request.op) {
@@ -69,6 +93,12 @@ export function fileServiceCommand(request: FileServiceRequest): string {
     case 'list': return `L ${encode(request.path)}`
     case 'stat': return `S ${encode(request.path)}`
     case 'read': return `R ${encode(request.path)} ${request.offset} ${request.limit}`
+    case 'gitRoot': return `G ${encode(request.path)}`
+    case 'projects': return 'P'
+    case 'archive': return `A ${encode(request.dir)} ${request.sessionId} ${request.restore ? 1 : 0}`
+    case 'removeSession': return `X ${encode(request.dir)} ${request.sessionId}`
+    case 'removeProject': return `D ${encode(request.dir)}`
+    case 'removeMemory': return `M ${encode(request.dir)}`
   }
 }
 
@@ -143,6 +173,21 @@ export function parseFileFrame(request: FileServiceRequest, frame: FileFrame): F
     }
     case 'read':
       return { id, ok: true, size: Number(frame.extra) || 0, data: frame.lines[0] ?? '' }
+    case 'gitRoot':
+      return { id, ok: true, root: frame.lines[0] || null }
+    case 'projects': {
+      const projects: { dir: string; memory: boolean; archived: boolean }[] = []
+      for (const line of frame.lines) {
+        const [dir, memory, archived] = line.split('\t')
+        if (SAFE_PROJECT_DIR.test(dir ?? '')) projects.push({ dir, memory: memory === '1', archived: archived === '1' })
+      }
+      return { id, ok: true, projects }
+    }
+    case 'archive':
+    case 'removeSession':
+    case 'removeProject':
+    case 'removeMemory':
+      return { id, ok: true }
   }
 }
 

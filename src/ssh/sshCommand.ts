@@ -174,9 +174,18 @@ export function tunnelCredentialEnvironment(token: string): Record<string, strin
   }
 }
 
-/** 文件通道在远端常驻的 POSIX sh 循环：逐行读指令，按帧回写（见 sshFileService）。 */
+/**
+ * 文件通道在远端常驻的 POSIX sh 循环：逐行读指令，按帧回写（见 sshFileService）。
+ * 项目管理指令（A/X/D/M）只动会话数据：项目目录 <配置目录>/projects/<目录名> 之下的
+ * 转录与子代理目录，以及 <配置目录>/session-env、tasks 下以会话号命名的附属数据。
+ * 目标由「单段项目目录名 + 会话号」指定，远端再做一次白名单校验——本机传来的
+ * 参数不可信，越界的名称一律拒绝；项目目录本身是符号链接时不动它（改动会落到
+ * 链接指向的别处，或者只删掉链接而留下真身）。
+ */
 export function remoteFileServiceScript(): string {
   return `${remotePathPrelude}
+DOGECFG=\${CLAUDE_CONFIG_DIR:-\$HOME/.doge}
+DOGEP="$DOGECFG/projects"
 if [ "$(printf aGk= | base64 -d 2>/dev/null)" = "hi" ]; then B64D='base64 -d'; else B64D='base64 -D'; fi
 if stat -c %Y . >/dev/null 2>&1; then
   mtime() { stat -c %Y -- "$1" 2>/dev/null || printf '0\\n'; }
@@ -185,6 +194,10 @@ else
 fi
 fail() { printf '@err\\n@end\\n'; }
 bytes() { if [ -r "$1" ]; then wc -c < "$1" | tr -d ' \\t'; else printf '0'; fi; }
+# 目录名与会话号是删除、移动路径的末段：只放行单段安全名称；memory 与 archived
+# 是项目目录里另有含义的子目录名，不能当会话号
+ok_dir() { case "$1" in ''|.|..|*[!A-Za-z0-9~%._-]*) return 1 ;; esac; }
+ok_sid() { case "$1" in ''|memory|archived|*[!A-Za-z0-9_-]*) return 1 ;; esac; }
 # 问候帧：调用方据此认定 SSH 已连通且循环已就绪（连接失败时走不到这里）
 printf '@ready\\n'
 while IFS= read -r line; do
@@ -193,7 +206,7 @@ while IFS= read -r line; do
   arg=\${line#* }
   [ "$op" = "$line" ] && arg=''
   case "$op" in
-    H) printf '@ok\\n%s\\n%s\\n@end\\n' "$HOME" "\${CLAUDE_CONFIG_DIR:-\$HOME/.doge}" ;;
+    H) printf '@ok\\n%s\\n%s\\n@end\\n' "$HOME" "$DOGECFG" ;;
     S)
       p=$(printf '%s' "$arg" | $B64D) || { fail; continue; }
       if [ -d "$p" ]; then printf '@ok\\ndir\\n@end\\n'
@@ -219,6 +232,83 @@ while IFS= read -r line; do
       printf '@ok %s\\n' "$(bytes "$p")"
       tail -c "+$((off + 1))" -- "$p" 2>/dev/null | head -c "$lim" | base64 | tr -d '\\n'
       printf '\\n@end\\n' ;;
+    P)
+      printf '@ok\\n'
+      for e in "$DOGEP"/*/ "$DOGEP"/.[!.]*/ "$DOGEP"/..?*/; do
+        [ -d "$e" ] || [ -L "$e" ] || continue
+        m=0; [ -d "\${e}memory" ] && m=1
+        a=0; [ -d "\${e}archived" ] && a=1
+        n=\${e%/}; printf '%s\\t%s\\t%s\\n' "\${n##*/}" "$m" "$a"
+      done
+      printf '@end\\n' ;;
+    G)
+      p=$(printf '%s' "$arg" | $B64D) || { fail; continue; }
+      [ -d "$p" ] || { fail; continue; }
+      # 进工作目录可能卡在失联的挂载点上：有 timeout 就限时，别拖死整条通道
+      if command -v timeout >/dev/null 2>&1; then
+        r=$(timeout 5 sh -c 'cd "$1" && git rev-parse --show-toplevel' sh "$p" 2>/dev/null) || r=''
+      else
+        r=$(cd "$p" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || r=''
+      fi
+      printf '@ok\\n%s\\n@end\\n' "$r" ;;
+    A)
+      enc=\${arg%% *}; rest=\${arg#* }; sid=\${rest%% *}; flag=\${rest#* }
+      [ "$enc" != "$arg" ] && [ "$sid" != "$rest" ] || { fail; continue; }
+      d=$(printf '%s' "$enc" | $B64D) || { fail; continue; }
+      ok_dir "$d" && ok_sid "$sid" || { fail; continue; }
+      { [ "$flag" = 0 ] || [ "$flag" = 1 ]; } || { fail; continue; }
+      base="$DOGEP/$d"; [ -d "$base" ] && [ ! -L "$base" ] || { fail; continue; }
+      if [ "$flag" = 1 ]; then from="$base/archived/$sid.jsonl"; to="$base/$sid.jsonl"
+      else from="$base/$sid.jsonl"; to="$base/archived/$sid.jsonl"; fi
+      if [ -f "$from" ]; then
+        # 恢复时未归档的那份已经在：以它为准，归档副本留在原处
+        if [ "$flag" = 1 ] && [ -e "$to" ]; then printf '@ok\\n@end\\n'; continue; fi
+        # 归档时归档副本已在而未归档的那份又出现了（会话在别处续写）：后者较新，盖掉前者
+        mkdir -p "\${to%/*}" && mv -f "$from" "$to" && printf '@ok\\n@end\\n' || fail
+      elif [ -e "$to" ]; then printf '@ok\\n@end\\n'
+      else fail; fi ;;
+    X)
+      enc=\${arg%% *}; sid=\${arg#* }
+      [ "$enc" != "$arg" ] || { fail; continue; }
+      d=$(printf '%s' "$enc" | $B64D) || { fail; continue; }
+      ok_dir "$d" && ok_sid "$sid" || { fail; continue; }
+      base="$DOGEP/$d"
+      [ -L "$base" ] && { fail; continue; }
+      [ -d "$base" ] || { printf '@ok\\n@end\\n'; continue; }
+      # 只在项目目录里确有这个会话（转录或子代理目录）时才动它的附属数据
+      if [ -f "$base/$sid.jsonl" ] || [ -f "$base/archived/$sid.jsonl" ] || [ -d "$base/$sid" ]; then
+        # 附属数据先删、转录最后删：中途失败时会话还在，可以重试
+        rm -rf "$DOGECFG/session-env/$sid" "$DOGECFG/tasks/$sid" "$base/$sid" || { fail; continue; }
+        rm -rf "$base/$sid.jsonl" "$base/archived/$sid.jsonl" || { fail; continue; }
+      fi
+      # 空的 archived/ 不算内容：撤掉它，最后一个会话删完后项目目录才能一并撤掉
+      rmdir "$base/archived" 2>/dev/null
+      rmdir "$base" 2>/dev/null
+      printf '@ok\\n@end\\n' ;;
+    D)
+      d=$(printf '%s' "$arg" | $B64D) || { fail; continue; }
+      ok_dir "$d" || { fail; continue; }
+      base="$DOGEP/$d"
+      [ -L "$base" ] && { fail; continue; }
+      [ -d "$base" ] || { printf '@ok\\n@end\\n'; continue; }
+      st=0
+      for f in "$base"/*.jsonl "$base"/archived/*.jsonl; do
+        [ -f "$f" ] || continue
+        s=\${f##*/}; s=\${s%.jsonl}
+        rm -rf "$DOGECFG/session-env/$s" "$DOGECFG/tasks/$s" || st=1
+      done
+      if [ "$st" = 0 ] && rm -rf "$base"; then printf '@ok\\n@end\\n'; else fail; fi ;;
+    M)
+      d=$(printf '%s' "$arg" | $B64D) || { fail; continue; }
+      ok_dir "$d" || { fail; continue; }
+      base="$DOGEP/$d"
+      [ -L "$base" ] && { fail; continue; }
+      [ -d "$base" ] || { printf '@ok\\n@end\\n'; continue; }
+      rm -rf "$base/memory" || { fail; continue; }
+      # 记忆删完项目目录若已空，一并撤掉，免得留下一个只出现在清单里的空目录
+      rmdir "$base/archived" 2>/dev/null
+      rmdir "$base" 2>/dev/null
+      printf '@ok\\n@end\\n' ;;
     *) fail ;;
   esac
 done`
