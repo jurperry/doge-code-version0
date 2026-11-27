@@ -53,6 +53,8 @@ desktop.ini
 # ---- 打包 / 临时 ----
 *.tgz
 *.tar.gz
+# 源码树里随技能分发的资源压缩包会被 .content.ts 直接 import，是源码不是打包产物
+!**/src/skills/bundled/**/*.tar.gz
 *.log
 .cache/
 coverage/
