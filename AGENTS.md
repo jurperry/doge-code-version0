@@ -16,6 +16,7 @@
 5. **提交与风格**：提交信息用简短祈使句（历史风格如 `Support web search for openai and responses API formats`，中英文均有）；坚持最小化、可审计的改动；带 `ANT-ONLY import markers must not be reordered` 注释的 import 禁止重排序。**一个功能分支只允许递增一次版本号——无论该版本是否已编译、打包、装机或交付，跨会话继续开发、修复、重编都沿用该分支已定的版本号，不得再次递增；分支被删除之前不再对该分支做任何版本递增决定，分支删除时它的版本号即为最终版本，下一次递增只能随下一个任务的新分支进行（一个分支一个版本号是铁律）**。`development_logs.md` 新增记录必须使用三段式——`1. 遇到问题：…`、`2. 解决方法：…`、`3. 代码位置：…`，保持简洁，末尾的 `## §2 版本里程碑索引` 表格首行必须补充 `| 2.1.xxx | MM-DD | 精简的描述修订内容 |`，表头固定为 `| 版本 | 日期 | 主题与关键点 |`（历史表为 `| 版本 | 里程碑 |` 时保持原表头），分隔行为 `|---|---|---|`；该索引行不得混入三段式正文。
 6. **收尾必过 code-review 与全量测试回归**：每次完成开发，必须发起子代理对本轮改动做 code-review，并做好全量的功能测试与回归验证（单测 + 相关 e2e + `bun run version` 冒烟），review 与全量功能测试回归通过才算完成。
 7. **代码各司其职**：编码全程遵循高内聚低耦合、代码规范清晰，调试文字要少（能删则删，不留临时 console/debug 输出）。
+8. **分支结束必同步安装源码**：`doge-code-install/` 是可整体拷到别的电脑、`bun install --frozen-lockfile && bun link` 即可使用的最小无依赖安装源码（只含运行源码与本地包，不含测试、工具、文档与 `node_modules`）。每次分支开发**提交之后、合并之前**必须运行 `bun tools/sync-install-source.ts --verify` 并把输出一并提交（通常紧跟功能提交再提一笔），之后再直接分发使用。该目录除 `README.md` 的说明正文外全部由工具按清单从已提交的源码逐字节生成，禁止手改；运行时新增目录、本地包或源码资源时先改工具里的清单再同步；`bun tools/sync-install-source.ts --check` 用于确认它没有过期。
 
 ## 二、项目简述
 
@@ -48,7 +49,8 @@
 - `shims/` — 缺失原生/私有包的 `file:` 替身（`ant-computer-use-swift`、`ant-claude-for-chrome-mcp`、`*-napi`）；`package.json` 依赖实际指向这里。
 - `packages/@ant/` — 本地实体包：`computer-use-mcp`（工具/权限/批次/坐标）、`computer-use-input`（macOS 键鼠后端）、`computer-use-swift`（macOS 原生层，依赖实际指向 `shims/`）、`claude-for-chrome-mcp`。
 - `vendor/` — 原生模块源码；根级 `image-processor.node`。
-- `tools/` 可复用测试脚本（git）；`test/` 临时产物（不跟踪）；根文档见 §六。
+- `doge-code-install/` — 最小可安装源码分发（纪律第 8 条）：`src/`（不含测试）、`packages/@ant/{computer-use-input,computer-use-mcp}`、`shims/`、`vendor/{modifiers-napi-src,url-handler-src}` 与锁文件，由 `tools/sync-install-source.ts` 从已提交的源码逐字节生成，可整体拷走独立安装。
+- `tools/` 可复用测试脚本（git），其中 `tools/sync-install-source.ts` 生成并校验 `doge-code-install/`；`test/` 临时产物（不跟踪）；根文档见 §六。
 
 ## 四、CLI 使用面
 
@@ -66,9 +68,11 @@ bun test <路径>             # 定向 bun:test
 bun test                    # 全量裸测（src/ 与 tools/，较慢）
 bun tools/run-isolated-tests.ts   # 每文件独立进程 + CLAUDE_CONFIG_DIR 隔离
 bun tools/e2e-model-routing.ts    # e2e 直接运行（自建沙箱并自清理；其余脚本见 tools/）
+bun tools/sync-install-source.ts --verify   # 同步 doge-code-install/ 并在仓库外独立安装验证（分支提交后、合并前）
+bun tools/sync-install-source.ts --check    # 确认 doge-code-install/ 没有过期
 ```
 
-**收尾门禁**：定向 `bun test` → 全量裸 `bun test`（改 afterAll reset 的连跑两次）→ `bun tools/run-isolated-tests.ts` → 相关 e2e/实机 → `bun run version` → `git -c core.whitespace=cr-at-eol diff --check` → 独立 review（Critical/Important 闭环）→ 清理 `test/`/后台任务/沙箱。调试用 `--debug`（pattern 白名单、`!` 前缀黑名单）、`/debug`，日志 `~/.doge/debug/<sessionId>.txt`。门禁细节与常见假红见 DESIGN §9。
+**收尾门禁**：定向 `bun test` → 全量裸 `bun test`（改 afterAll reset 的连跑两次）→ `bun tools/run-isolated-tests.ts` → 相关 e2e/实机 → `bun run version` → 安装源码同步（`bun tools/sync-install-source.ts --verify` 并提交输出，纪律第 8 条）→ `git -c core.whitespace=cr-at-eol diff --check` → 独立 review（Critical/Important 闭环）→ 清理 `test/`/后台任务/沙箱。调试用 `--debug`（pattern 白名单、`!` 前缀黑名单）、`/debug`，日志 `~/.doge/debug/<sessionId>.txt`。门禁细节与常见假红见 DESIGN §9。
 
 ## 六、文档索引
 

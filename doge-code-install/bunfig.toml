@@ -1,0 +1,10 @@
+# Bun configuration for doge-code
+# Enable BUDDY feature in development mode
+
+[bundle.define]
+BUDDY = "true"
+
+[define]
+BUDDY = "true"
+
+# 注：本分发不含测试与 tools/，故不配置 [test] preload；测试请使用完整仓库 doge-code。

@@ -15,6 +15,7 @@ Doge Code（`@doge-code/cli`，命令 `doge`）是 Claude Code 的第三方 Fork
 ## 2. 运行时与入口
 
 - 无打包构建：`bun run dev` = `bun run ./src/bootstrap-entry.ts`；`bin` 的 `doge` 同指向该文件。启动链 `bootstrap-entry.ts`（注入 `MACRO`）→ `src/entrypoints/cli.tsx`（快速路径：`--version`、`--computer-use-mcp`、`remote-control`、`daemon`、`ps/logs/attach/kill`、`--worktree --tmux` 等）→ `main.tsx`（Commander + 初始化 + 分发）。
+- 最小可安装源码分发：`doge-code-install/`（`src/` 不含测试、`packages/@ant` 的两个本地包、`shims/`、`vendor/` 的两个源码目录与锁文件）由 `tools/sync-install-source.ts` 从已提交的源码逐字节生成，可整体拷到别的电脑 `bun install --frozen-lockfile && bun link` 使用；分支结束必同步（AGENTS 第一节第 8 条）。
 - `initializeEntrypoint()` 设 `CLAUDE_CODE_ENTRYPOINT`（`cli`/`sdk-cli`/`mcp` 等）；非交互判定 `hasPrintFlag || hasInitOnlyFlag || hasSdkUrl || !stdout.isTTY`（main.tsx:813）。`src/entrypoints/init.ts` 是 memoized 启动初始化（settings/env/hooks/LSP/遥测/cleanup 注册）。
 - 构建期能力门：`feature('...')`（`bun:bundle`）与 `"external" === 'ant'` 字面量；本树按 external 面运行。
 

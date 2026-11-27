@@ -1,0 +1,4 @@
+export const MAX_BATCH_ACTIONS = 100
+export const MAX_TYPE_TEXT_LENGTH = 100_000
+export const MAX_BATCH_SCREENSHOTS = 4
+export const MAX_BATCH_IMAGE_BYTES = 20 * 1024 * 1024

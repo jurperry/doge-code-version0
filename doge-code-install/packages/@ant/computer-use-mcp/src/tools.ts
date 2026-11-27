@@ -1,0 +1,792 @@
+/**
+ * MCP tool schemas for the computer-use server. Mirrors
+ * claude-for-chrome-mcp/src/browserTools.ts in shape (plain `Tool`-shaped
+ * object literals, no zod).
+ *
+ * Coordinate descriptions are baked in at tool-list build time from the
+ * `chicago_coordinate_mode` gate. The model sees exactly ONE coordinate
+ * convention in the param descriptions and never learns the other exists.
+ * The host (`serverDef.ts`) reads the same frozen gate value for
+ * `scaleCoord` — both must agree or clicks land in the wrong space.
+ */
+
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { ComputerExecutorCapabilities } from "./executor.js";
+
+import { MAX_BATCH_ACTIONS, MAX_TYPE_TEXT_LENGTH } from "./limits.js";
+import type { CoordinateMode } from "./types.js";
+
+const LINUX_WINDOW_TOOLS = new Set([
+  "request_access", "list_granted_applications", "open_application", "screenshot", "zoom",
+  "left_click", "double_click", "triple_click", "right_click", "middle_click", "mouse_move",
+  "type", "key", "scroll", "wait", "cursor_position", "read_clipboard", "write_clipboard",
+]);
+export const MAX_RENDER_WAIT_MS = 5_000;
+const renderWait = {
+  type: "integer" as const, minimum: 0, maximum: MAX_RENDER_WAIT_MS,
+  description: "Optional milliseconds to wait before returning the image, useful for loading or animation.",
+};
+
+export function isComputerUseToolAvailable(
+  platform: ComputerExecutorCapabilities["platform"],
+  name: string,
+): boolean {
+  if (name === "minimize_window") return platform === "win32";
+  return platform !== "linux" || LINUX_WINDOW_TOOLS.has(name);
+}
+
+// See packages/desktop/computer-use-mcp/COORDINATES.md before touching any
+// model-facing coordinate text. Chrome's browserTools.ts:143 is the reference
+// phrasing — "pixels from the left edge", no geometry, no number to do math with.
+const COORD_DESC: Record<CoordinateMode, { x: string; y: string }> = {
+  pixels: {
+    x: "Horizontal pixel position read directly from the most recent screenshot image, measured from the left edge. The server handles all scaling.",
+    y: "Vertical pixel position read directly from the most recent screenshot image, measured from the top edge. The server handles all scaling.",
+  },
+  normalized_0_100: {
+    x: "Horizontal position as a percentage of screen width, 0.0–100.0 (0 = left edge, 100 = right edge).",
+    y: "Vertical position as a percentage of screen height, 0.0–100.0 (0 = top edge, 100 = bottom edge).",
+  },
+};
+
+const FRONTMOST_GATE_DESC =
+  "The effective input target and its grant tier must allow the action. Windows verifies the bound window, or the hit window for global pointer input and foreground window for global keyboard input.";
+
+/**
+ * Item schema for the `actions` array in `computer_batch`, `teach_step`, and
+ * `teach_batch`. All three dispatch through the same `dispatchAction` path
+ * with the same validation and share the advertised action names.
+ */
+export const BATCH_ACTION_NAMES = [
+  "key",
+  "type",
+  "mouse_move",
+  "left_click",
+  "left_click_drag",
+  "right_click",
+  "middle_click",
+  "double_click",
+  "triple_click",
+  "scroll",
+  "hold_key",
+  "screenshot",
+  "cursor_position",
+  "left_mouse_down",
+  "left_mouse_up",
+  "wait",
+] as const;
+
+const BATCH_ACTION_ITEM_SCHEMA = {
+  type: "object",
+  properties: {
+    action: {
+      type: "string",
+      enum: [...BATCH_ACTION_NAMES],
+      description: "The action to perform.",
+    },
+    coordinate: {
+      type: "array",
+      items: { type: "number" },
+      minItems: 2,
+      maxItems: 2,
+      description:
+        "(x, y) for click/mouse_move/scroll/left_click_drag end point.",
+    },
+    start_coordinate: {
+      type: "array",
+      items: { type: "number" },
+      minItems: 2,
+      maxItems: 2,
+      description:
+        "(x, y) drag start — left_click_drag only. Omit to drag from current cursor.",
+    },
+    text: {
+      type: "string",
+      maxLength: MAX_TYPE_TEXT_LENGTH,
+      description:
+        "For type: the text. For key/hold_key: the chord string. For click: modifier keys to hold.",
+    },
+    scroll_direction: {
+      type: "string",
+      enum: ["up", "down", "left", "right"],
+    },
+    scroll_amount: { type: "integer", minimum: 0, maximum: 100 },
+    duration: {
+      type: "number",
+      description: "Seconds (0–100). For hold_key/wait.",
+    },
+    repeat: {
+      type: "integer",
+      minimum: 1,
+      maximum: 100,
+      description: "For key: repeat count.",
+    },
+    save_to_disk: { type: "boolean", description: "For screenshot: save the image and return its file path." },
+  },
+  required: ["action"],
+};
+
+/**
+ * Build the tool list. Parameterized by capabilities and coordinate mode so
+ * descriptions are honest and unambiguous (plan §1 — "Unfiltered + honest").
+ *
+ * `coordinateMode` MUST match what the host passes to `scaleCoord` at tool-
+ * -call time. Both should read the same frozen-at-load gate constant.
+ *
+ * `installedAppNames` — optional pre-sanitized list of app display names to
+ * enumerate in the `request_access` description. The caller is responsible
+ * for sanitization (length cap, character allowlist, sort, count cap) —
+ * this function just splices the list into the description verbatim. Omit
+ * to fall back to the generic "display names or bundle IDs" wording.
+ */
+export function buildComputerUseTools(
+  caps: {
+    screenshotFiltering: "native" | "none";
+    platform: ComputerExecutorCapabilities["platform"];
+    /** Include request_teach_access + teach_step. Read once at server construction. */
+    teachMode?: boolean;
+  },
+  coordinateMode: CoordinateMode,
+  installedAppNames?: string[],
+): Tool[] {
+  const coord = COORD_DESC[coordinateMode];
+
+  // Shared hint suffix for BOTH request_access and request_teach_access —
+  // they use the same resolveRequestedApps path, so the model should get
+  // the same enumeration for both.
+  const installedAppsHint =
+    installedAppNames && installedAppNames.length > 0
+      ? ` Available applications on this machine: ${installedAppNames.join(", ")}.`
+      : "";
+
+  // [x, y]` tuple — param shape for all
+  // click/move/scroll tools.
+  const coordinateTuple = {
+    type: "array",
+    items: { type: "number" },
+    minItems: 2,
+    maxItems: 2,
+    description: `(x, y): ${coord.x}`,
+  };
+  // Modifier hold during click. Shared across all 5 click variants.
+  const clickModifierText = {
+    type: "string",
+    description:
+      'Modifier keys to hold during the click (e.g. "shift", "ctrl+shift"). Supports the same syntax as the key tool.',
+  };
+
+  const screenshotDesc =
+    caps.platform === "linux"
+      ? "Take a screenshot of the focused authorized X11 window. Use open_application to focus an approved window. Coordinates are relative to the resulting image."
+      : caps.screenshotFiltering === "native"
+      ? "Take a screenshot of the primary display. Applications not in the session allowlist are excluded at the compositor level — only granted apps and the desktop are visible."
+      : "Take a screenshot of the current target display or bound application window. open_application selects the bound window; switch_display selects a full display. On this platform, screenshots are NOT filtered — all captured windows are visible. Input actions targeting apps not in the session allowlist are rejected.";
+
+  const tools: Tool[] = [
+    {
+      name: "request_access",
+      description:
+        "Request session permission for the applications and optional capabilities the task needs. Reuse existing grants; use list_granted_applications if unsure. " +
+        "Returns the granted apps, denied apps, and screenshot filtering capability.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          apps: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Application display names (e.g. \"Slack\", \"Calendar\") or bundle identifiers (e.g. \"com.tinyspeck.slackmacgap\"). Display names are resolved case-insensitively against installed apps." +
+              (caps.platform === "win32" ? " For a portable app, pass its local absolute .exe or .lnk path, or a literal Desktop-relative item such as Desktop\\game\\Launcher. The reference must resolve uniquely to an executable without shortcut arguments. Use the returned bundleId with open_application. If unresolved, inspect the filename in Explorer." : "") + installedAppsHint,
+          },
+          reason: {
+            type: "string",
+            description:
+              "One-sentence explanation shown to the user in the approval dialog. Explain the task, not the mechanism.",
+          },
+          clipboardRead: {
+            type: "boolean",
+            description:
+              "Also request permission to read the user's clipboard (separate checkbox in the dialog).",
+          },
+          clipboardWrite: {
+            type: "boolean",
+            description:
+              "Also request permission to write the user's clipboard. When granted, multi-line `type` calls use the clipboard fast path.",
+          },
+          systemKeyCombos: {
+            type: "boolean",
+            description:
+              "Also request permission to send system-level key combos (quit app, switch app, lock screen). Without this, those specific combos are blocked.",
+          },
+        },
+        required: ["apps", "reason"],
+      },
+    },
+
+    {
+      name: "screenshot",
+      description:
+        screenshotDesc +
+        " Returns an error if the allowlist is empty. The returned image is what subsequent click coordinates are relative to.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          save_to_disk: {
+            type: "boolean",
+            description:
+              "Save the image to disk so it can be attached to a message for the user. Returns the saved path in the tool result. Only set this when you intend to share the image — screenshots you're just looking at don't need saving.",
+          },
+        },
+        required: [],
+      },
+    },
+
+    {
+      name: "zoom",
+      description:
+        "Inspect a region of the most recent base screenshot (bound window or display) at higher resolution when the original image lacks detail. " +
+        "The base screenshot still provides the coordinate reference for subsequent input.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          region: {
+            type: "array",
+            items: { type: "integer" },
+            minItems: 4,
+            maxItems: 4,
+            description:
+              "(x0, y0, x1, y1): Rectangle in base screenshot pixels. x0,y0 = top-left, x1,y1 = bottom-right.",
+          },
+          save_to_disk: {
+            type: "boolean",
+            description:
+              "Save the image to disk so it can be attached to a message for the user. Returns the saved path in the tool result. Only set this when you intend to share the image.",
+          },
+        },
+        required: ["region"],
+      },
+    },
+
+    {
+      name: "left_click",
+      description: `Left-click at the given coordinates. ${FRONTMOST_GATE_DESC}` +
+        (caps.platform === "win32" ? " For visual navigation in a bound window, pass screenshot: true. Use input: foreground for games or custom controls that poll real mouse input. Use minimize_window for minimization." : ""),
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          coordinate: coordinateTuple,
+          text: clickModifierText,
+          ...(caps.platform === "win32" ? {
+            screenshot: { type: "boolean" as const, description: "Bound windows only. Return the next window image after clicking or confirm if the window minimized." },
+            input: { type: "string", enum: ["auto", "foreground"], description: "Auto preserves background input for standard Win32 controls. Foreground uses the physical pointer on the focused bound window only (no focus change or automatic retry)." },
+            settle_ms: renderWait,
+          } : {}),
+        },
+        required: ["coordinate"],
+      },
+    },
+
+    {
+      name: "double_click",
+      description: `Send the application's double-click gesture at the given coordinates. ${FRONTMOST_GATE_DESC}`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          coordinate: coordinateTuple,
+          text: clickModifierText,
+        },
+        required: ["coordinate"],
+      },
+    },
+
+    {
+      name: "triple_click",
+      description: `Send the application's triple-click gesture at the given coordinates. ${FRONTMOST_GATE_DESC}`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          coordinate: coordinateTuple,
+          text: clickModifierText,
+        },
+        required: ["coordinate"],
+      },
+    },
+
+    {
+      name: "right_click",
+      description: `Right-click at the given coordinates. Opens a context menu in most applications. ${FRONTMOST_GATE_DESC}`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          coordinate: coordinateTuple,
+          text: clickModifierText,
+        },
+        required: ["coordinate"],
+      },
+    },
+
+    {
+      name: "middle_click",
+      description: `Middle-click (scroll-wheel click) at the given coordinates. ${FRONTMOST_GATE_DESC}`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          coordinate: coordinateTuple,
+          text: clickModifierText,
+        },
+        required: ["coordinate"],
+      },
+    },
+
+    {
+      name: "type",
+      description: `Type text into whatever currently has keyboard focus. ${FRONTMOST_GATE_DESC} Newlines are supported. For keyboard shortcuts use \`key\` instead.`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          text: { type: "string", maxLength: MAX_TYPE_TEXT_LENGTH, description: "Text to type." },
+        },
+        required: ["text"],
+      },
+    },
+
+    {
+      name: "key",
+      description:
+        `Press a key or key combination (e.g. "return" or ${caps.platform === "darwin" ? '"cmd+a"' : '"ctrl+a"'}). ${FRONTMOST_GATE_DESC} ` +
+        "Restricted system shortcuts require the `systemKeyCombos` grant.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          text: {
+            type: "string",
+            description: 'Join modifiers and the key with "+".',
+          },
+          repeat: {
+            type: "integer",
+            minimum: 1,
+            maximum: 100,
+            description: "Number of times to repeat the key press. Default is 1.",
+          },
+        },
+        required: ["text"],
+      },
+    },
+
+    {
+      name: "scroll",
+      description: `Scroll at the given coordinates. ${FRONTMOST_GATE_DESC}`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          coordinate: coordinateTuple,
+          scroll_direction: {
+            type: "string",
+            enum: ["up", "down", "left", "right"],
+            description: "Direction to scroll.",
+          },
+          scroll_amount: {
+            type: "integer",
+            minimum: 0,
+            maximum: 100,
+            description: "Number of scroll ticks.",
+          },
+        },
+        required: ["coordinate", "scroll_direction", "scroll_amount"],
+      },
+    },
+
+    {
+      name: "left_click_drag",
+      description: `Press, move to target, and release. ${FRONTMOST_GATE_DESC}`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          coordinate: {
+            ...coordinateTuple,
+            description: `(x, y) end point: ${coord.x}`,
+          },
+          start_coordinate: {
+            ...coordinateTuple,
+            description: `(x, y) start point. ${caps.platform === "win32" ? "Pass an explicit start or position the pointer with mouse_move first." : "If omitted, drags from the current cursor position."} ${coord.x}`,
+          },
+        },
+        required: ["coordinate"],
+      },
+    },
+
+    {
+      name: "mouse_move",
+      description: `Move the mouse cursor without clicking. Useful for triggering hover states. ${FRONTMOST_GATE_DESC}`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          coordinate: coordinateTuple,
+        },
+        required: ["coordinate"],
+      },
+    },
+
+    {
+      name: "open_application",
+      description:
+        "Bring an application to the front, launching it if necessary. The target application must already be in the session allowlist — call request_access first." +
+        (caps.platform === "win32" ? " Use the granted bundleId. This binds the target and returns a fresh screenshot by default." : ""),
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          app: {
+            type: "string",
+            description:
+              "Display name (e.g. \"Slack\") or bundle identifier (e.g. \"com.tinyspeck.slackmacgap\").",
+          },
+          ...(caps.platform === "win32" ? {
+            window_id: {
+              type: "string" as const,
+              description: "Optional Windows window ID from list_windows or list_granted_applications. Pass its exact granted executable as app.",
+            },
+            screenshot: { type: "boolean" as const, default: true, description: "Return an image of the current target after opening it." },
+            settle_ms: renderWait,
+          } : {}),
+        },
+        required: ["app"],
+      },
+    },
+
+    {
+      name: "switch_display",
+      description:
+        "Leave bound-window mode and select full-display capture with global input coordinates. " +
+        "Use this for desktop-wide work instead of open_application, including work on the current monitor. " +
+        'Pass "auto" for automatic monitor selection, or a monitor name from the screenshot note to pin that display. ' +
+        "Always call screenshot after switching; previous image coordinates are no longer valid.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          display: {
+            type: "string",
+            description:
+              'Monitor name from the screenshot note (e.g. "Built-in Retina Display", ' +
+              '"LG UltraFine"), or "auto" to re-enable automatic selection.',
+          },
+        },
+        required: ["display"],
+      },
+    },
+
+    {
+      name: "list_granted_applications",
+      description:
+        "List the applications currently in the session allowlist, plus the active grant flags and coordinate mode. No side effects." +
+        (caps.platform === "win32" ? " Set include_desktop for display names, capture mode, anchor age, limits, and Windows integrity level. Use list_windows to discover authorized windows." : ""),
+      inputSchema: {
+        type: "object" as const,
+        properties: caps.platform === "win32" ? {
+          include_windows: { type: "boolean" as const, description: "Include up to 40 visible titled windows belonging to granted executables." },
+          include_desktop: { type: "boolean" as const, description: "Include Windows desktop and capture state." },
+        } : {},
+        required: [],
+      },
+    },
+
+    {
+      name: "read_clipboard",
+      description:
+        "Read the current clipboard contents as text. Requires the `clipboardRead` grant.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
+        required: [],
+      },
+    },
+
+    {
+      name: "write_clipboard",
+      description:
+        "Write text to the clipboard. Requires the `clipboardWrite` grant.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          text: { type: "string" },
+        },
+        required: ["text"],
+      },
+    },
+
+    {
+      name: "wait",
+      description: "Wait for a specified duration.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          duration: {
+            type: "number",
+            description: "Duration in seconds (0–100).",
+          },
+        },
+        required: ["duration"],
+      },
+    },
+
+    {
+      name: "cursor_position",
+      description:
+        "Get the current mouse cursor position. Returns image-pixel coordinates relative to the most recent screenshot, or logical points if no screenshot has been taken.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
+        required: [],
+      },
+    },
+
+    {
+      name: "hold_key",
+      description:
+        `Press and hold a key or key combination for the specified duration, then release. ${FRONTMOST_GATE_DESC} ` +
+        "System-level combos require the `systemKeyCombos` grant.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          text: {
+            type: "string",
+            description: 'Key or chord to hold, e.g. "space", "shift+down".',
+          },
+          duration: {
+            type: "number",
+            description: "Duration in seconds (0–100).",
+          },
+        },
+        required: ["text", "duration"],
+      },
+    },
+
+    {
+      name: "left_mouse_down",
+      description:
+        `Press the left mouse button at the current cursor position and leave it held. ${FRONTMOST_GATE_DESC} ` +
+        "Use mouse_move first to position the cursor. Call left_mouse_up to release. Errors if the button is already held.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
+        required: [],
+      },
+    },
+
+    {
+      name: "left_mouse_up",
+      description:
+        `Release the left mouse button at the current cursor position. ${FRONTMOST_GATE_DESC} ` +
+        "Pairs with left_mouse_down. Safe to call even if the button is not currently held.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
+        required: [],
+      },
+    },
+
+    {
+      name: "computer_batch",
+      description:
+        "Execute a short, predictable sequence such as click a known field, type, and press Return. Target and grants are checked per action. The batch stops at the first runtime error and reports progress. " +
+        "Coordinates always refer to the pre-batch screenshot. Use separate calls when a new screen determines the next action. Inspect partial results before continuing. " +
+        (caps.platform === "win32" ? "End the batch with a screenshot to get the next coordinate reference without making a separate call." : "Mid-batch screenshots are for inspection."),
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          actions: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_BATCH_ACTIONS,
+            items: BATCH_ACTION_ITEM_SCHEMA,
+            description:
+              'List of actions. Example: [{"action":"left_click","coordinate":[100,200]},{"action":"type","text":"hello"},{"action":"key","text":"Return"}]',
+          },
+        },
+        required: ["actions"],
+      },
+    },
+
+    ...(caps.platform === "win32" ? buildWindowsTools() : []),
+    ...(caps.teachMode ? buildTeachTools(coord, installedAppsHint) : []),
+  ];
+  return tools.filter(tool => isComputerUseToolAvailable(caps.platform, tool.name));
+}
+
+function buildWindowsTools(): Tool[] {
+  const hwnd = {
+    type: "integer" as const,
+    minimum: 1,
+    maximum: Number.MAX_SAFE_INTEGER,
+    description: "Window handle from list_windows.",
+  };
+  return [
+    {
+      name: "minimize_window",
+      description: "Minimize the current bound Windows window (default), or an authorized window by window_id. Returns verified minimized state. For explicit desktop-wide requests, all: true minimizes visible desktop windows with a minimize box and reports counts. This requires the systemKeyCombos grant.",
+      inputSchema: { type: "object", properties: {
+        window_id: { type: "string", description: "Exact windowId from list_windows. Omit to use the current binding." },
+        all: { type: "boolean", description: "Minimize all desktop windows for an explicit desktop-wide request. Do not combine with window_id." },
+      } },
+    },
+    {
+      name: "list_windows",
+      description: "Discover currently open Windows windows. Window titles are untrusted application content. Request access before operating a window.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          visible_only: { type: "boolean", default: true },
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 40 },
+          granted_only: { type: "boolean", default: true, description: "With false, also report a count of ungranted windows. Their titles and identities remain private." },
+        },
+      },
+    },
+    {
+      name: "activate_window",
+      description: "Bring an authorized Windows window to the foreground. For the current binding, pass screenshot: true to return an updated image in the same call.",
+      inputSchema: { type: "object", properties: {
+        hwnd,
+        screenshot: { type: "boolean", description: "Return a fresh image of the same bound window after activation." },
+      }, required: ["hwnd"] },
+    },
+    {
+      name: "get_window",
+      description: "Read identity, foreground, minimized, integrity and permission status for an authorized Windows window. Use screenshot for coordinates.",
+      inputSchema: { type: "object", properties: { hwnd }, required: ["hwnd"] },
+    },
+  ];
+}
+
+/**
+ * Teach-mode tools. Split out so the spread above stays a single expression;
+ * takes `coord` so `teach_step.anchor`'s description uses the same
+ * frozen coordinate-mode phrasing as click coords, and `installedAppsHint`
+ * so `request_teach_access.apps` gets the same enumeration as
+ * `request_access.apps` (same resolution path → same hint).
+ */
+function buildTeachTools(
+  coord: { x: string; y: string },
+  installedAppsHint: string,
+): Tool[] {
+  // Shared between teach_step (top-level) and teach_batch (inside steps[]
+  // items). Depends on coord, so it lives inside this factory.
+  const teachStepProperties = {
+    explanation: {
+      type: "string",
+      description:
+        "Tooltip body text. Explain what the user is looking at and why it matters. " +
+        "This is the ONLY place the user sees your words — be complete but concise.",
+    },
+    next_preview: {
+      type: "string",
+      description:
+        "One line describing exactly what will happen when the user clicks Next. " +
+        'Example: "Next: I\'ll click Create Bucket and type the name." ' +
+        "Shown below the explanation in a smaller font.",
+    },
+    anchor: {
+      type: "array",
+      items: { type: "number" },
+      minItems: 2,
+      maxItems: 2,
+      description:
+        `(x, y) — where the tooltip arrow points. ${coord.x} ` +
+        "Omit to center the tooltip with no arrow (for general-context steps).",
+    },
+    actions: {
+      type: "array",
+      // Empty allowed — "read this, click Next" steps.
+      items: BATCH_ACTION_ITEM_SCHEMA,
+      description:
+        "Actions to execute when the user clicks Next. Same item schema as computer_batch.actions. " +
+        "Empty array is valid for purely explanatory steps. Actions run sequentially and stop on first error.",
+    },
+  } as const;
+
+  return [
+    {
+      name: "request_teach_access",
+      description:
+        "Request permission to guide the user through a task step-by-step with on-screen tooltips. " +
+        "Use this INSTEAD OF request_access when the user wants to LEARN how to do something " +
+        '(phrases like "teach me", "walk me through", "show me how", "help me learn"). ' +
+        "On approval the main Claude window hides and a fullscreen tooltip overlay appears. " +
+        "You then call teach_step repeatedly; each call shows one tooltip and waits for the user to click Next. " +
+        "Same app-allowlist semantics as request_access, but no clipboard/system-key flags. " +
+        "Teach mode ends automatically when your turn ends.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          apps: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              'Application display names (e.g. "Slack", "Calendar") or bundle identifiers. Resolved case-insensitively against installed apps.' +
+              installedAppsHint,
+          },
+          reason: {
+            type: "string",
+            description:
+              'What you will be teaching. Shown in the approval dialog as "Claude wants to guide you through {reason}". Keep it short and task-focused.',
+          },
+        },
+        required: ["apps", "reason"],
+      },
+    },
+
+    {
+      name: "teach_step",
+      description:
+        "Show one guided-tour tooltip and wait for the user to click Next. On Next, execute the actions, " +
+        "take a fresh screenshot, and return both — you do NOT need a separate screenshot call between steps. " +
+        "The returned image shows the state after your actions ran; anchor the next teach_step against it. " +
+        "IMPORTANT — the user only sees the tooltip during teach mode. Put ALL narration in `explanation`. " +
+        "Text you emit outside teach_step calls is NOT visible until teach mode ends. " +
+        "Pack as many actions as possible into each step's `actions` array — the user waits through " +
+        "the whole round trip between clicks, so one step that fills a form beats five steps that fill one field each. " +
+        "Returns {exited:true} if the user clicks Exit — do not call teach_step again after that. " +
+        "Take an initial screenshot before your FIRST teach_step to anchor it.",
+      inputSchema: {
+        type: "object" as const,
+        properties: teachStepProperties,
+        required: ["explanation", "next_preview", "actions"],
+      },
+    },
+
+    {
+      name: "teach_batch",
+      description:
+        "Queue multiple teach steps in one tool call. Parallels computer_batch: " +
+        "N steps → one model↔API round trip instead of N. Each step still shows a tooltip " +
+        "and waits for the user's Next click, but YOU aren't waiting for a round trip between steps. " +
+        "You can call teach_batch multiple times in one tour — treat each batch as one predictable " +
+        "SEGMENT (typically: all the steps on one page). The returned screenshot shows the state " +
+        "after the batch's final actions; anchor the NEXT teach_batch against it. " +
+        "WITHIN a batch, all anchors and click coordinates refer to the PRE-BATCH screenshot " +
+        "(same invariant as computer_batch) — for steps 2+ in a batch, either omit anchor " +
+        "(centered tooltip) or target elements you know won't have moved. " +
+        "Good pattern: batch 5 tooltips on page A (last step navigates) → read returned screenshot → " +
+        "batch 3 tooltips on page B → done. " +
+        "Returns {exited:true, stepsCompleted:N} if the user clicks Exit — do NOT call again after that; " +
+        "{stepsCompleted, stepFailed, ...} if an action errors mid-batch; " +
+        "otherwise {stepsCompleted, results:[...]} plus a final screenshot. " +
+        "Fall back to individual teach_step calls when you need to react to each intermediate screenshot.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          steps: {
+            type: "array",
+            minItems: 1,
+            items: {
+              type: "object",
+              properties: teachStepProperties,
+              required: ["explanation", "next_preview", "actions"],
+            },
+            description:
+              "Ordered steps. Validated upfront — a typo in step 5 errors before any tooltip shows.",
+          },
+        },
+        required: ["steps"],
+      },
+    },
+  ];
+}

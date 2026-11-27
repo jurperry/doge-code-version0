@@ -1,5 +1,11 @@
 # development_logs.md — Doge Code 开发经验与版本索引
 
+## 2026-11-27 安装源码分发收进仓库与分支结束同步（2.1.361，不递增版本）
+
+1. 遇到问题：最小可安装源码分发一直游离在仓库之外（手工裁剪，无脚本、无记录），停在 2.1.360 且 README 写的基线提交与内容对不上；技能资源 `shadcn-components.tar.gz` 被源码直接 import，却被根 `.gitignore` 的 `*.tar.gz` 挡在库外。
+2. 解决方法：分发目录收进仓库成为 `doge-code-install/`，由 `tools/sync-install-source.ts` 按清单从已提交的源码逐字节生成——清单是唯一事实源，`README.md` 只留一段生成的版本/基线块。清单内有未提交改动时拒绝同步；分发文件被 `.gitignore` 挡住时报错（`git check-ignore -v` 对只命中否定规则的路径也返回 0，须按命中的规则是否以 `!` 开头解析）；`--check` 判过期；`--verify` 把目录拷到仓库外 `bun install --frozen-lockfile` 并 `bun run version`（放在仓库内会被主仓的 `node_modules` 掩盖缺失依赖）；镜像目录自带 `* -whitespace`，免得源码里的空白问题在提交门禁里重复报。根 `.gitignore` 放行技能资源压缩包并把它入库。AGENTS 第一节新增第 8 条：分支提交后、合并前必须同步并提交。实测 Windows 上仓库外独立副本可安装并运行 `2.1.361 (Claude Code)`；Linux/macOS 本版未重新实测。
+3. 代码位置：`tools/sync-install-source.ts`、`doge-code-install/`、`.gitignore`、`AGENTS.md`。
+
 ## 2026-11-27 SSH 文件通道的项目管理（2.1.361）
 
 1. 遇到问题：桌面端经 `--files` 只能读远端文件，远程工作区的会话无法归档或删除，项目与记忆也删不掉。
@@ -149,7 +155,7 @@
 
 | 版本 | 里程碑 |
 |---|---|
-| 2.1.361 | 11-27 SSH 文件通道的项目管理：项目目录标记、git 顶层目录、归档与删除。 |
+| 2.1.361 | 11-27 SSH 文件通道的项目管理：项目目录标记、git 顶层目录、归档与删除；安装源码分发收进仓库（`doge-code-install/`）并在分支结束时同步。 |
 | 2.1.360 | 11-27 SSH 对话中继与文件通道，模型连接、权限和思考策略同步。 |
 | 2.1.359 | SSH 远程会话与协议安全；修复 Linux bun link 入口、OpenSSH 多行脚本传参及非交互 Bun 路径。 |
 | 2.1.340 | 中断的 headless 回合显式上报 |

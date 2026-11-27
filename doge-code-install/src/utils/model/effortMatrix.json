@@ -1,0 +1,356 @@
+{
+  "version": 1,
+  "note": "Shared effort wire contract. CLI effortGateway.ts and App shared/effortGateway.ts must satisfy every case; CLI src/utils/model/effortMatrix.test.ts and App tools/check-effort-matrix-sync.mjs run these cases, and the App check also byte-compares the two JSON copies. Update both copies when provider docs change.",
+  "levels": ["low", "medium", "high", "xhigh", "max"],
+  "maps": {
+    "passThrough": {
+      "low": { "wire": "low", "applied": "low" },
+      "medium": { "wire": "medium", "applied": "medium" },
+      "high": { "wire": "high", "applied": "high" },
+      "xhigh": { "wire": "xhigh", "applied": "xhigh" },
+      "max": { "wire": "max", "applied": "max" }
+    },
+    "lowHighMax": {
+      "low": { "wire": "low", "applied": "low" },
+      "medium": { "wire": "high", "applied": "high" },
+      "high": { "wire": "high", "applied": "high" },
+      "xhigh": { "wire": "high", "applied": "high" },
+      "max": { "wire": "max", "applied": "max" }
+    },
+    "glm53": {
+      "low": { "wire": "low", "applied": "low" },
+      "medium": { "wire": "high", "applied": "high" },
+      "high": { "wire": "high", "applied": "high" },
+      "xhigh": { "wire": "max", "applied": "max" },
+      "max": { "wire": "max", "applied": "max" }
+    },
+    "glm52": {
+      "low": { "wire": "low", "applied": "high" },
+      "medium": { "wire": "medium", "applied": "high" },
+      "high": { "wire": "high", "applied": "high" },
+      "xhigh": { "wire": "xhigh", "applied": "max" },
+      "max": { "wire": "max", "applied": "max" }
+    },
+    "qwenAnthropic": {
+      "low": { "wire": "low", "applied": "low" },
+      "medium": { "wire": "medium", "applied": "medium" },
+      "high": { "wire": "xhigh", "applied": "xhigh" },
+      "xhigh": { "wire": "xhigh", "applied": "xhigh" },
+      "max": { "wire": "xhigh", "applied": "xhigh" }
+    },
+    "highMax": {
+      "low": { "wire": "high", "applied": "high" },
+      "medium": { "wire": "high", "applied": "high" },
+      "high": { "wire": "high", "applied": "high" },
+      "xhigh": { "wire": "max", "applied": "max" },
+      "max": { "wire": "max", "applied": "max" }
+    },
+    "xai": {
+      "low": { "wire": "low", "applied": "low" },
+      "medium": { "wire": "medium", "applied": "medium" },
+      "high": { "wire": "high", "applied": "high" },
+      "xhigh": { "wire": "xhigh", "applied": "xhigh" },
+      "max": { "wire": "xhigh", "applied": "xhigh" }
+    },
+    "xaiLegacy": {
+      "low": { "wire": "low", "applied": "low" },
+      "medium": { "wire": "medium", "applied": "medium" },
+      "high": { "wire": "high", "applied": "high" },
+      "xhigh": { "wire": "high", "applied": "high" },
+      "max": { "wire": "high", "applied": "high" }
+    }
+  },
+  "qwenBudgets": {
+    "low": 1024,
+    "medium": 4096,
+    "high": 16384,
+    "xhigh": 24576,
+    "max": 32768
+  },
+  "cases": [
+    {
+      "name": "official anthropic passes through",
+      "model": "claude-opus-4-8",
+      "protocol": "anthropic",
+      "baseURL": "https://api.anthropic.com",
+      "requested": "xhigh",
+      "expect": { "gateway": "anthropic", "wireEffort": "xhigh", "applied": "xhigh", "downgraded": false }
+    },
+    {
+      "name": "deepseek anthropic maps medium to high",
+      "model": "deepseek-v4-pro",
+      "protocol": "anthropic",
+      "baseURL": "https://api.deepseek.com/anthropic",
+      "requested": "medium",
+      "expect": { "gateway": "deepseek", "wireEffort": "high", "applied": "high", "downgraded": true }
+    },
+    {
+      "name": "glm 5.3 openai maps xhigh to max",
+      "model": "glm-5.3",
+      "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+      "requested": "xhigh",
+      "expect": { "gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": true }
+    },
+    {
+      "name": "glm 5.2 medium keeps wire medium but applies high",
+      "model": "glm-5.2",
+      "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+      "requested": "medium",
+      "expect": { "gateway": "glm", "wireEffort": "medium", "applied": "high", "downgraded": true }
+    },
+    {
+      "name": "kimi forced thinking sends nothing",
+      "model": "kimi-k2.7-code",
+      "protocol": "openai",
+      "baseURL": "https://api.moonshot.cn/v1",
+      "requested": "high",
+      "expect": { "gateway": "kimi", "wireEffort": null, "applied": null, "reason": "gateway-unsupported" }
+    },
+    {
+      "name": "kimi k3 medium maps high",
+      "model": "kimi-k3",
+      "protocol": "openai",
+      "baseURL": "https://api.moonshot.cn/v1",
+      "requested": "medium",
+      "expect": { "gateway": "kimi", "wireEffort": "high", "applied": "high", "downgraded": true }
+    },
+    {
+      "name": "qwen openai high uses budget extra body",
+      "model": "qwen3.8-max",
+      "protocol": "openai",
+      "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "requested": "high",
+      "expect": { "gateway": "qwen", "wireEffort": null, "applied": "high", "extraBody": { "enable_thinking": true, "thinking_budget": 16384 } }
+    },
+    {
+      "name": "xai 4.6 max maps xhigh",
+      "model": "grok-4.6",
+      "protocol": "openai",
+      "baseURL": "https://api.x.ai/v1",
+      "requested": "max",
+      "expect": { "gateway": "xai", "wireEffort": "xhigh", "applied": "xhigh", "downgraded": true }
+    },
+    {
+      "name": "xai 4.5 max maps high",
+      "model": "grok-4.5",
+      "protocol": "openai",
+      "baseURL": "https://api.x.ai/v1",
+      "requested": "max",
+      "expect": { "gateway": "xai", "wireEffort": "high", "applied": "high", "downgraded": true }
+    },
+    {
+      "name": "openrouter passes the full ladder",
+      "model": "anthropic/claude-opus-4-8",
+      "protocol": "openai",
+      "baseURL": "https://openrouter.ai/api/v1",
+      "requested": "max",
+      "expect": { "gateway": "openrouter", "wireEffort": "max", "applied": "max", "downgraded": false }
+    },
+    {
+      "name": "unknown gateway passes through",
+      "model": "mystery-model",
+      "protocol": "openai",
+      "baseURL": "https://gw.example.test",
+      "requested": "high",
+      "expect": { "gateway": "generic", "wireEffort": "high", "applied": "high", "downgraded": false }
+    },
+    {
+      "name": "qwen anthropic high maps to xhigh",
+      "model": "qwen3.8-max",
+      "protocol": "anthropic",
+      "baseURL": "https://dashscope.aliyuncs.com/api/v1",
+      "requested": "high",
+      "expect": { "gateway": "qwen", "wireEffort": "xhigh", "applied": "xhigh", "downgraded": true }
+    },
+    {
+      "name": "qwen anthropic behind deepseek uses high/max ladder",
+      "model": "deepseek-v4-pro",
+      "protocol": "anthropic",
+      "baseURL": "https://dashscope.aliyuncs.com/api/v1",
+      "requested": "medium",
+      "expect": { "gateway": "qwen", "wireEffort": "high", "applied": "high", "downgraded": true }
+    },
+    {
+      "name": "glm-5.3 anthropic low",
+      "model": "glm-5.3", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "low",
+      "expect": {"gateway": "glm", "wireEffort": "low", "applied": "low", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3 anthropic medium",
+      "model": "glm-5.3", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "medium",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3 anthropic high",
+      "model": "glm-5.3", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "high",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3 anthropic xhigh",
+      "model": "glm-5.3", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "xhigh",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3 anthropic max",
+      "model": "glm-5.3", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "max",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3 openai low",
+      "model": "glm-5.3", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "low",
+      "expect": {"gateway": "glm", "wireEffort": "low", "applied": "low", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3 openai medium",
+      "model": "glm-5.3", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "medium",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3 openai high",
+      "model": "glm-5.3", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "high",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3 openai xhigh",
+      "model": "glm-5.3", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "xhigh",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3 openai max",
+      "model": "glm-5.3", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "max",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3 responses low",
+      "model": "glm-5.3", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "low",
+      "expect": {"gateway": "glm", "wireEffort": "low", "applied": "low", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3 responses medium",
+      "model": "glm-5.3", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "medium",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3 responses high",
+      "model": "glm-5.3", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "high",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3 responses xhigh",
+      "model": "glm-5.3", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "xhigh",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3 responses max",
+      "model": "glm-5.3", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "max",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3-flash anthropic low",
+      "model": "glm-5.3-flash", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "low",
+      "expect": {"gateway": "glm", "wireEffort": "low", "applied": "low", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3-flash anthropic medium",
+      "model": "glm-5.3-flash", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "medium",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3-flash anthropic high",
+      "model": "glm-5.3-flash", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "high",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3-flash anthropic xhigh",
+      "model": "glm-5.3-flash", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "xhigh",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3-flash anthropic max",
+      "model": "glm-5.3-flash", "protocol": "anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "max",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3-flash openai low",
+      "model": "glm-5.3-flash", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "low",
+      "expect": {"gateway": "glm", "wireEffort": "low", "applied": "low", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3-flash openai medium",
+      "model": "glm-5.3-flash", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "medium",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3-flash openai high",
+      "model": "glm-5.3-flash", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "high",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3-flash openai xhigh",
+      "model": "glm-5.3-flash", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "xhigh",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3-flash openai max",
+      "model": "glm-5.3-flash", "protocol": "openai",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "max",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3-flash responses low",
+      "model": "glm-5.3-flash", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "low",
+      "expect": {"gateway": "glm", "wireEffort": "low", "applied": "low", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3-flash responses medium",
+      "model": "glm-5.3-flash", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "medium",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3-flash responses high",
+      "model": "glm-5.3-flash", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "high",
+      "expect": {"gateway": "glm", "wireEffort": "high", "applied": "high", "downgraded": false}
+    },
+    {
+      "name": "glm-5.3-flash responses xhigh",
+      "model": "glm-5.3-flash", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "xhigh",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": true}
+    },
+    {
+      "name": "glm-5.3-flash responses max",
+      "model": "glm-5.3-flash", "protocol": "responses",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic", "requested": "max",
+      "expect": {"gateway": "glm", "wireEffort": "max", "applied": "max", "downgraded": false}
+    }
+  ]
+}

@@ -58,6 +58,8 @@ doge                 # 或 bun run dev
 
 更新：`git pull && bun install && bun link`。**改 `packages/@ant/*` 后必须 `bun install`**，否则单测过而 CLI 仍跑 node_modules 旧副本。
 
+没有仓库、只想在另一台电脑上安装：单独拷贝本仓库的 `doge-code-install/` 目录即可。它是可独立使用的最小安装源码（不含测试、工具与文档），安装方法见其 `README.md`。
+
 ## SSH 远程会话
 
 源码运行需本机有 OpenSSH 客户端（Windows 桌面安装版已随包内置）；远端 Linux 主机需预装 `doge`（默认查 PATH、`~/.bun/bin/doge`、`~/.doge/bin/doge`、`~/.local/bin/doge`）。Linux 源码入口带 LF 换行的 `#!/usr/bin/env bun`，执行 `bun install && bun link` 后可直接运行 `doge`；SSH 远端脚本会显式补充 Bun 常见 bin 路径，避免非交互 shell 找不到解释器。模型请求经带随机令牌的反向隧道转发，本地代理注入凭据，不向远端配置文件或命令行写入真实 API Key；隧道令牌也只在 initialize 成功后经控制通道下发，不进入 argv。
