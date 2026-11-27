@@ -21,6 +21,8 @@ import {
 } from '../remote/sdkMessageAdapter.js'
 import type { SSHSession } from '../ssh/createSSHSession.js'
 import type { SSHSessionManager } from '../ssh/SSHSessionManager.js'
+import { remoteModelEnvironment } from '../ssh/sshCommand.js'
+import { useAppStateStore } from '../state/AppState.js'
 import type { Tool } from '../Tool.js'
 import { findToolByName } from '../Tool.js'
 import type { Message as MessageType } from '../types/message.js'
@@ -28,6 +30,7 @@ import type { PermissionAskDecision } from '../types/permissions.js'
 import { logForDebugging } from '../utils/debug.js'
 import { gracefulShutdown } from '../utils/gracefulShutdown.js'
 import { createSystemMessage } from '../utils/messages.js'
+import { isAutoModeActive } from '../utils/permissions/autoModeState.js'
 import type { RemoteMessageContent } from '../utils/teleport/api.js'
 
 type UseSSHSessionResult = {
@@ -45,6 +48,11 @@ type UseSSHSessionProps = {
   tools: Tool[]
 }
 
+/** The model a prompt will use: the session override, else the process base. */
+function sessionModelOf(state: { mainLoopModelForSession: string | null; mainLoopModel: string | null }): string | undefined {
+  return state.mainLoopModelForSession ?? state.mainLoopModel ?? undefined
+}
+
 export function useSSHSession({
   session,
   setMessages,
@@ -53,6 +61,7 @@ export function useSSHSession({
   tools,
 }: UseSSHSessionProps): UseSSHSessionResult {
   const isRemoteMode = !!session
+  const store = useAppStateStore()
 
   const managerRef = useRef<SSHSessionManager | null>(null)
   const hasReceivedInitRef = useRef(false)
@@ -68,6 +77,7 @@ export function useSSHSession({
 
     hasReceivedInitRef.current = false
     logForDebugging('[useSSHSession] wiring SSH session manager')
+    let displayedMode = store.getState().toolPermissionContext.mode
 
     const manager = session.createManager({
       onMessage: sdkMessage => {
@@ -159,6 +169,29 @@ export function useSSHSession({
         if (toolUseId) setToolUseConfirmQueue(q => q.filter(i => i.toolUseID !== toolUseId))
         setIsLoading(true)
       },
+      onPermissionMode: mode => {
+        const bypassAccepted = mode === 'bypassPermissions' &&
+          store.getState().toolPermissionContext.isRemoteBypassPermissionsDisabled
+        if (mode === displayedMode && !bypassAccepted) return
+        displayedMode = mode
+        store.setState(prev => ({
+          ...prev,
+          toolPermissionContext: {
+            ...prev.toolPermissionContext,
+            mode,
+            ...(bypassAccepted ? { isRemoteBypassPermissionsDisabled: false } : {}),
+          },
+        }))
+      },
+      onPermissionModeError: (mode, error) => {
+        if (mode === 'bypassPermissions') {
+          store.setState(prev => ({
+            ...prev,
+            toolPermissionContext: { ...prev.toolPermissionContext, isRemoteBypassPermissionsDisabled: true },
+          }))
+        }
+        setMessages(prev => [...prev, createSystemMessage(`SSH: ${error}`, 'warning')])
+      },
       onConnected: () => {
         logForDebugging('[useSSHSession] connected')
         isConnectedRef.current = true
@@ -189,15 +222,50 @@ export function useSSHSession({
     })
 
     managerRef.current = manager
+    // Subscribe directly so a Shift+Tab change is sent before the next input
+    // even when React batches the display update with submission. A /model
+    // switch rewrites this process's env (the auth proxy reads it live) but
+    // leaves the remote on its startup model — forward both sides together.
+    const currentEffort = (): string =>
+      process.env.CLAUDE_CODE_EFFORT_LEVEL ?? String(store.getState().effortValue ?? 'unset')
+    let displayedModel = sessionModelOf(store.getState())
+    let displayedConnection = process.env.DOGE_ACTIVE_CONNECTION_ID
+    let displayedEffort = currentEffort()
+    manager.setEffort(displayedEffort)
+    const unsubscribe = store.subscribe(() => {
+      const state = store.getState()
+      const mode = state.toolPermissionContext.mode
+      if (mode !== displayedMode) {
+        // The classifier opt-in dialog previews its label before activation.
+        if (mode === 'auto' && !isAutoModeActive()) return
+        displayedMode = mode
+        manager.setPermissionMode(mode)
+      }
+      const model = sessionModelOf(state)
+      const connection = process.env.DOGE_ACTIVE_CONNECTION_ID
+      const effort = currentEffort()
+      if (model !== displayedModel || connection !== displayedConnection) {
+        displayedModel = model
+        displayedConnection = connection
+        manager.setModel(model ?? 'default', {
+          ...remoteModelEnvironment(process.env, true),
+          CLAUDE_CODE_EFFORT_LEVEL: effort,
+        })
+      } else if (effort !== displayedEffort) {
+        manager.setEffort(effort)
+      }
+      displayedEffort = effort
+    })
     manager.connect()
 
     return () => {
       logForDebugging('[useSSHSession] cleanup')
+      unsubscribe()
       manager.disconnect()
       session.proxy.stop()
       managerRef.current = null
     }
-  }, [session, setMessages, setIsLoading, setToolUseConfirmQueue])
+  }, [session, setMessages, setIsLoading, setToolUseConfirmQueue, store])
 
   const sendMessage = useCallback(
     async (content: RemoteMessageContent, opts?: { uuid?: string }): Promise<boolean> => {

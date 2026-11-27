@@ -299,11 +299,10 @@ export function catalogPolicyForModel(
   return catalogModelForRequest(model, env, connectionId)?.reasoning
 }
 
-export function catalogModelForRequest(
-  model: string,
+export function catalogConnectionForRequest(
   env: Readonly<NodeJS.ProcessEnv>,
   connectionId?: string,
-): CatalogModel | undefined {
+): { connection: CatalogConnection; defaultModel?: CatalogModel } | undefined {
   const catalog = readModelCatalog()
   if (!catalog) return undefined
   const id = connectionId || env.DOGE_ACTIVE_CONNECTION_ID || env.DOGE_ACTIVE_MODEL_PROFILE?.split(':')[0]
@@ -324,9 +323,19 @@ export function catalogModelForRequest(
   } else if (!hosted) {
     connection = selected.connection
   }
-  if (!connection) return undefined
+  return connection ? { connection, defaultModel: connection === selected.connection ? selected.model : undefined } : undefined
+}
+
+export function catalogModelForRequest(
+  model: string,
+  env: Readonly<NodeJS.ProcessEnv>,
+  connectionId?: string,
+): CatalogModel | undefined {
+  const selection = catalogConnectionForRequest(env, connectionId)
+  if (!selection) return undefined
+  const { connection, defaultModel } = selection
   const active = connection.models.find(m => m.id === env.DOGE_ACTIVE_MODEL_ID)
-    ?? (connection === selected.connection ? selected.model : undefined)
+    ?? defaultModel
     ?? connection.models.find(m => m.id === connection.defaultModelId)
   const normalized = model === 'default'
     ? normalizeModelName(env.ANTHROPIC_MODEL || active?.upstreamModel || '')

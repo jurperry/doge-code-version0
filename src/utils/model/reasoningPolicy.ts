@@ -2,13 +2,13 @@ import type { EffortLevel } from './effortCapabilities.js'
 import { catalogPolicyForModel, type ReasoningPolicy } from './modelCatalog.js'
 import { availableEffortLevels, planReasoningRequest, removeEffortFields } from './reasoningRequest.js'
 import { getModelEnvironment } from './runtimeModelContext.js'
+import { sshReasoningPolicy, usesSshModelTunnel } from './sshReasoningPolicy.js'
 
 /**
  * Reasoning policy read directly from the unified Model Catalog.
  *
- * There is no host-policy env snapshot anymore: App and CLI both read
- * `~/.doge/model-catalog.json`. This module only turns a policy into wire
- * fields; model capability inference for first-party Claude stays elsewhere.
+ * Local processes share `~/.doge/model-catalog.json`. An SSH worker receives
+ * the active connection's reasoning controls from the client that owns it.
  */
 
 export type HostReasoningPolicy = ReasoningPolicy
@@ -68,7 +68,9 @@ export function getHostReasoningPolicy(model: string, env = getModelEnvironment(
 
 /** Response display rules still apply after a wire-parameter rejection. */
 export function getCatalogReasoningPolicy(model: string, env = getModelEnvironment()): HostReasoningPolicy | undefined {
-  const policy = catalogPolicyForModel(model, undefined, env)
+  const policy = usesSshModelTunnel(env)
+    ? sshReasoningPolicy(model, env)
+    : catalogPolicyForModel(model, undefined, env)
   return isPolicy(policy) ? policy : undefined
 }
 

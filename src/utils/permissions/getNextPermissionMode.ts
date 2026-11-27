@@ -45,7 +45,9 @@ export function getNextPermissionMode(
   toolPermissionContext: ToolPermissionContext,
   _teamContext?: { leadAgentId: string },
 ): PermissionMode {
-  const canBypass = !isBypassPermissionsModeDisabled()
+  const canBypass =
+    !toolPermissionContext.isRemoteBypassPermissionsDisabled &&
+    !isBypassPermissionsModeDisabled()
   switch (toolPermissionContext.mode) {
     case 'default':
       if (canBypass) {

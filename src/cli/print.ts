@@ -4945,6 +4945,7 @@ async function handleInitializeRequest(
       apiProvider: getAPIProvider(),
     },
     pid: process.pid,
+    permissionMode: getAppState().toolPermissionContext.mode,
   }
 
   if (isFastModeEnabled() && isFastModeAvailable()) {

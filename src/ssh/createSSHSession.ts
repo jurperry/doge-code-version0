@@ -1,8 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { randomUUID } from 'crypto'
-import { existsSync } from 'fs'
-import { homedir } from 'os'
-import { dirname, join, resolve } from 'path'
+import { resolve } from 'path'
 import type { SDKMessage } from '../entrypoints/agentSdkTypes.js'
 import { isClaudeAISubscriber } from '../utils/auth.js'
 import { isInBundledMode } from '../utils/bundledMode.js'
@@ -14,11 +12,15 @@ import type { RemotePermissionResponse } from '../remote/RemoteSessionManager.js
 import { SSHSessionManager, type SSHSessionCallbacks } from './SSHSessionManager.js'
 import { startSSHAuthProxy, type SSHAuthProxy } from './sshAuthProxy.js'
 import {
+  identityPath,
   parseSSHProbeOutput,
+  remoteModelEnvironment,
   remoteProbeScript,
   remoteSessionScript,
+  sshExecutable,
   sshHostArgs,
   sshRemoteCommand,
+  tunnelCredentialEnvironment,
   validateSSHHost,
   type SSHHostOptions,
   type SSHProbeResult,
@@ -34,6 +36,8 @@ export type SSHSession = {
   proc: ChildProcessWithoutNullStreams
   remoteCwd: string
   proxy: { stop: () => void }
+  /** 远端握手成功后下发的隧道凭据（无令牌的本地测试会话为空对象） */
+  tunnelCredentials: Record<string, string>
   createManager: (callbacks: SSHSessionCallbacks) => SSHSessionManager
   getStderrTail: () => string
 }
@@ -43,20 +47,6 @@ export class SSHSessionError extends Error {
     super(message)
     this.name = 'SSHSessionError'
   }
-}
-
-function sshExecutable(): string {
-  if (process.env.DOGE_SSH_EXECUTABLE) return process.env.DOGE_SSH_EXECUTABLE
-  if (process.platform === 'win32') {
-    const bundled = join(dirname(process.execPath), 'openssh', 'ssh.exe')
-    if (existsSync(bundled)) return bundled
-  }
-  return 'ssh'
-}
-
-function identityPath(value: string | undefined): string | undefined {
-  if (!value) return undefined
-  return value === '~' ? homedir() : value.startsWith('~/') ? resolve(homedir(), value.slice(2)) : resolve(value)
 }
 
 export async function probeSSHHost(options: SSHHostOptions): Promise<SSHProbeResult> {
@@ -78,6 +68,7 @@ function remoteArgs(options: SSHSessionOptions): string[] {
     '--verbose',
     '--permission-prompt-tool', 'stdio',
     '--include-partial-messages',
+    '--replay-user-messages',
   ]
   if (options.permissionMode) args.push('--permission-mode', options.permissionMode)
   if (options.dangerouslySkipPermissions) args.push('--dangerously-skip-permissions')
@@ -89,30 +80,20 @@ function remoteArgs(options: SSHSessionOptions): string[] {
 
 export function createSSHRemoteEnvironment(socketPath: string): Record<string, string> {
   const connection = getModelConnection()
-  const current = getModelEnvironment()
   const env: Record<string, string> = {
     CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
     CLAUDE_CODE_COMPATIBLE_API_PROVIDER: connection.provider,
     ANTHROPIC_BASE_URL: 'http://127.0.0.1',
     ANTHROPIC_UNIX_SOCKET: socketPath,
     DOGE_HEADLESS_BUILTIN_MCP: '0',
+    // 与壳的本地 headless 会话同口径：逐轮文件回滚与自动记忆在远端可用
+    CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
+    DOGE_HEADLESS_AUTO_MEMORY: '1',
   }
   if (connection.authTokenType === 'ANTHROPIC_AUTH_TOKEN') env.ANTHROPIC_AUTH_TOKEN = 'ssh-tunnel-placeholder'
   else env.DOGE_API_KEY = 'ssh-tunnel-placeholder'
   if (isClaudeAISubscriber()) env.CLAUDE_CODE_OAUTH_TOKEN = 'ssh-tunnel-placeholder'
-  for (const key of [
-    'ANTHROPIC_DEFAULT_OPUS_MODEL',
-    'ANTHROPIC_DEFAULT_SONNET_MODEL',
-    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-    'CLAUDE_CODE_SUBAGENT_MODEL',
-    'CLAUDE_CODE_MODEL_CONTEXT_WINDOW',
-    'CLAUDE_CODE_EFFORT_LEVEL',
-    'DOGE_ACTIVE_MODEL_ID',
-  ]) {
-    const value = current[key]
-    if (value) env[key] = value
-  }
-  return env
+  return { ...env, ...remoteModelEnvironment(getModelEnvironment()) }
 }
 
 function attachStderrTail(proc: ChildProcessWithoutNullStreams): () => string {
@@ -145,6 +126,7 @@ export function sessionFromProcess(
     proc,
     remoteCwd,
     proxy,
+    tunnelCredentials: proxyToken ? tunnelCredentialEnvironment(proxyToken) : {},
     getStderrTail,
     createManager: callbacks => new SSHSessionManager(proc, {
       ...callbacks,

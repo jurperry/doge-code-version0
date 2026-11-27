@@ -6,6 +6,8 @@ import { SSHSessionManager } from './SSHSessionManager.js'
 
 const remoteScript = String.raw`
 let buffer = ''
+let mode = 'default'
+const order = []
 const send = value => process.stdout.write(JSON.stringify(value) + '\n')
 process.stdin.on('data', chunk => {
   buffer += chunk
@@ -16,11 +18,30 @@ process.stdin.on('data', chunk => {
     if (!line) continue
     const message = JSON.parse(line)
     if (message.type === 'control_request' && message.request.subtype === 'initialize') {
-      send({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {} } })
-      send({ type: 'system', subtype: 'init', session_id: 'remote-session', model: 'mock', tools: [], uuid: 'init', timestamp: new Date().toISOString() })
+      const legacyMode = process.env.TEST_SSH_LEGACY_MODE
+      if (legacyMode) mode = legacyMode
+      const response = legacyMode ? {} : { permissionMode: mode }
+      send({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response } })
+    } else if (message.type === 'control_request' && message.request.subtype === 'set_model') {
+      order.push('model:' + message.request.model)
+      send({ type: 'result', subtype: 'success', uuid: 'model-set', session_id: 'remote-session', duration_ms: 0, duration_api_ms: 0, is_error: false, num_turns: 0, result: 'model-set', total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 } })
+    } else if (message.type === 'control_request' && message.request.subtype === 'set_permission_mode') {
+      if (message.request.mode === 'dontAsk') {
+        send({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'mode disabled remotely' } })
+      } else {
+        mode = message.request.mode
+        send({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: { mode } } })
+        send({ type: 'system', subtype: 'status', permissionMode: mode })
+      }
     } else if (message.type === 'user') {
       const text = message.message.content
-      if (text === 'needs-permission') {
+      order.push('user')
+      send({ type: 'system', subtype: 'init', permissionMode: mode, session_id: 'remote-session', model: 'mock', tools: [], uuid: 'init', timestamp: new Date().toISOString() })
+      if (text === 'which-mode') {
+        send({ type: 'result', subtype: 'success', result: mode })
+      } else if (text === 'which-order') {
+        send({ type: 'result', subtype: 'success', result: order.join(',') })
+      } else if (text === 'needs-permission') {
         send({ type: 'control_request', request_id: 'permission-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 'tool-1', input: { command: 'pwd' } } })
       } else if (text === 'cancel-permission') {
         send({ type: 'control_request', request_id: 'permission-2', request: { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 'tool-2', input: { command: 'pwd' } } })
@@ -34,6 +55,10 @@ process.stdin.on('data', chunk => {
     } else if (message.type === 'update_environment_variables') {
       if (message.variables.DOGE_SSH_PROXY_TOKEN) {
         send({ type: 'result', subtype: 'success', uuid: 'env-ready', session_id: 'remote-session', duration_ms: 0, duration_api_ms: 0, is_error: false, num_turns: 0, result: 'token-present', total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 } })
+      } else if (!message.variables.ANTHROPIC_MODEL && message.variables.CLAUDE_CODE_EFFORT_LEVEL) {
+        order.push('effort:' + message.variables.CLAUDE_CODE_EFFORT_LEVEL)
+      } else {
+        order.push('env:' + (message.variables.ANTHROPIC_MODEL ?? ''))
       }
     } else if (message.type === 'control_response' && message.response.request_id === 'permission-1') {
       send({ type: 'result', subtype: 'success', uuid: 'result-2', session_id: 'remote-session', duration_ms: 1, duration_api_ms: 1, is_error: false, num_turns: 1, result: message.response.response.behavior, total_cost_usd: 0, usage: { input_tokens: 1, output_tokens: 1 } })
@@ -126,6 +151,62 @@ test('SSH manager accepts a user turn before the initialize response arrives', a
   await until(() => messages.some(message => message.type === 'result' && message.result === 'early-turn-result'), 'early turn result')
   const results = messages.filter(message => message.type === 'result').map(message => message.result)
   expect(results.indexOf('token-present')).toBeLessThan(results.indexOf('early-turn-result'))
+})
+
+test('mode changes keep their order with user input and a rejected switch restores the last remote mode', async () => {
+  const modes: string[] = []
+  const errors: string[] = []
+  const results: string[] = []
+  manager = new SSHSessionManager(proc!, {
+    onMessage: message => {
+      if (message.type === 'result' && message.subtype === 'success') results.push(message.result)
+    },
+    onPermissionRequest: () => {},
+    onPermissionMode: mode => modes.push(mode),
+    onPermissionModeError: (mode, error) => errors.push(`${mode}: ${error}`),
+  })
+  manager.connect()
+  manager.setPermissionMode('bypassPermissions')
+  await manager.sendMessage('which-mode')
+  manager.setPermissionMode('plan')
+  manager.setPermissionMode('dontAsk')
+  await manager.sendMessage('which-mode')
+  await until(() => results.length === 2, 'turns after mode changes')
+  expect(results).toEqual(['bypassPermissions', 'plan'])
+  expect(modes).toEqual(['plan'])
+  expect(errors).toEqual(['dontAsk: mode disabled remotely'])
+  expect(manager.isConnected()).toBe(true)
+})
+
+test('remote startup mode is reported even without a first user turn', async () => {
+  const modes: string[] = []
+  manager = new SSHSessionManager(proc!, {
+    onMessage: () => {},
+    onPermissionRequest: () => {},
+    onPermissionMode: mode => modes.push(mode),
+  })
+  manager.connect()
+  await until(() => manager!.isConnected(), 'initialize')
+  expect(modes).toEqual(['default'])
+})
+
+test('a rejected mode change does not hide the startup mode from an older remote', async () => {
+  proc!.kill()
+  proc = spawn(process.execPath, ['-e', remoteScript], {
+    env: { ...process.env, TEST_SSH_LEGACY_MODE: 'acceptEdits' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const modes: string[] = []
+  manager = new SSHSessionManager(proc, {
+    onMessage: () => {},
+    onPermissionRequest: () => {},
+    onPermissionMode: mode => modes.push(mode),
+  })
+  manager.connect()
+  manager.setPermissionMode('dontAsk')
+  await manager.sendMessage('which-mode')
+  await until(() => modes.length === 2, 'legacy startup mode')
+  expect(modes).toEqual(['default', 'acceptEdits'])
 })
 
 test('initialize errors become a visible disconnect instead of a false connection', async () => {
@@ -252,4 +333,20 @@ test('shared cleanup runs only once across failure and exit paths', async () => 
   await Bun.sleep(80)
   manager.disconnect()
   expect(cleanupCalls).toBe(1)
+})
+
+test('model and effort changes reach the remote in order before the next turn', async () => {
+  const messages: SDKMessage[] = []
+  manager = new SSHSessionManager(proc!, {
+    onMessage: message => messages.push(message),
+    onPermissionRequest: () => {},
+  }, { proxyToken: 'tunnel-token' })
+  manager.connect()
+  await until(() => messages.some(message => message.type === 'result' && message.result === 'token-present'), 'connected')
+  manager.setModel('deepseek-flash', { ANTHROPIC_MODEL: 'deepseek-flash', CLAUDE_CODE_EFFORT_LEVEL: '' })
+  manager.setEffort('max')
+  expect(await manager.sendMessage('which-order')).toBe(true)
+  await until(() => messages.some(message => message.type === 'result' && message.result?.includes('user')), 'ordered delivery')
+  expect(messages.find(message => message.type === 'result' && message.result?.includes('user'))?.result)
+    .toBe('env:deepseek-flash,model:deepseek-flash,effort:max,user')
 })

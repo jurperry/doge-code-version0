@@ -1,5 +1,23 @@
 # development_logs.md — Doge Code 开发经验与版本索引
 
+## 2026-11-27 SSH 思考策略同步（2.1.360）
+
+1. 遇到问题：远端 headless 只有回环隧道地址，读不到与本机连接匹配的思考策略，不能正确列出和发送模型档位。
+2. 解决方法：SSH 仅同步当前连接的思考、档位和响应显示策略。远端按连接隔离，复用能力和请求映射，TUI 的档位变更跟随消息队列。实际 Linux 会话验证高、最大、自动及同名模型换连接后的请求字段。
+3. 代码位置：`src/utils/model/{modelCatalog,reasoningPolicy,sshReasoningPolicy}.ts`、`src/ssh/{sshStreamRelay,SSHSessionManager}.ts` 和 `src/hooks/useSSHSession.ts`。旧远端需更新本轮 CLI 源码才能使用传入的策略。
+
+## 2026-11-27 SSH 对话中继与文件通道（2.1.360）
+
+1. 遇到问题：桌面端需要在对话里打开远程工作区。SSH 会话握手前的模型切换可能丢失，切换连接后请求需要使用选中模型的真实 ID。
+2. 解决方法：增加 `--stream` 对话中继和 `--files` 文件通道。模型环境更新与选择共用发送队列，认证代理使用本机选中的端点及凭据。远程路径保留原有空格。SSH 与权限轮转 48 项通过，实测 Linux 远端两个本机模拟端点的鉴权切换、原会话续接和 Shift+Tab Auto 执行 Bash。
+3. 代码位置：`src/ssh/{createSSHSession,sshCommand,sshStreamRelay,sshFileService,SSHSessionManager}.ts`、`src/hooks/useSSHSession.ts` 及关联测试。
+
+## 2026-11-27 SSH 权限模式同步（2.1.360）
+
+1. 遇到问题：SSH REPL 的 Shift+Tab 只改本地渲染状态，Linux headless CLI 继续沿用原工具权限。
+2. 解决方法：模式切换与用户输入共用有序队列，通过现有 set_permission_mode 执行。用 initialize 和模式状态同步远端确认，兼容旧端首轮 init。拒绝后回显原因并恢复实际模式，远端拒绝 Auto 时保留其他模式。 Windows 版连接 Linux CLI 2.1.359 实测普通 Bash 确认、Auto 执行和禁用 Auto 的轮转。裸测 156 文件 1242 项、隔离 152 文件 1134 项通过。
+3. 代码位置：src/ssh/SSHSessionManager.ts、src/hooks/useSSHSession.ts、src/cli/print.ts、src/utils/permissions/getNextPermissionMode.ts 及相应测试。
+
 ## 2026-11-26 SSH 远程会话与协议安全（2.1.359）
 
 1. 遇到问题：`doge ssh` 的会话创建和管理器均为空实现，无法完成远端探测、协议通信、认证或进程回收；三协议转发及初始化前取消也存在缺口。Linux 源码直接 `bun link` 后因入口缺 shebang 和 CRLF 无法执行；OpenSSH 二次拼接使多行脚本丢失配置路径，非交互 PATH 又找不到 Bun。
@@ -125,6 +143,7 @@
 
 | 版本 | 里程碑 |
 |---|---|
+| 2.1.360 | 11-27 SSH 对话中继与文件通道，模型连接、权限和思考策略同步。 |
 | 2.1.359 | SSH 远程会话与协议安全；修复 Linux bun link 入口、OpenSSH 多行脚本传参及非交互 Bun 路径。 |
 | 2.1.340 | 中断的 headless 回合显式上报 |
 | 2.1.343 | Browser Use 路由到指定浏览器并保留 shell 工具 |

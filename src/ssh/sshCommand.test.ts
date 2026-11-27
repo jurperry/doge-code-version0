@@ -3,10 +3,12 @@ import { parse as shellQuoteParse } from 'shell-quote'
 import {
   parseSSHProbeOutput,
   posixQuote,
+  remoteModelEnvironment,
   remoteProbeScript,
   remoteSessionScript,
   sshHostArgs,
   sshRemoteCommand,
+  tunnelCredentialEnvironment,
   validateSSHHost,
 } from './sshCommand.js'
 
@@ -88,5 +90,43 @@ describe('SSH probe parsing', () => {
     expect(parseSSHProbeOutput('host', 'DOGE_SSH_ERROR=cwd_not_found\n', '', 44).reason).toBe('cwd_not_found')
     expect(parseSSHProbeOutput('host', '', 'ssh: connect to host host port 22: Connection refused', 255).reason).toBe('connection_failed')
     expect(parseSSHProbeOutput('host', 'unrecognized', '', 0).reason).toBe('invalid_response')
+  })
+})
+
+describe('SSH remote environment', () => {
+  test('forwards model routing only and never credentials, endpoints or host paths', () => {
+    const env = remoteModelEnvironment({
+      ANTHROPIC_MODEL: 'deepseek-flash',
+      CLAUDE_CODE_COMPATIBLE_API_PROVIDER: 'anthropic',
+      CLAUDE_CODE_EFFORT_LEVEL: 'max',
+      ANTHROPIC_BASE_URL: 'https://api.example.com',
+      ANTHROPIC_AUTH_TOKEN: 'sk-secret',
+      DOGE_API_KEY: 'sk-secret',
+      CLAUDE_CONFIG_DIR: 'C:\\Users\\me\\.doge',
+      CLAUDE_CODE_GIT_BASH_PATH: 'E:\\Git\\bin\\bash.exe',
+      DOGE_APP_PLAYWRIGHT_BRIDGE: 'C:\\bridge.cjs',
+      PATH: 'C:\\Windows',
+    })
+    expect(env).toEqual({
+      ANTHROPIC_MODEL: 'deepseek-flash',
+      CLAUDE_CODE_COMPATIBLE_API_PROVIDER: 'anthropic',
+      CLAUDE_CODE_EFFORT_LEVEL: 'max',
+    })
+    expect(JSON.stringify(env)).not.toContain('sk-secret')
+  })
+
+  test('includeMissing clears stale remote values for unset keys', () => {
+    const env = remoteModelEnvironment({ ANTHROPIC_MODEL: '', CLAUDE_CODE_SUBAGENT_MODEL: 'small' }, true)
+    expect(env.ANTHROPIC_MODEL).toBe('')
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('small')
+    expect(env.CLAUDE_CODE_EFFORT_LEVEL).toBe('')
+    expect(remoteModelEnvironment({ ANTHROPIC_MODEL: '' })).toEqual({})
+  })
+
+  test('tunnel credentials stay a dedicated pair', () => {
+    expect(tunnelCredentialEnvironment('tok')).toEqual({
+      DOGE_SSH_PROXY_TOKEN: 'tok',
+      ANTHROPIC_CUSTOM_HEADERS: 'x-doge-ssh-proxy: tok',
+    })
   })
 })

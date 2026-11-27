@@ -13,7 +13,7 @@
    三问均有着落任务才算收尾；用户明确表示"都不用"可跳过。
 3. **测试目录分工（test=临时，tools=可复用）**：`test/` 只存放临时测试产物（脚本、图片、视频、日志、沙箱、样例文件等），测试结束后全部删除，不在 git 内跟踪；`tools/` 是可复用测试脚本（e2e、repro、probe、mock、验证脚本等）的唯一存放地，受 git 跟踪。任何测试类脚本禁止散落在仓库其他位置——要复用的进 `tools/`，一次性用完即删的进 `test/`。
 4. **C 盘写入纪律**：向 C 盘（或任何系统盘/系统临时目录）写入任何内容必须遵守——测试期间如需写入，测试结束后必须删除本次产生的全部测试数据，不允许留存在 C 盘内。
-5. **提交与风格**：提交信息用简短祈使句（历史风格如 `Support web search for openai and responses API formats`，中英文均有）；坚持最小化、可审计的改动；带 `ANT-ONLY import markers must not be reordered` 注释的 import 禁止重排序。**一个功能分支只允许递增一次版本号，跨会话修复也不得重复递增——一个分支一个版本号是铁律**。`development_logs.md` 新增记录必须使用三段式——`1. 遇到问题：…`、`2. 解决方法：…`、`3. 代码位置：…`，保持简洁，末尾的 `## §2 版本里程碑索引` 表格首行必须补充 `| 2.1.xxx | MM-DD | 精简的描述修订内容 |`，表头固定为 `| 版本 | 日期 | 主题与关键点 |`（历史表为 `| 版本 | 里程碑 |` 时保持原表头），分隔行为 `|---|---|---|`；该索引行不得混入三段式正文。
+5. **提交与风格**：提交信息用简短祈使句（历史风格如 `Support web search for openai and responses API formats`，中英文均有）；坚持最小化、可审计的改动；带 `ANT-ONLY import markers must not be reordered` 注释的 import 禁止重排序。**一个功能分支只允许递增一次版本号——无论该版本是否已编译、打包、装机或交付，跨会话继续开发、修复、重编都沿用该分支已定的版本号，不得再次递增；分支被删除之前不再对该分支做任何版本递增决定，分支删除时它的版本号即为最终版本，下一次递增只能随下一个任务的新分支进行（一个分支一个版本号是铁律）**。`development_logs.md` 新增记录必须使用三段式——`1. 遇到问题：…`、`2. 解决方法：…`、`3. 代码位置：…`，保持简洁，末尾的 `## §2 版本里程碑索引` 表格首行必须补充 `| 2.1.xxx | MM-DD | 精简的描述修订内容 |`，表头固定为 `| 版本 | 日期 | 主题与关键点 |`（历史表为 `| 版本 | 里程碑 |` 时保持原表头），分隔行为 `|---|---|---|`；该索引行不得混入三段式正文。
 6. **收尾必过 code-review 与全量测试回归**：每次完成开发，必须发起子代理对本轮改动做 code-review，并做好全量的功能测试与回归验证（单测 + 相关 e2e + `bun run version` 冒烟），review 与全量功能测试回归通过才算完成。
 7. **代码各司其职**：编码全程遵循高内聚低耦合、代码规范清晰，调试文字要少（能删则删，不留临时 console/debug 输出）。
 
@@ -53,7 +53,7 @@
 ## 四、CLI 使用面
 
 - **关键 flags**（`src/main.tsx`）：`-p/--print`、`--output-format text|json|stream-json`（stream-json 需 `--verbose`）、`--input-format`、`--settings`、`--mcp-config`、`--agents`、`--permission-mode`、`--dangerously-skip-permissions`、`--bare`（跳过 hooks/LSP/插件同步/auto-memory/CLAUDE.md 自动发现，认证仅 `DOGE_API_KEY`/apiKeyHelper）、`-w/--worktree`（配 `--tmux`）、`--agent-teams`、`--model`、`--effort`、`-c/--continue`、`-r/--resume`、`--debug[=<pattern>]`。
-- **子命令**：`mcp`（serve/add/add-json/remove/list/get/add-from-claude-desktop/reset-project-choices）、`auth login/status/logout`、`plugin`（含 `marketplace`）、`agents`、`doctor`、`update`/`install`、`auto-mode`、`im`、`completion`、`setup-token`；`server`/`open`/`remote-control`/`assistant` 在 `feature()` 门后且部分为恢复缺口（DESIGN §2/§10，勿当可用现状）；`ssh` 已实装，源码运行依赖系统 OpenSSH（Windows App 安装版随包提供）与远端预装 doge CLI，支持 `--probe` 诊断与 `--local` 协议测试，隧道令牌只在 initialize 后经控制通道下发、不得写入 argv，暂不支持自动部署；`up`/`rollback`/`task`/`log`/`error`/`export` 为 ANT-ONLY（本树不注册）。
+- **子命令**：`mcp`（serve/add/add-json/remove/list/get/add-from-claude-desktop/reset-project-choices）、`auth login/status/logout`、`plugin`（含 `marketplace`）、`agents`、`doctor`、`update`/`install`、`auto-mode`、`im`、`completion`、`setup-token`；`server`/`open`/`remote-control`/`assistant` 在 `feature()` 门后且部分为恢复缺口（DESIGN §2/§10，勿当可用现状）；`ssh` 已实装，源码运行依赖系统 OpenSSH（Windows App 安装版随包提供）与远端预装 doge CLI：交互形态是本地 REPL 驱动远端（`/model` 与权限模式都会同步到远端）；另有两个供桌面 App 驱动的管道形态——`--stream` 把本机 stdio 中继到远端 headless 会话、`--files` 在一条连接上提供远端文件读取（POSIX sh 循环），两者都在 `init()` 之前运行（管道 stdout 否则会被归为 --print）。支持 `--probe` 诊断与 `--local` 协议测试；隧道令牌只在 initialize 后经控制通道下发、不得写入 argv；发往远端的环境只取 `remoteModelEnvironment` 白名单，密钥/真实端点/本机路径不出本机；暂不支持自动部署；`up`/`rollback`/`task`/`log`/`error`/`export` 为 ANT-ONLY（本树不注册）。
 - **Hooks**：settings.json 可配，事件含 `PreToolUse`/`PostToolUse`/`Setup`/`SubagentStart`/`WorktreeCreate`/`FileChanged` 等（`src/utils/hooks/hooksConfigManager.ts`，样例 `needs/settings.json`）。
 
 ## 五、常用命令与门禁

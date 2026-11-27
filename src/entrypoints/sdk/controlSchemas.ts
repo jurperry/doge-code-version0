@@ -88,6 +88,7 @@ export const SDKControlInitializeResponseSchema = lazySchema(() =>
         .optional()
         .describe('@internal CLI process PID for tmux socket isolation'),
       fast_mode_state: FastModeStateSchema().optional(),
+      permissionMode: PermissionModeSchema().optional(),
     })
     .describe(
       'Response from session initialization with available commands, models, and account info.',

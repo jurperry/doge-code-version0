@@ -576,6 +576,10 @@ type PendingSSH = {
   /** --local: spawn the child CLI directly, skip ssh/probe. e2e test mode. */
   local: boolean;
   probe: boolean;
+  /** --stream: relay the host's stream-json stdio to the remote headless CLI. */
+  stream: boolean;
+  /** --files: serve remote file reads over stdio on one persistent SSH connection. */
+  files: boolean;
   identityFile: string | undefined;
   remoteCliPath: string | undefined;
   port: number | undefined;
@@ -589,11 +593,48 @@ const _pendingSSH: PendingSSH = {
   dangerouslySkipPermissions: false,
   local: false,
   probe: false,
+  stream: false,
+  files: false,
   identityFile: undefined,
   remoteCliPath: undefined,
   port: undefined,
   extraCliArgs: []
 };
+
+/** Probe the remote CLI and open the tunneled SSH session for the pending `ssh` command. */
+async function createPendingSSHSession(): Promise<import('./ssh/createSSHSession.js').SSHSession> {
+  const { createSSHSession, createLocalSSHSession } = await import('./ssh/createSSHSession.js');
+  const options = {
+    cwd: _pendingSSH.cwd,
+    permissionMode: _pendingSSH.permissionMode,
+    dangerouslySkipPermissions: _pendingSSH.dangerouslySkipPermissions,
+    extraCliArgs: _pendingSSH.extraCliArgs
+  };
+  if (_pendingSSH.local) {
+    process.stderr.write('Starting local ssh-proxy test session...\n');
+    return createLocalSSHSession(options);
+  }
+  process.stderr.write(`Connecting to ${_pendingSSH.host}…\n`);
+  // In-place progress: \r + EL0 (erase to end of line). Final \n on
+  // success so the next message lands on a fresh line. No-op when
+  // stderr isn't a TTY (piped/redirected) — \r would just emit noise.
+  const isTTY = process.stderr.isTTY;
+  let hadProgress = false;
+  const session = await createSSHSession({
+    ...options,
+    host: _pendingSSH.host!,
+    identityFile: _pendingSSH.identityFile,
+    remoteCliPath: _pendingSSH.remoteCliPath,
+    port: _pendingSSH.port
+  }, isTTY ? {
+    onProgress: msg => {
+      hadProgress = true;
+      process.stderr.write(`\r  ${msg}\x1b[K`);
+    }
+  } : {});
+  if (hadProgress) process.stderr.write('\n');
+  return session;
+}
 export async function main() {
   profileCheckpoint('main_function_start');
 
@@ -740,6 +781,13 @@ export async function main() {
         _pendingSSH.probe = true;
         rawCliArgs.splice(probeIdx, 1);
       }
+      for (const [flag, key] of [['--stream', 'stream'], ['--files', 'files']] as const) {
+        const index = rawCliArgs.indexOf(flag);
+        if (index !== -1) {
+          _pendingSSH[key] = true;
+          rawCliArgs.splice(index, 1);
+        }
+      }
       const extractSSHOption = (flag: string, apply: (value: string) => void) => {
         const index = rawCliArgs.findIndex(arg => arg === flag || arg.startsWith(`${flag}=`));
         if (index === -1) return;
@@ -844,6 +892,34 @@ export async function main() {
         process.stdout.write(`${JSON.stringify(result)}\n`);
         if (!result.ok) process.exitCode = 1;
         return;
+      }
+      // Headless companions for hosts that drive the remote CLI themselves
+      // (the desktop app). Both run before init(): the process is a pipe, so
+      // the main command would otherwise classify it as --print mode.
+      if (_pendingSSH.files) {
+        const { runSSHFileService } = await import('./ssh/sshFileService.js');
+        process.exitCode = await runSSHFileService({
+          host: _pendingSSH.host,
+          identityFile: _pendingSSH.identityFile,
+          port: _pendingSSH.port
+        }, { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr });
+        return;
+      }
+      if (_pendingSSH.stream) {
+        const { SSHSessionError } = await import('./ssh/createSSHSession.js');
+        const { SSHStreamRelay } = await import('./ssh/sshStreamRelay.js');
+        let relaySession;
+        try {
+          relaySession = await createPendingSSHSession();
+        } catch (error) {
+          process.stderr.write(`${error instanceof SSHSessionError ? error.message : String(error)}\n`);
+          gracefulShutdownSync(1);
+          return;
+        }
+        const code = await new SSHStreamRelay(relaySession, {
+          stdin: process.stdin, stdout: process.stdout, stderr: process.stderr
+        }).start();
+        process.exit(code);
       }
     }
   }
@@ -3335,45 +3411,10 @@ async function run(): Promise<CommanderCommand> {
       // `claude ssh <host> [dir]` — probe the remote doge CLI, then spawn ssh
       // with unix-socket -R forwarding to a local auth proxy. Tools run remotely,
       // the REPL renders locally. `--local` skips SSH for protocol e2e tests.
-      const {
-        createSSHSession,
-        createLocalSSHSession,
-        SSHSessionError
-      } = await import('./ssh/createSSHSession.js');
+      const { SSHSessionError } = await import('./ssh/createSSHSession.js');
       let sshSession;
       try {
-        if (_pendingSSH.local) {
-          process.stderr.write('Starting local ssh-proxy test session...\n');
-          sshSession = createLocalSSHSession({
-            cwd: _pendingSSH.cwd,
-            permissionMode: _pendingSSH.permissionMode,
-            dangerouslySkipPermissions: _pendingSSH.dangerouslySkipPermissions,
-            extraCliArgs: _pendingSSH.extraCliArgs
-          });
-        } else {
-          process.stderr.write(`Connecting to ${_pendingSSH.host}…\n`);
-          // In-place progress: \r + EL0 (erase to end of line). Final \n on
-          // success so the next message lands on a fresh line. No-op when
-          // stderr isn't a TTY (piped/redirected) — \r would just emit noise.
-          const isTTY = process.stderr.isTTY;
-          let hadProgress = false;
-          sshSession = await createSSHSession({
-            host: _pendingSSH.host,
-            cwd: _pendingSSH.cwd,
-            permissionMode: _pendingSSH.permissionMode,
-            dangerouslySkipPermissions: _pendingSSH.dangerouslySkipPermissions,
-            extraCliArgs: _pendingSSH.extraCliArgs,
-            identityFile: _pendingSSH.identityFile,
-            remoteCliPath: _pendingSSH.remoteCliPath,
-            port: _pendingSSH.port
-          }, isTTY ? {
-            onProgress: msg => {
-              hadProgress = true;
-              process.stderr.write(`\r  ${msg}\x1b[K`);
-            }
-          } : {});
-          if (hadProgress) process.stderr.write('\n');
-        }
+        sshSession = await createPendingSSHSession();
         setOriginalCwd(sshSession.remoteCwd);
         setCwdState(sshSession.remoteCwd);
         setDirectConnectServerUrl(_pendingSSH.local ? 'local' : _pendingSSH.host);

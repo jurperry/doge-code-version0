@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { planEffortWire } from './effortGateway.js'
 import { getAppliedEffortValue } from '../effort.js'
 import { catalogModelForRequest } from './modelCatalog.js'
+import { sshReasoningEnvironment } from './sshReasoningPolicy.js'
+import { captureModelEnvironment, runWithModelEnvironment } from './runtimeModelContext.js'
 import {
   getHostReasoningPolicy,
   clearHostReasoningDisables,
@@ -93,6 +95,38 @@ test('reads policy from the model catalog only for matching models', () => {
   writeCatalog([{ model: 'DeepSeek-V4.1-Flash', policy: deepseek }])
   expect(getHostReasoningPolicy('DeepSeek-V4.1-Flash')?.preset).toBe('deepseek')
   expect(getHostReasoningPolicy('GLM-5.3')).toBeUndefined()
+})
+
+test('SSH uses the local connection effort policy for the menu and request fields', () => {
+  const policy = { ...deepseek, extraBody: { api_key: 'local-only' } }
+  writeCatalog([{ model: 'deepseek-flash', policy }])
+  const local = {
+    DOGE_ACTIVE_CONNECTION_ID: 'c1',
+    ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+    CLAUDE_CODE_COMPATIBLE_API_PROVIDER: 'openai',
+    DOGE_API_KEY: 'private-key',
+  }
+  const snapshot = sshReasoningEnvironment(local)
+  expect(JSON.stringify(snapshot)).not.toContain('private-key')
+  expect(JSON.stringify(snapshot)).not.toContain('local-only')
+  expect(JSON.stringify(snapshot)).not.toContain(local.ANTHROPIC_BASE_URL)
+  const tunneled = {
+    ...process.env, ...snapshot,
+    ANTHROPIC_BASE_URL: 'http://127.0.0.1',
+    ANTHROPIC_UNIX_SOCKET: '/tmp/ssh-effort',
+    CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
+    CLAUDE_CODE_COMPATIBLE_API_PROVIDER: 'openai',
+    DOGE_ACTIVE_CONNECTION_ID: 'c1',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-flash',
+  }
+  expect(hostReasoningLevels(getHostReasoningPolicy('sonnet', tunneled)!)).toContain('max')
+  expect(getHostReasoningPolicy('deepseek-flash', { ...tunneled, DOGE_ACTIVE_CONNECTION_ID: 'other' })).toBeUndefined()
+  expect(getHostReasoningPolicy('deepseek-flash', { ...tunneled, ...sshReasoningEnvironment({ ...local, DOGE_ACTIVE_CONNECTION_ID: 'other' }) })).toBeUndefined()
+  runWithModelEnvironment(captureModelEnvironment(tunneled), () => {
+    expect(planEffortWire({ model: 'deepseek-flash', requested: 'max' })).toMatchObject({
+      gateway: 'catalog', applied: 'max', extraBody: { reasoning_effort: 'max' },
+    })
+  })
 })
 
 test('reads a role model policy from the same catalog connection', () => {
