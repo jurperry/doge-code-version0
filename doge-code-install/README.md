@@ -1,7 +1,7 @@
 # Doge Code 最小可安装源码（doge-code-install）
 
 <!-- sync:start -->
-> **当前版本** `2.1.361` · 源码等同 `doge-code` 提交 `78aaabb`（2026-11-27）· 2615 个文件
+> **当前版本** `2.1.361` · 源码等同 `doge-code` 提交 `78aaabba59e2`（2026-11-27）· 2615 个文件
 > 本目录由 `bun tools/sync-install-source.ts` 按清单生成；除本文件的说明正文外请勿手改。
 <!-- sync:end -->
 
@@ -53,7 +53,7 @@ doge-code-install/
 | Bun | `>=1.3.5`；本快照用 Windows Bun 1.3.11 验证 |
 | Node.js | `>=24`，仅内置 Playwright MCP 以 Node 子进程运行需要 |
 | OpenSSH | 源码方式使用 SSH 时需系统 `ssh` 在 `PATH` 中；桌面 App 的随包 OpenSSH 不属于本源码包 |
-| 本地平台 | Windows 10/11 为主目标；Linux、macOS 可运行，Computer Use 能力依平台而异 |
+| 本地平台 | Windows 10/11 为主目标；Linux 可运行；macOS 未实测。Computer Use 能力依平台而异 |
 | 远端平台 | SSH 远端需提供 POSIX `sh`、Bun，并已安装可执行的 Doge Code CLI |
 
 ## 安装

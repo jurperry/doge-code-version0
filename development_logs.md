@@ -3,7 +3,7 @@
 ## 2026-11-27 安装源码分发收进仓库与分支结束同步（2.1.361，不递增版本）
 
 1. 遇到问题：最小可安装源码分发一直游离在仓库之外（手工裁剪，无脚本、无记录），停在 2.1.360 且 README 写的基线提交与内容对不上；技能资源 `shadcn-components.tar.gz` 被源码直接 import，却被根 `.gitignore` 的 `*.tar.gz` 挡在库外。
-2. 解决方法：分发目录收进仓库成为 `doge-code-install/`，由 `tools/sync-install-source.ts` 按清单从已提交的源码逐字节生成——清单是唯一事实源，`README.md` 只留一段生成的版本/基线块。清单内有未提交改动时拒绝同步；分发文件被 `.gitignore` 挡住时报错（`git check-ignore -v` 对只命中否定规则的路径也返回 0，须按命中的规则是否以 `!` 开头解析）；`--check` 判过期；`--verify` 把目录拷到仓库外 `bun install --frozen-lockfile` 并 `bun run version`（放在仓库内会被主仓的 `node_modules` 掩盖缺失依赖）；镜像目录自带 `* -whitespace`，免得源码里的空白问题在提交门禁里重复报。根 `.gitignore` 放行技能资源压缩包并把它入库。AGENTS 第一节新增第 8 条：分支提交后、合并前必须同步并提交。实测 Windows 上仓库外独立副本可安装并运行 `2.1.361 (Claude Code)`；Linux/macOS 本版未重新实测。
+2. 解决方法：分发目录收进仓库成为 `doge-code-install/`，由 `tools/sync-install-source.ts` 按清单从已提交的源码逐字节生成——清单是唯一事实源，`README.md` 只留一段生成的版本/基线块。清单内有未提交改动时拒绝同步；分发文件被 `.gitignore` 挡住时报错（`git check-ignore -v` 对只命中否定规则的路径也返回 0，须按命中的规则是否以 `!` 开头解析）；`--check` 判过期；`--verify` 把目录拷到仓库外 `bun install --frozen-lockfile` 并 `bun run version`（放在仓库内会被主仓的 `node_modules` 掩盖缺失依赖）；镜像目录自带 `* -whitespace`，免得源码里的空白问题在提交门禁里重复报。根 `.gitignore` 放行技能资源压缩包并把它入库。AGENTS 第一节新增第 8 条：源码提交后必须同步、结果单独提交一笔、合并后在 main 上 `--check`。评审修正：改写函数先按 LF 归一再还原换行（新克隆若 `core.autocrlf=true`，否则 `--check` 永久失败）；验证用的临时目录开跑前清扫早先的残留、删除带重试并在中断时也清理；只改测试不再让基线漂移或触发拒绝；清单内被 `.gitignore` 忽略的文件直接报错；镜像目录里被忽略的垃圾文件不算「多出」；`.ignore` 让搜索工具跳过镜像。实测 Windows 上仓库外独立副本可安装并运行 `2.1.361 (Claude Code)`；Linux/macOS 本版未重新实测。
 3. 代码位置：`tools/sync-install-source.ts`、`doge-code-install/`、`.gitignore`、`AGENTS.md`。
 
 ## 2026-11-27 SSH 文件通道的项目管理（2.1.361）

@@ -1,0 +1,3 @@
+# doge-code-install/ 是 tools/sync-install-source.ts 生成的源码镜像：
+# 不进搜索（同一处代码会有两份命中），在其中所做的修改会在下次同步时丢失
+doge-code-install/
